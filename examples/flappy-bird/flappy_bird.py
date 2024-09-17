@@ -528,13 +528,13 @@ def evaluate(population: neat.Population, **options):
             ts = clock.perf_counter()
             actions, probs = MODEL.get_action(observations) # genome_mask=~game.birds.dead) # shape(seq_len=1, genomes, features_out)
             if run_step == 0 and population.generation == INIT_GEN:
-                print(f"actions =>\n{actions}\n\tshape = {actions.shape}")
+                print(f"actions =>\n{actions.transpose(-1, -2)}\n\tshape = {actions.shape}")
             calc_time = clock.perf_counter() - ts
             game.update(actions)
             game.draw()
             rewards = game.birds.score.unsqueeze(-1)
             if run_step == 0 and population.generation == INIT_GEN:
-                print(f"rewards =>\n{rewards}\n\tshape = {rewards.shape}")
+                print(f"rewards =>\n{rewards.transpose(-1, -2)}\n\tshape = {rewards.shape}")
             # print(f"\rO = {outputs.flatten().cpu().numpy()} SCORE: = {game.birds.score.cpu().numpy()}", end='')
 
             trainer.update(observations, actions, probs, rewards, game.birds.active() == 0 or game.score >= limit)
@@ -565,7 +565,7 @@ def run():
     config.reproduction.survival_threshold  = 0.05
     # Create the population, which is the top-level object for a NEAT run.
     print(f"creating population")
-    population = neat.Population(GENOMES, MODEL, config, init_reporter=True)
+    population = neat.Population(GENOMES, MODEL, config, init_reporter=2)
     for p in population.modules:
         print(p)
 

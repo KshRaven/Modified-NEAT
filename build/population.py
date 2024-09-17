@@ -61,7 +61,7 @@ class Population(object):
 
         if save_dict is None:
             # Create a population from scratch, then partition into species.
-            self.genomes = self.reproduction.create_new(self.pop_size, self.modules)
+            self.genomes = self.reproduction.create_new(self.pop_size, self.modules, init_rep)
             self.generation = 0
             self.species = SpeciesSet(self.config, self.reporters)
             self.species.speciate(self.genomes, self.generation, True)

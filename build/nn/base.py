@@ -50,7 +50,7 @@ class NeatModule(nn.Module):
         ts = clock.perf_counter()
         self.networks = self._create_networks(genomes, self.module_index, self.features_in, self.features_out)
         if verbose and verbose >= 2:
-            print(f"for a {self.features_in} input and {self.features_out} output module")
+            print(f"\nfor a {self.features_in} input and {self.features_out} output module")
             print(f"created neat-module-{self.module_index} networks in {(clock.perf_counter()-ts):.2f}s")
         self.update(verbose)
         self.eval()
@@ -70,8 +70,8 @@ class NeatModule(nn.Module):
     def update(self, verbose: int = None):
         ts = clock.perf_counter()
         build = self._get_build(self.networks)
-        if verbose:
-            print(f"got neat-module-{self.module_index} build in {(clock.perf_counter()-ts):.2f}s")
+        if verbose and verbose >= 2:
+            print(f"got neat-module-{self.module_index} build in {(clock.perf_counter()-ts):.2f}s", end=', ')
         # Set weights and biases
         self.weights = nn.ParameterList([
             nn.Parameter(torch.ones((self.genomes_num, i, o), device=self.device, dtype=self.dtype))
@@ -109,7 +109,7 @@ class NeatModule(nn.Module):
             ts = clock.perf_counter()
             w, b = self._get_values(self.networks, [w.cpu().numpy() for w in self.weights],
                                     [b.cpu().numpy() for b in self.biases] if self.enable_bias else None)
-            if verbose:
+            if verbose and verbose >= 2:
                 print(f"got neat-module-{self.module_index} values in {(clock.perf_counter()-ts):.2f}s")
             for weight, source in zip(self.weights, w):
                 weight[:] = torch.tensor(source)

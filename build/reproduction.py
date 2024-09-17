@@ -48,7 +48,7 @@ class Reproduction:
         self.ancestors: dict[int, tuple[Genome, Genome]] = Dict.empty(INT, GENOME_TUPLE)
         self.types = ReproductionMethods()
 
-    def create_new(self, pop_size: int, build: list[NeatModule]) -> dict[int, Genome]:
+    def create_new(self, pop_size: int, build: list[NeatModule], verbose: int = None) -> dict[int, Genome]:
         # Create keys
         genome_ids = {self.genome_indexer + idx: idx for idx in range(pop_size)}
         self.genome_indexer += pop_size
@@ -58,7 +58,7 @@ class Reproduction:
             genome = Genome(gid)
             genomes[gid] = genome
         # Bind networks to genomes
-        bind_modules(build, List(genomes.values()))
+        bind_modules(build, List(genomes.values()), verbose)
         # Initialize each network
         for genome in genomes.values():
             initialize_genome(genome, self._config)
