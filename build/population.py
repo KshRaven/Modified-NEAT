@@ -68,6 +68,7 @@ class Population(object):
         self.best_genome: Genome = None
         self.loop_idx: int = 0
         self._skipped = False
+        self.ranking: dict[int, Genome] = {}
 
     @property
     def pop_size(self):
@@ -177,7 +178,6 @@ class Population(object):
             generations = 1
 
         gen = 0
-        ranking = None
         try:
             while generations is None or gen < generations:
                 if not self._skipped:
@@ -188,9 +188,9 @@ class Population(object):
                     print(f"executing fitness function {fitness_function} on population, skip-enabled={skip}")
                     fitness_function(self, **options)
 
-                    ranking = {}
+                    self.ranking = {}
                     for genome in self.genomes.values():
-                        ranking[genome.key] = genome
+                        self.ranking[genome.key] = genome
 
                 if skip:
                     if not self._skipped:
@@ -234,7 +234,7 @@ class Population(object):
         except KeyboardInterrupt:
             pass
 
-        return self.best_genome, ranking
+        return self.best_genome, self.ranking
 
     def save_dict(self, name: str = None, directory: str = None, file_no: int = None, replace=False):
         # Genomes
