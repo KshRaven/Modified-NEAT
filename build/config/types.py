@@ -2,6 +2,8 @@
 from build.config.base import Configuration
 from build.util.storage import STORAGE_DIR
 
+import os
+
 
 class GeneralConfig(Configuration):
     def __init__(self):
@@ -63,7 +65,7 @@ class StagnationConfig(Configuration):
 
         self.species_fitness_func = 'max'
         self.max_stagnation       = 5
-        self.species_elitism      = 1
+        self.species_elitism      = 2
 
 
 class ReproductionConfig(Configuration):
@@ -75,6 +77,7 @@ class ReproductionConfig(Configuration):
         self.survival_threshold = 0.20
         self.darwin_multiplier  = 1
         self.min_species_size   = 20
+        self.purge              = 0
 
 
 class Config:
@@ -92,6 +95,9 @@ class Config:
         self.reproduction = ReproductionConfig()
 
     def save(self, debug=True):
+        # create = not os.path.exists(self.path)
+        # if create:
+        #     os.makedirs(self.path, exist_ok=True)
         self.general.create(self.path, debug=debug)
         self.genome.create(self.path, debug=debug)
         self.species.create(self.path, debug=debug)

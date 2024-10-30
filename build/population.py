@@ -49,6 +49,7 @@ class Population(object):
             self.add_reporter(StdOutReporter(True))
         self.reproduction = Reproduction(self.reporters, self.config)
         self.to_delete: list[int] = List.empty_list(INT)
+        self.survival_rate: float = None
         self.buffers      = RollbackBuffer()
         if config.general.fitness_criterion == 'max':
             self.fitness_criterion = np.max
@@ -123,7 +124,7 @@ class Population(object):
 
             return best_genome
         # Track the best genome ever seen.
-        self.best_genome = get_best_genomes(List(self.genomes.values()), self.config.general.fitness_criterion, self.best_genome)
+        self.best_genome = get_best_genomes(List(self.genomes.values()), self.config.general.fitness_criterion, None)
         self.reporters.post_evaluate(self.config, self.genomes, self.species, self.best_genome)
 
         # End if the fitness threshold is reached.
@@ -210,6 +211,7 @@ class Population(object):
                         reproduction_function = self.reproduction.types.value_crossover
                     self.reproduction.reproduce(self.species, self.genomes, self.modules, self.generation,
                                                 self.to_delete, reproduction_function, verbose)
+                    self.survival_rate = 1 - (len(self.to_delete) / len(self.genomes))
                     self.to_delete = List.empty_list(INT)
                     # Mutate all genomes using the user-provided function.
                     if mutation_function is not None:

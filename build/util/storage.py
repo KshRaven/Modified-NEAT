@@ -14,8 +14,9 @@ import warnings
 PRINT_COLOUR = Fore.GREEN
 CURRENT_DIR = os.path.abspath(__file__)
 PROJECT_DIR = CURRENT_DIR
-while not PROJECT_DIR.endswith("Modified-NEAT"):
+while not PROJECT_DIR.endswith("build"):
     PROJECT_DIR = os.path.dirname(PROJECT_DIR)
+PROJECT_DIR = os.path.dirname(PROJECT_DIR)
 STORAGE_DIR = PROJECT_DIR + "\\storage\\"
 
 

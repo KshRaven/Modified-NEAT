@@ -93,7 +93,7 @@ class Algorithm(object):
         return torch.cat(rtg).to(rewards.device, rewards.dtype)
 
     def _get_accuracy(self, batches: list[list[int]], observations: Tensor, actions: Tensor, rewards: Tensor,
-                      best_idx: int, error=0.10, type='binary', verbose: int = None):
+                      best_idx: int, error=0.10, type='continuous', verbose: int = None):
         with torch.no_grad():
             action_sum, reward_sum = [], []
             ts, ud, ut = clock.perf_counter(), 0, len(batches)
@@ -101,28 +101,31 @@ class Algorithm(object):
                 action_pred: Tensor = self.model.get_policy(observations[batch])
                 reward_pred: Tensor = self.model.get_value(observations[batch])
 
+                target = actions[batch]
                 if type == 'continuous':
-                    raise NotImplementedError(f"Can't calculate accuracy for continuous values")
+                    action_res = ((action_pred <= target * (1+error)) & (action_pred >= target * (1-error))).float().cpu()
                 elif type == 'binary':
-                    action_pred = (action_pred >= (1 - error)).float()
+                    action_res = ((action_pred >= (1 - error)).float() == target).float().cpu()
                 elif type == 'discrete':
-                    pass
+                    action_res = (action_pred == target).float().cpu()
                 else:
                     raise ValueError(f"Unsupported accuracy type '{type}'")
-                action_sum.append(
-                    action_pred == actions[batch]
-                )
+                action_sum.append(action_res)
                 reward_sum.append(
-                    (reward_pred <= rewards[batch] * (1+error)) & (reward_pred >= rewards[batch] * (1-error))
+                    ((reward_pred <= rewards[batch] * (1+error)) & (reward_pred >= rewards[batch] * (1-error))).float().cpu()
                 )
 
                 if verbose:
                     ud += 1
                     eta(ts, ud, ut, 'getting accuracy')
-            a = torch.cat(action_sum)[..., best_idx, :]
-            r = torch.cat(action_sum)[..., best_idx, :]
-            actions_acc: float = (a.sum() / a.numel()).item() * 100
-            rewards_acc: float = (r.sum() / r.numel()).item() * 100
+            r = torch.cat(reward_sum)
+            a = torch.cat(action_sum)
+            for _ in range(r.ndim-a.ndim):
+                a = a.unsqueeze(-1)
+            r = r[..., best_idx, :]
+            a = a[..., best_idx, :]
+            actions_acc: float = a.mean().item() * 100
+            rewards_acc: float = r.mean().item() * 100
             if verbose:
                 print(f"\r", end='')
             return actions_acc, rewards_acc
@@ -143,3 +146,14 @@ class Algorithm(object):
             raise ValueError(f"unsupported dtype")
         return res
 
+    @staticmethod
+    def level(tensor):
+        if isinstance(tensor, Tensor):
+            excess = torch.min(torch.clamp(tensor, None, 0))
+            res = tensor - excess
+        elif isinstance(tensor, ndarray):
+            excess = np.min(np.clip(tensor, None, 0))
+            res = tensor - excess
+        else:
+            raise ValueError(f"unsupported dtype")
+        return res

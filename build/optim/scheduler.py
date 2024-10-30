@@ -22,11 +22,13 @@ class Scheduler(object):
 
 
 class CosineAnnealing(Scheduler):
-    def __init__(self, config: Config, steps: int, period: int, reduction: float = None, warm=False):
+    def __init__(self, config: Config, steps: int, period: int, reduction: float = None, warm=False, log=False):
         super(CosineAnnealing, self).__init__(config)
         assert period >= 1
         if reduction is None:
             reduction = 0.1 if period < 100 else 0.01
+        if reduction > 1.0:
+            raise ValueError(f"Cosine scheduling reduction value cannot be greater than 1")
 
         self.config_ = deepcopy(self.config)
         self._steps = steps
@@ -34,12 +36,23 @@ class CosineAnnealing(Scheduler):
         self._reduction = reduction
         self._theta = np.linspace(0, (2 if not warm else 1) * np.pi, period)
         self._step_idx = 0
+        self._log_scale = log
 
     def modifier(self, value: float):
-        a = (value - value * self._reduction) / 2
-        b = (value + value * self._reduction) / 2
+        if self._log_scale:
+            if value == 0:
+                raise ValueError(f"0 value encountered during Cosine Log scheduling")
+        max = value
+        min = value * self._reduction
+        if self._log_scale:
+            max, min = np.log10(max), np.log10(min)
+        a = (max - min) / 2
+        b = (max + min) / 2
         theta = self._theta[self._step_idx % self._period]
-        return a * np.cos(theta) + b
+        new_value = a * np.cos(theta) + b
+        if self._log_scale:
+            new_value = 10 ** new_value
+        return new_value
 
     def modify(self, *params):
         if self._step_idx == self._steps:

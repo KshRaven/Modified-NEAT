@@ -26,7 +26,7 @@ DTYPE = torch.float32
 
 # Define window
 WIN_HEIGHT = 800
-WIN_WIDTH  = 600
+WIN_WIDTH  = 550
 WIN = pygame.display.set_mode((WIN_WIDTH, WIN_HEIGHT))
 pygame.display.set_caption("Flappy Bird")
 
@@ -319,6 +319,9 @@ class Birds(object):
                 self.score[passed] += 50
                 pipe.passed = True
                 add_pipe = True
+            elif pipe.passed:
+                pass
+
         return add_pipe
 
     def get_state(self, pipe: Pipe):
@@ -427,27 +430,43 @@ class Game(object):
 
 
 class RModel(Model):
-    def __init__(self, inputs, outputs, dim_size, device, dtype):
+    def __init__(self, inputs, outputs, dim_size, bias, device, dtype):
         super().__init__()
-        self.act_proj   = Linear(inputs, dim_size, True, device, dtype, nn.Tanh())
-        self.mean       = Linear(dim_size, outputs, True, device, dtype, nn.Sigmoid())
-        self.log_std    = Linear(dim_size, outputs, True, device, dtype, nn.Tanh())
-        self.rew_proj   = Linear(inputs, dim_size, True, device, dtype, nn.Tanh())
-        self.decode     = Linear(dim_size, 1, True, device, dtype, None)
+        self.distribution = 'mult_var_normal'
+        self.act_proj   = Linear(inputs, dim_size, bias, device, dtype, nn.SiLU())
+        if self.distribution == 'discrete':
+            outputs = 2 ** outputs
+        self.mean       = Linear(dim_size, outputs, bias, device, dtype, nn.Sigmoid())
+        self.log_std    = Linear(dim_size, outputs, bias, device, dtype, nn.Sigmoid())
+        self.rew_proj   = Linear(inputs, dim_size, bias, device, dtype, nn.SiLU())
+        self.decode     = Linear(dim_size, 1, bias, device, dtype, None)
 
     def forward(self, state: Tensor):
         return self.get_policy(state)
+
+    def dist(self, m: Tensor, s: Tensor):
+        if self.distribution == 'discrete':
+            m = m.unsqueeze(-2)
+            distribution = torch.distributions.Categorical(torch.softmax(m, -1))
+        elif self.distribution == 'normal':
+            distribution = torch.distributions.Normal(m, s)
+        elif self.distribution == 'mult_var_normal':
+            cov = torch.diag_embed(s**2)
+            distribution = torch.distributions.MultivariateNormal(m, cov)
+        else:
+            raise NotImplementedError(f"Unsupported distribution")
+        return distribution
 
     def get_mean(self, latent: Tensor) -> Tensor:
         return self.mean(latent)
 
     def get_std(self, latent: Tensor) -> Tensor:
-        return torch.exp(self.log_std(latent) * 2)
+        return torch.exp(-6 + self.log_std(latent) * 4.3)
 
     def get_action(self, state: Tensor) -> tuple[Tensor, Tensor]:
         latent = self.act_proj(state)
         mean, std = self.get_mean(latent), self.get_std(latent)
-        dist = torch.distributions.Normal(mean, std)
+        dist = self.dist(mean, std)
         action = dist.sample()
         log_prob = dist.log_prob(action)
         return action, log_prob
@@ -455,7 +474,7 @@ class RModel(Model):
     def evaluate_action(self, state: Tensor, action: Tensor) -> [Tensor, Union[Tensor, None]]:
         latent = self.act_proj(state)
         mean, std = self.get_mean(latent), self.get_std(latent)
-        dist = torch.distributions.Normal(mean, std)
+        dist = self.dist(mean, std)
         log_prob = dist.log_prob(action)
         entropy = dist.entropy()
         return log_prob, entropy
@@ -463,7 +482,7 @@ class RModel(Model):
     def get_policy(self, state: Tensor, **options) -> Tensor:
         latent = self.act_proj(state)
         mean, std = self.get_mean(latent), self.get_std(latent)
-        dist = torch.distributions.Normal(mean, std)
+        dist = self.dist(mean, std)
         action = dist.sample()
         return action
 
@@ -476,14 +495,14 @@ class RModel(Model):
 # Network
 INPUTS      = 3
 OUTPUTS     = 1
-GENOMES     = 1000
+GENOMES     = 100
 EMBED_SIZE  = 64
 SEQ_LEN     = 32
 LAYERS      = 1
 ENABLE_BIAS = True
 # MODEL = build.models.MiniFormer(INPUTS, OUTPUTS, EMBED_SIZE, SEQ_LEN, LAYERS, 1, 1, 0.1, ENABLE_BIAS, DEVICE, DTYPE,
 #                                distribution='normal', pri_actv=build.nn.activations.Tanh(), sec_actv=nn.Sigmoid())
-MODEL = RModel(INPUTS, OUTPUTS, EMBED_SIZE, DEVICE, DTYPE)
+MODEL = RModel(INPUTS, OUTPUTS, EMBED_SIZE, ENABLE_BIAS, DEVICE, DTYPE)
 INIT_GEN: int = None
 
 
@@ -505,7 +524,7 @@ def evaluate(population: neat.Population, **options):
 
     game = Game(population.pop_size, DEVICE, DTYPE)
 
-    limit = 10
+    limit = 30
     exe = True
     gts = clock.perf_counter()
     run_step = 0
@@ -527,6 +546,7 @@ def evaluate(population: neat.Population, **options):
             #     print(f"extended inputs =>\n{inputs}\n\tshape = {inputs.shape}")
             ts = clock.perf_counter()
             actions, probs = MODEL.get_action(observations) # genome_mask=~game.birds.dead) # shape(seq_len=1, genomes, features_out)
+            actions = (actions >= 0.95).float()
             if run_step == 0 and population.generation == INIT_GEN:
                 print(f"actions =>\n{actions.transpose(-1, -2)}\n\tshape = {actions.shape}")
             calc_time = clock.perf_counter() - ts
@@ -551,30 +571,51 @@ def evaluate(population: neat.Population, **options):
 
         run_step += 1
 
+    u_lim, l_lim = game.window.height * 0.95, (game.window.height - game.window.floor) * 1.05
+    print(f"u lim = {u_lim}, l lim = {l_lim}")
     for idx, (score, genome) in enumerate(zip(game.birds.get_reward(), population.genomes.values())):
         genome.fitness = score.item()
+        y_position = game.birds.y[idx]
+        died_beyond_limits = y_position > u_lim or y_position < l_lim
+        if died_beyond_limits:
+            population.to_delete.append(genome.key)
+
+    population.save_dict('flappy_bird', replace=population.generation != INIT_GEN)
 
 
 def run():
     # Configuration
     print(f"creating config")
-    config = neat.Config('flappy_bird', os.path.join(os.path.dirname(__file__), 'configs'))
+    config = neat.Config()
     config.general.fitness_threshold        = 1e8
-    config.reproduction.elitism             = 100
-    config.reproduction.min_species_size    = 200
+    config.reproduction.elitism             = 50
+    config.reproduction.min_species_size    = 100
     config.reproduction.survival_threshold  = 0.05
+    config.reproduction.purge               = 3
+    config.species.compatibility_threshold  = 'auto'
+    config.stagnation.max_stagnation        = 4
+    config.stagnation.species_elitism       = 3
+    config.genome.weight_mutate_power       = 0.7
+    config.genome.bias_mutate_power         = 0.5
+    config.save(True)
+    config.load(2)
+
     # Create the population, which is the top-level object for a NEAT run.
     print(f"creating population")
-    population = neat.Population(GENOMES, MODEL, config, init_reporter=2)
+    population = neat.Population(GENOMES, MODEL, config, init_reporter=True)
+    population.load_dict(name='flappy_bird')
     for p in population.modules:
         print(p)
 
-    trainer = neat.rl.PPO(MODEL, population, DEVICE, DTYPE, gamma=0.50,
-                          scheduler=neat.scheduler.CosineAnnealing(config, 101, 20, 0.01, True))
+    trainer = neat.rl.PPO(MODEL, population, DEVICE, DTYPE, gamma=0.95,
+                          scheduler=neat.scheduler.CosineAnnealing(config, 101, 10, 0.001, True, True),
+                          loss_reg=1.00, pol_reg=0.5, val_reg=0.8, ent_reg=0.6,
+                          norm_rew=False, norm_adv=False,
+                          )
 
     # Run for up to 50 generations.
     print(f"starting evaluation")
-    trainer.learn(evaluate, 100, 1, 64, 0.5, 1, True)
+    trainer.learn(evaluate, 50, 1, 64, 0.90, 'binary', 1, True)
 
     # for p in population.get(winner):
     #     print(p)

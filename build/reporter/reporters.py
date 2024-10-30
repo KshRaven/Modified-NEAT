@@ -23,7 +23,7 @@ class StdOutReporter(BaseReporter):
 
     def start_generation(self, generation: int):
         self.generation = generation
-        print(f"\n ****** {CM(f'Running generation {generation}', Fore.LIGHTYELLOW_EX)} ****** \n")
+        print(f"\n ****** {CM(f'Running generation {generation+1}', Fore.LIGHTYELLOW_EX)} ****** \n")
         self.generation_start_time = clock.time()
 
     def end_generation(self, config: Config, population: dict[int, Genome], species_set):

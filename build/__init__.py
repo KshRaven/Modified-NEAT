@@ -15,7 +15,6 @@ from build.species import Species, SpeciesSet
 from build.reproduction import Reproduction
 from build.reporter import *
 from build.config import Config
-from build.nn import functional
 
 import build.nn as nn
 import build.models as models

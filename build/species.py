@@ -7,6 +7,7 @@ from build.util.fancy_text import CM, Fore
 from numba import types, njit, optional, prange
 from numba.experimental import jitclass
 from numba.typed import List, Dict
+from typing import Union
 
 import numpy as np
 import time as clock
@@ -85,6 +86,7 @@ class SpeciesSet:
         self.species: dict[int, Species] = Dict.empty(INT, SPECIES)
         self.genome_to_species: dict[int, int] = Dict.empty(INT, INT)
         self.species_indexer = 1
+        self.last_ct: int = None
 
     @staticmethod
     @njit(nogil=True)
@@ -203,7 +205,7 @@ class SpeciesSet:
         """
         assert isinstance(population, (Dict, dict))
 
-        compatibility_threshold = self.config.species.compatibility_threshold
+        compatibility_threshold = get_ct(self.config.species.compatibility_threshold, self.last_ct, population)
         cwc = self.config.genome.compatibility_weight_coefficient
         cdc = self.config.genome.compatibility_disjoint_coefficient
 
@@ -241,6 +243,7 @@ class SpeciesSet:
         distances = distances_cache.list()
         gdmean = np.mean(distances)
         gdstdev = np.std(distances)
+        self.last_ct = (gdmean, gdstdev)
         self.reporters.info(f"Mean genetic distance {CM(f'{gdmean:.3f}', Fore.LIGHTYELLOW_EX)}, "
                             f"standard deviation {CM(f'{gdstdev:.3f}', Fore.LIGHTYELLOW_EX)}")
 
@@ -265,3 +268,20 @@ def load_species(genomes: dict[int, Genome], struct: Dict):
     for i in struct['fitness_history']:
         specie.fitness_history.append(i)
     return specie
+
+
+def get_ct(ct: Union[int, float, str, None], last_ct_info: Union[tuple[int, int], None], population: dict[int, Genome]):
+    if isinstance(ct, (int, float)):
+        return ct
+    elif isinstance(ct, str):
+        genomes = list(population.values())
+        if ct == 'auto':
+            if last_ct_info is None:
+                network_num = len(genomes[0].networks) * 1.4
+                ct = network_num
+            else:
+                ct_mean, ct_std = last_ct_info
+                ct = ct_mean + ct_std * 1.0
+        return ct
+    else:
+        raise ValueError(f"Unsupported compatibility threshold dtype '{type(ct)}'")

@@ -31,7 +31,7 @@ if __name__ == "__main__":
 
     def run(population: Population):
         test_output = MODEL(test_input, debug=False)
-        test_output2 = torch.argmax(MODEL.infer(test_input, pos_idx=-1, debug=False), -1)[:, :3]
+        test_output2 = torch.argmax(MODEL.infer(test_input, pos_idx=-1, verbose=False), -1)[:, :3]
         print(torch.argmax(test_output, -1)[-3:, :5], test_output.shape)
         print(torch.argmax(test_output[:, -3:], -1)[:, :3])
         print(test_output2, test_output2.shape)

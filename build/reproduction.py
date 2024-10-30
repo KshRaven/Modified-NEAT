@@ -9,9 +9,11 @@ from build.stagnation import Stagnation
 from build.util.datetime import eta, clock
 from build.util.conversion import float_to_str
 
-from numba import types, typeof, njit, optional, prange
+from numba import types, typeof, njit, optional, prange, cuda
+from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 from numba.experimental import jitclass
 from numba.typed import List, Dict
+from numpy import ndarray as CPUArray
 
 from itertools import count
 
@@ -66,7 +68,8 @@ class Reproduction:
 
     @staticmethod
     @njit(nogil=True)
-    def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_size: int, min_species_size: int):
+    def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_size: int, min_species_size: int,
+                      purge: int, generation: int):
         """Compute the proper number of offspring per species (proportional to fitness)."""
         af_sum = sum(adjusted_fitness)
 
@@ -94,6 +97,11 @@ class Reproduction:
         total_spawn = sum(spawn_amounts)
         norm = pop_size / total_spawn
         spawn_amounts = [max(min_species_size, int(round(n * norm))) for n in spawn_amounts]
+
+        # Limit to min_species_size when enabled
+        if purge > 0:
+            if generation % purge == 0:
+                spawn_amounts = [min_species_size for _ in spawn_amounts]
 
         return spawn_amounts
 
@@ -232,7 +240,8 @@ class Reproduction:
         min_species_size = max(min_species_size, self._config.reproduction.elitism)
         # TODO: add pop size to arguments or just get from current population?
         pop_size = len(population)
-        spawn_amounts = self.compute_spawn(adjusted_fitnesses, previous_sizes, pop_size, min_species_size)
+        spawn_amounts = self.compute_spawn(adjusted_fitnesses, previous_sizes, pop_size, min_species_size,
+                                           self._config.reproduction.purge, generation)
 
         structure_ = (
             self._config.genome.single_structural_mutation,
@@ -274,3 +283,26 @@ class Reproduction:
 
         if verbose and verbose >= 2:
             print(f"Population sample: {[g.key for g in population.values()][:20]}")
+
+
+Weights = GPUArray
+Bias    = GPUArray
+Layer   = tuple[Weights, Bias]
+Network = tuple[tuple[Layer, ...], bool]
+
+
+@cuda.jit()
+def spawn_gpu(children, parents, limits: tuple[int, int, int]):
+    genome_idx, network_idx, layer_idx = cuda.grid(3)
+    genome_lim = len(children)
+    if genome_idx < genome_lim:
+        networks: tuple[Network, ...] = children[genome_idx]
+        network_lim = len(networks)
+        if network_idx < network_lim:
+            network: Network = networks[network_idx]
+            layers, bias_enabled = network
+            layer_lim = len(layers)
+            if layer_idx < layer_lim:
+                weights, biases = layers[layer_idx]
+
+

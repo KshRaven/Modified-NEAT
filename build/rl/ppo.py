@@ -54,17 +54,18 @@ class PPO(Algorithm):
         self.clip_range: float            = manage_params(options, 'clip_range', 0.3)
         self.pol_reg: float               = manage_params(options, 'pol_reg', 1.0)
         self.val_reg: float               = manage_params(options, 'val_reg', 0.5)
-        self.ent_reg: float               = manage_params(options, 'ent_reg', 1e-6)
-        self.loss_reg: float              = manage_params(options, 'loss_reg', 0.5)
+        self.ent_reg: float               = manage_params(options, 'ent_reg', 1e-3)
+        self.loss_reg: float              = manage_params(options, 'loss_reg', 1e-3)
         self.target_kl: [float, None]     = manage_params(options, 'target_kl', None)
         self.scheduler: [Scheduler, None] = manage_params(options, 'scheduler', None)
 
         # Tensorboard logging
         self.log_dir: str = manage_params(
-            options, 'log_directory', STORAGE_DIR+f"neat_rl_logs\\{self.__class__.__name__}\\")
+            options, 'log_directory', STORAGE_DIR+f"neat_rl_logs/{self.__class__.__name__}/")
+        self.log_sub_dir: str = manage_params(options, 'log_sub_dir', "")
         self.log_name: str = manage_params(
             options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
-        self.writer         = SummaryWriter(self.log_dir+self.log_name)
+        self.writer = SummaryWriter(self.log_dir+self.log_sub_dir+self.log_name)
         self.logging.add_buffers(
             'kl_divergence', 'clip_fraction', 'clip_range', 'explained_variance',
             'weight_mutate_power', 'bias_mutate_power',
@@ -103,7 +104,6 @@ class PPO(Algorithm):
         )
         if terminated:
             self.episodes_done += 1
-            print(CM("TERMINATED!", Fore.LIGHTGREEN_EX))
 
     def deque(self, episodes: int):
         """
@@ -172,6 +172,7 @@ class PPO(Algorithm):
                 ratio = torch.exp(log_probs - old_log_probs[batch])
                 if ratio.ndim != adv.ndim:
                     ratio = ratio.unsqueeze(-1)
+                    prob_dims = self.get_dims(ratio)
                 surr_loss_1 = ratio * adv
                 surr_loss_2 = torch.clamp(ratio, 1-self.clip_range, 1+self.clip_range) * adv
                 policy_loss = - torch.mean(torch.min(torch.stack([surr_loss_1, surr_loss_2]), 0)[0], prob_dims)
@@ -211,13 +212,24 @@ class PPO(Algorithm):
                 assert not torch.any(torch.isnan(value_loss))
 
                 # Entropy Loss
+                if entropy.ndim != adv.ndim:
+                    entropy = entropy.unsqueeze(-1)
                 if entropy is not None:
-                    entropy_loss = - torch.mean(entropy, prob_dims)
+                    entropy_loss = - torch.mean(entropy, self.get_dims(entropy))
                 else:
-                    entropy_loss = - torch.mean(-log_probs, prob_dims)
+                    entropy_loss = - torch.mean(-log_probs, self.get_dims(entropy))
                 assert not torch.any(torch.isnan(entropy_loss))
 
-                loss = (policy_loss * self.pol_reg) + (value_loss * self.val_reg) + (entropy_loss * self.ent_reg)
+                try:
+                    loss = (policy_loss * self.pol_reg) + (value_loss * self.val_reg) + (entropy_loss * self.ent_reg)
+                except RuntimeError as e:
+                    def debug(tensor: Tensor, name: str):
+                        print(f"\n{name} =>\n{tensor}\n\tshape = {tensor.shape}")
+                    debug(policy_loss, 'policy_loss')
+                    debug(value_loss, 'value_loss')
+                    debug(entropy_loss, 'entropy_loss')
+                    debug(entropy, 'entropy')
+                    raise e
 
                 # Batch Logging
                 with torch.no_grad():
@@ -225,6 +237,8 @@ class PPO(Algorithm):
                     clip_fraction = torch.mean((torch.abs(ratio - 1) > self.clip_range).float(), prob_dims)
                     # cf_mean, cf_std = clip_fraction.min().cpu().item(), clip_fraction.std().cpu().item()
                     log_ratio = log_probs - old_log_probs[batch]
+                    if log_ratio.ndim != adv.ndim:
+                        log_ratio = log_ratio.unsqueeze(-1)
                     approx_kl_div = torch.mean((torch.exp(log_ratio) - 1) - log_ratio, prob_dims)
                     # kd_mean, kd_std = (approx_kl_div[approx_kl_div != 0] + self.epsilon).min().cpu().item(), approx_kl_div.std().cpu().item()
 
@@ -243,13 +257,13 @@ class PPO(Algorithm):
                                 loss=append(tl), clip_fraction=append(cf), kl_divergence=append(kd))
             self.updates_done += 1
 
-    def learn(self, evaluation_function: callable, runs: int, epochs: int, batch_size: int = None, accuracy_error=0.20,
-              adv_comp=1, verbose: int = None):
+    def learn(self, evaluation_function: callable, runs: int, epochs: int, batch_size: int = None,
+              accuracy_error=0.20, accuracy_type='continuous', adv_comp=1, verbose: int = None):
         print(f"Logging to {self.log_dir+self.log_name}")
         iterations = 0
         steps_done = 0
         runs_done = 0
-        while runs_done < runs+1:
+        while runs_done < runs:
             # Running environment
             torch.cuda.empty_cache()
             ts = clock.perf_counter()
@@ -258,60 +272,53 @@ class PPO(Algorithm):
             self.deque(1)
 
             # Rolling out data
-            try:
-                with torch.no_grad():
-                    states, actions, probabilities, rewards, episode_mapping = self.replay.rollout(as_list=True)
-                    episode_mapping = torch.cat(episode_mapping).cpu().numpy()
-                    records = len(episode_mapping)
+            with torch.no_grad():
+                states, actions, probabilities, rewards, episode_mapping = self.replay.rollout(as_list=True)
+                episode_mapping = torch.cat(episode_mapping).cpu().numpy()
+                records = len(episode_mapping)
 
-                    sorting_indices = torch.tensor(
-                        sorted([i for i in range(records)], key=lambda idx: (episode_mapping[idx], idx)),
-                        dtype=torch.int)
-                    states          = torch.index_select(torch.cat(states), 0, sorting_indices).to(self.device, self.dtype)
-                    actions         = torch.index_select(torch.cat(actions), 0, sorting_indices).to(self.device, self.dtype)
-                    probabilities   = torch.index_select(torch.cat(probabilities), 0, sorting_indices).to(self.device, self.dtype)
-                    raw_rewards     = torch.index_select(torch.cat(rewards), 0, sorting_indices).to(self.device, self.dtype)
-                    cum_rewards     = self._get_rewards_to_go(raw_rewards, self.gamma, episode_mapping)
-                    episode_mapping = np.array(episode_mapping)[sorting_indices.cpu().tolist()]
-                    episodes_count = {}
-                    for ep_idx in episode_mapping:
-                        if ep_idx not in episodes_count:
-                            episodes_count[ep_idx] = 1
-                        else:
-                            episodes_count[ep_idx] += 1
-                    episode_lengths = [count for count in episodes_count.values()]
-                    scores = torch.mean(cum_rewards, self.get_dims(cum_rewards))
-                    if self.population.config.general.fitness_criterion == 'max':
-                        best_genome_idx = scores.argmax().item()
-                    elif self.population.config.general.fitness_criterion == 'min':
-                        best_genome_idx = scores.argmin().item()
-                    elif self.population.config.general.fitness_criterion == 'mean':
-                        best_genome_idx = ((scores.mean() - scores) ** 2).argmin().item()
+                sorting_indices = torch.tensor(
+                    sorted([i for i in range(records)], key=lambda idx: (episode_mapping[idx], idx)),
+                    dtype=torch.int)
+                states          = torch.index_select(torch.cat(states), 0, sorting_indices).to(self.device, self.dtype)
+                actions         = torch.index_select(torch.cat(actions), 0, sorting_indices).to(self.device, self.dtype)
+                probabilities   = torch.index_select(torch.cat(probabilities), 0, sorting_indices).to(self.device, self.dtype)
+                raw_rewards     = torch.index_select(torch.cat(rewards), 0, sorting_indices).to(self.device, self.dtype)
+                cum_rewards     = self._get_rewards_to_go(raw_rewards, self.gamma, episode_mapping)
+                episode_mapping = np.array(episode_mapping)[sorting_indices.cpu().tolist()]
+                episodes_count = {}
+                for ep_idx in episode_mapping:
+                    if ep_idx not in episodes_count:
+                        episodes_count[ep_idx] = 1
                     else:
-                        raise ValueError(f"unsupported fitness criteria")
+                        episodes_count[ep_idx] += 1
+                episode_lengths = [count for count in episodes_count.values()]
+                scores = torch.mean(cum_rewards, self.get_dims(cum_rewards)).cpu().numpy()
 
-                    def fix(tensor: Tensor, idx: int):
-                        return tensor[..., idx: idx+1, :].expand(*tensor.shape)
+                def fix(tensor: Tensor, idx: int):
+                    return tensor[..., idx: idx+1, :].expand(*tensor.shape)
 
-                    # states          = fix(states, best_genome_idx)
-                    # actions         = fix(actions, best_genome_idx)
-                    # probabilities   = fix(probabilities, best_genome_idx)
-                    # cum_rewards     = fix(cum_rewards, best_genome_idx)
-            except RuntimeError as e:
-                pass
+                # states          = fix(states, best_genome_idx)
+                # actions         = fix(actions, best_genome_idx)
+                # probabilities   = fix(probabilities, best_genome_idx)
+                # cum_rewards     = fix(cum_rewards, best_genome_idx)
 
             if self.norm_rew:
-                rewards = (cum_rewards - cum_rewards.mean()) / (cum_rewards.std() + 1e-8)
+                dims = self.get_dims(cum_rewards)
+                rewards = (cum_rewards - cum_rewards.mean(dims)) / (cum_rewards.std(dims) + 1e-8)
             else:
                 rewards = cum_rewards
             batch_indices = self._get_batches(records, batch_size, True)
 
             # Training model
             ts = clock.perf_counter()
-            self._train(epochs, batch_indices, states, actions, probabilities, rewards, adv_comp)
+            with torch.no_grad():
+                self._train(epochs, batch_indices, states, actions, probabilities, rewards, adv_comp)
             train_time = np.floor(clock.perf_counter() - ts)
 
             # Set values
+            fitness: ndarray = None
+            policy: ndarray = None
             try:
                 # score_mapping = {idx: score.item() for idx, score in enumerate(scores)}
                 # elite = []
@@ -319,27 +326,37 @@ class PPO(Algorithm):
                 # for idx, score in sorted(score_mapping.items(), key=lambda item: item[1]):
                 #     if len(elite) < cutoff:
                 #         elite.append(idx)
-                losses: ndarray = self.logging.rollout(None, 'loss', True)[0][-1]
-                # loss_max = np.abs(np.max(losses))
-                # loss_min = -np.abs(np.min(losses))
-                s1 = self.normalize(scores).cpu().numpy()
-                s2 = self.normalize(losses) * self.loss_reg
-                if self.population.config.general.fitness_criterion == 'max':
+                p_losses: ndarray = self.normalize(self.logging.rollout(None, 'policy_loss', True)[0][-1])
+                v_losses: ndarray = self.normalize(self.logging.rollout(None, 'value_loss', True)[0][-1])
+                e_losses: ndarray = self.normalize(self.logging.rollout(None, 'entropy_loss', True)[0][-1])
+                losses = p_losses * self.pol_reg + v_losses * self.val_reg + e_losses * self.ent_reg
+                policy = self.normalize(losses)
+                s1 = self.normalize(scores)
+                s2 = policy * self.loss_reg
+                criterion = self.population.config.general.fitness_criterion
+                if criterion == 'max':
                     s2 = -s2
-                elif self.population.config.general.fitness_criterion == 'mean':
+                elif criterion == 'min':
+                    pass
+                elif criterion == 'mean':
                     s2 = -((np.mean(s2) - s2) ** 2)
+                else:
+                    raise ValueError(f"Unsupported fitness criterion '{criterion}'")
                 fitness = s1 + s2
                 for idx, (genome, fitness) in enumerate(zip(self.population.genomes.values(), fitness)):
-                    # if idx == best_genome_idx:
-                    #     genome.fitness = loss_min * 3
-                    # elif idx in elite:
-                    #     genome.fitness = loss_min - loss
-                    # else:
-                    #     genome.fitness = loss_max - loss
                     genome.fitness = fitness
-                pass
+
             except Exception as e:
                 print(f"\nFailed to set values due to error:\n\t{CM(e, Fore.LIGHTRED_EX)}")
+
+            if self.population.config.general.fitness_criterion == 'max':
+                best_genome_idx = scores.argmax().item()
+            elif self.population.config.general.fitness_criterion == 'min':
+                best_genome_idx = scores.argmin().item()
+            elif self.population.config.general.fitness_criterion == 'mean':
+                best_genome_idx = ((scores.mean() - scores) ** 2).argmin().item()
+            else:
+                raise ValueError(f"unsupported fitness criteria")
 
             # Logging
             with torch.no_grad():
@@ -352,7 +369,7 @@ class PPO(Algorithm):
                 ep_rew_std = np.mean([np.std(episode) for episode in episode_rewards])
                 ep_cum_rew = np.mean([np.mean(episode) for episode in cum_episode_rewards])
                 # th_mean, th_std = self._get_threshold(batch_indices, states, actions)
-                policy_acc, reward_acc = self._get_accuracy(batch_indices, states, actions, rewards, best_genome_idx, accuracy_error, 'binary', False)
+                policy_acc, reward_acc = self._get_accuracy(batch_indices, states, actions, rewards, best_genome_idx, accuracy_error, accuracy_type, False)
                 explained_variance = self._explained_variance(batch_indices, states, rewards).cpu().item()
 
                 def get_std():
@@ -409,6 +426,7 @@ class PPO(Algorithm):
                 self.writer.add_scalar(extra+'std', std, self.updates_done)
                 self.writer.add_scalar(extra+'policy_accuracy', policy_acc, self.updates_done)
                 self.writer.add_scalar(extra+'reward_accuracy', reward_acc, self.updates_done)
+                self.writer.add_scalar(extra+'policy_reduction', policy[best_genome_idx], self.updates_done)
 
                 for x in range(self.updates_done-epochs, self.updates_done):
                     self.writer.add_scalar(extra+'kl_divergence', temp_data['kl_divergence'][x][best_genome_idx], x)
@@ -419,12 +437,14 @@ class PPO(Algorithm):
                     self.writer.add_scalar(extra+'loss', temp_data['loss'][x][best_genome_idx], x)
 
                 # Population
+                survival_rate = self.population.survival_rate if self.population.survival_rate is not None else np.nan
+                best_genome = list(self.population.genomes.values())[best_genome_idx]
                 extra = 'population/'
                 self.writer.add_scalar(extra+'weight_mutate_power', self.population.config.genome.weight_mutate_power, self.updates_done)
                 self.writer.add_scalar(extra+'bias_mutate_power', self.population.config.genome.bias_mutate_power, self.updates_done)
-                self.writer.add_scalar(extra+'best_genome', self.population.best_genome.key if self.population.best_genome is not None else np.nan, self.updates_done)
-
-                self.writer.add_scalar(extra+'best_fitness', self.population.best_genome.fitness if self.population.best_genome is not None else np.nan, self.updates_done)
+                self.writer.add_scalar(extra+'best_genome', best_genome.key, self.updates_done)
+                self.writer.add_scalar(extra+'best_fitness', best_genome.fitness, self.updates_done)
+                self.writer.add_scalar(extra+'survival_rate', survival_rate, self.updates_done)
 
             self.writer.flush()
             self.model.eval()
@@ -571,6 +591,6 @@ if __name__ == '__main__':
 
     POPULATION.load_dict(name='ppo_test')
 
-    TRAINER.learn(evaluate, 30, 1, 64, 0.20, 1, True)
+    TRAINER.learn(evaluate, 30, 1, 64, 0.50, 1, True)
 
     POPULATION.save_dict('ppo_test')

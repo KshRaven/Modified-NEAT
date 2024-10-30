@@ -1,3 +1,3 @@
 
 from build.nn import activations
-from build.nn.base import NeatModule
+from build.nn.base import NeatModule, Model
