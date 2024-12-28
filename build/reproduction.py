@@ -1,13 +1,12 @@
 
-from build.repoduction.types import ReproductionMethods
 from build.config import Config
-from build.nn.base import NeatModule, bind_modules
-from build.nn.genome import Genome, initialize_genome, FLOAT, INT
+from build.nn.base import NeatModule
+from build.nn.genome import Genome, FLOAT, INT
 from build.reporter.base import ReporterSet
 from build.species import SpeciesSet, Species, SPECIES
 from build.stagnation import Stagnation
 from build.util.datetime import eta, clock
-from build.util.conversion import float_to_str
+from build.base import initialize
 
 from numba import types, typeof, njit, optional, prange, cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
@@ -48,9 +47,8 @@ class Reproduction:
         self._stagnation = Stagnation(configuration, reporters)
         self._config = configuration
         self.ancestors: dict[int, tuple[Genome, Genome]] = Dict.empty(INT, GENOME_TUPLE)
-        self.types = ReproductionMethods()
 
-    def create_new(self, pop_size: int, build: list[NeatModule], verbose: int = None) -> dict[int, Genome]:
+    def create_new(self, pop_size: int, module: NeatModule, tpb=4, verbose: int = None) -> dict[int, Genome]:
         # Create keys
         genome_ids = {self.genome_indexer + idx: idx for idx in range(pop_size)}
         self.genome_indexer += pop_size
@@ -59,11 +57,11 @@ class Reproduction:
         for gid, idx in genome_ids.items():
             genome = Genome(gid)
             genomes[gid] = genome
-        # Bind networks to genomes
-        bind_modules(build, List(genomes.values()), verbose)
-        # Initialize each network
-        for genome in genomes.values():
-            initialize_genome(genome, self._config)
+        # Initialize each parameter
+        for m in module.neat_modules():
+            m.updated = False
+        module.update(genomes, verify=False)
+        initialize(self._config, module, tpb, verbose)
         return genomes
 
     @staticmethod
@@ -134,6 +132,17 @@ class Reproduction:
                             genomes[j], genomes[j + 1] = genomes[j + 1], genomes[j]
             return genomes
 
+        def choice(genomes: list[Genome], multiplier: float):
+            if multiplier is None:
+                multiplier = 1
+            factors = np.array([g.fitness for g in genomes])
+            maximum = np.max(factors)
+            minimum = np.min(factors) + 1e-8
+            probabilities = np.full(len(genomes), 0.0)
+            for i, p in enumerate(factors):
+                probabilities[i] = (p - minimum) / (maximum - minimum) * np.random.rand() * multiplier
+            return genomes[np.argmax(probabilities)]
+
         temp = _zip_spre(spawn_amounts, remaining_species)
         for idx in range(len(temp)):
             spawn, specie = temp[idx]
@@ -142,9 +151,11 @@ class Reproduction:
             assert spawn > 0
 
             # Delete unwanted members
-            for gid in list(specie.members.keys()):
-                if gid in to_delete and len(specie.members) > 2:
-                    del specie.members[gid]
+            executions = [gid for gid in specie.members.keys() if gid in to_delete]
+            if len(specie.members.keys()) - len(executions) > 1:
+                for gid in executions:
+                    if gid in to_delete and len(specie.members) > 1:
+                        del specie.members[gid]
             # The species has at least one member for the next generation, so retain it.
             # old_members: list[Genome] = List(specie.members.values())
             # Sort members in order of descending fitness.
@@ -166,7 +177,6 @@ class Reproduction:
             repro_cutoff = max(2, int(np.ceil(survival_threshold * len(old_members))))
             # Use at least two parents no matter what the threshold fraction result is.
             old_members = old_members[:repro_cutoff]
-            old_members_indexes = np.array([i for i in range(len(old_members))])
             # TODO: Enable probabilities when numba supports prob in numpy.random.choice()
             # probs = np.array([g.fitness for g in old_members]) * darwin_multiplier
             # probs += (np.abs(probs.min()) + 1e-10)
@@ -174,8 +184,8 @@ class Reproduction:
 
             # Randomly choose parents and produce the number of offspring allotted to the species.
             for _ in prange(spawn):
-                parent1: Genome = old_members[np.random.choice(old_members_indexes)] # p=probs)
-                parent2: Genome = old_members[np.random.choice(old_members_indexes)]
+                parent1: Genome = choice(old_members, darwin_multiplier)
+                parent2: Genome = choice(old_members, darwin_multiplier)
 
                 # Note that if the parents are not distinct, crossover will produce a
                 # genetically identical clone of the parent (but with a different ID).
@@ -267,7 +277,7 @@ class Reproduction:
             new_population, species_set.species, self.genome_indexer, spawn_amounts, remaining_species, to_delete,
             self._config.reproduction.elitism, self._config.reproduction.survival_threshold,
             self._config.reproduction.darwin_multiplier, self._config.general.fitness_criterion,
-            structure_, weight_, bias_, None
+            structure_, weight_, bias_, self.ancestors
         )
         if verbose:
             print(f"spawned genomes in {round(clock.perf_counter() - ts, 2)}s")
@@ -289,20 +299,4 @@ Weights = GPUArray
 Bias    = GPUArray
 Layer   = tuple[Weights, Bias]
 Network = tuple[tuple[Layer, ...], bool]
-
-
-@cuda.jit()
-def spawn_gpu(children, parents, limits: tuple[int, int, int]):
-    genome_idx, network_idx, layer_idx = cuda.grid(3)
-    genome_lim = len(children)
-    if genome_idx < genome_lim:
-        networks: tuple[Network, ...] = children[genome_idx]
-        network_lim = len(networks)
-        if network_idx < network_lim:
-            network: Network = networks[network_idx]
-            layers, bias_enabled = network
-            layer_lim = len(layers)
-            if layer_idx < layer_lim:
-                weights, biases = layers[layer_idx]
-
 

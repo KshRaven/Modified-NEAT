@@ -8,6 +8,7 @@ from numba import types, njit, optional, prange
 from numba.experimental import jitclass
 from numba.typed import List, Dict
 from typing import Union
+from numpy import ndarray as CPUArray
 
 import numpy as np
 import time as clock
@@ -49,27 +50,21 @@ DISTANCE_TUPLE = types.Tuple([INT, INT])
 
 @jitclass([
     ('distances', types.DictType(DISTANCE_TUPLE, FLOAT)),
+    ('total_distance', optional(types.Array(types.float64, 2, 'C'))),
     ('hits', INT),
     ('misses', INT),
 ])
 class GenomeDistanceCache(object):
     def __init__(self):
         self.distances: dict[tuple[int, int], float] = Dict.empty(DISTANCE_TUPLE, FLOAT)
+        self.total_distance: CPUArray = None
         self.hits = 0
         self.misses = 0
 
-    def get(self, genome0: Genome, genome1: Genome, cwc: float, cdc: float) -> float:
-        # Search for distance
-        distance = self.distances.get((genome0.key, genome1.key))
+    def get(self, genome1: Genome, genome2: Genome):
+        distance = self.distances.get((genome1.key, genome2.key))
         if distance is None:
-            # Distance is not already computed.
-            distance = genome0.distance(genome1, cwc, cdc)
-            self.distances[(genome0.key, genome1.key)] = distance
-            self.distances[(genome1.key, genome0.key)] = distance
-            self.misses += 1
-        else:
-            self.hits += 1
-
+            raise ValueError(f"distances between Genomes {genome1.key} and {genome2.key} have not been computed")
         return distance
 
     def list(self):
@@ -85,6 +80,7 @@ class SpeciesSet:
         self.reporters = reporters
         self.species: dict[int, Species] = Dict.empty(INT, SPECIES)
         self.genome_to_species: dict[int, int] = Dict.empty(INT, INT)
+        self.distances_cache = GenomeDistanceCache()
         self.species_indexer = 1
         self.last_ct: int = None
 
@@ -104,15 +100,19 @@ class SpeciesSet:
             else:
                 raise ValueError(f"empty list")
 
+        # Loop through each existing species
         mapping = List(species_dict.keys())
         for i in prange(len(species_dict)):
             sid = mapping[i]
             species = species_dict[sid]
+            # Loop through unspeciated genomes
             candidates: list[tuple[float, Genome]] = []
             for j in prange(len(unspeciated)):
                 gid = unspeciated[j]
                 genome = population[gid]
+                # Fetch or calculated distance
                 distance = distance_cache.get(species.representative, genome, cwc, cdc)
+                # Add candidate to list
                 candidates.append((distance, genome))
 
             # The new representative is the genome closest to the current representative.
@@ -140,6 +140,7 @@ class SpeciesSet:
 
         key = available_key
         done = List.empty_list(INT)
+        # Loop through unspeciated genomes
         for idx in prange(len(unspeciated)):
             gid = unspeciated[idx]
             genome = population[gid]
@@ -151,6 +152,7 @@ class SpeciesSet:
                 sid = mapping[i]
                 rid = representatives[sid]
                 rep = population[rid]
+                # NOTE: Calculating distance is what takes most time in this function
                 distance = distance_cache.get(rep, genome, cwc, cdc)
                 if distance < ct:
                     candidates.append((distance, sid))
@@ -225,7 +227,7 @@ class SpeciesSet:
         # Partition population into species based on genetic similarity.
         ts = clock.perf_counter()
         self.species_indexer = self._get_species(
-            0, population, unspeciated, new_representatives, new_members,
+            self.species_indexer, population, unspeciated, new_representatives, new_members,
             distances_cache, cwc, cdc, compatibility_threshold
         )
         if verbose:
@@ -245,7 +247,8 @@ class SpeciesSet:
         gdstdev = np.std(distances)
         self.last_ct = (gdmean, gdstdev)
         self.reporters.info(f"Mean genetic distance {CM(f'{gdmean:.3f}', Fore.LIGHTYELLOW_EX)}, "
-                            f"standard deviation {CM(f'{gdstdev:.3f}', Fore.LIGHTYELLOW_EX)}")
+                            f"standard deviation {CM(f'{gdstdev:.3f}', Fore.LIGHTYELLOW_EX)}, "
+                            f"with {CM(len(self.species), Fore.LIGHTMAGENTA_EX)} species")
 
     def get_species_id(self, gid: int):
         return self.genome_to_species.get(gid)
@@ -277,11 +280,11 @@ def get_ct(ct: Union[int, float, str, None], last_ct_info: Union[tuple[int, int]
         genomes = list(population.values())
         if ct == 'auto':
             if last_ct_info is None:
-                network_num = len(genomes[0].networks) * 1.4
+                network_num = len(genomes[0].networks) * 5
                 ct = network_num
             else:
                 ct_mean, ct_std = last_ct_info
-                ct = ct_mean + ct_std * 1.0
+                ct = ct_mean + ct_std * 2
         return ct
     else:
         raise ValueError(f"Unsupported compatibility threshold dtype '{type(ct)}'")

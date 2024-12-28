@@ -1,6 +1,7 @@
 
 from build.config.base import Configuration
 from build.util.storage import STORAGE_DIR
+from build.functional import SEED
 
 import os
 
@@ -13,9 +14,12 @@ class GeneralConfig(Configuration):
         self.fitness_threshold   = 100
         self.pop_size            = 10000
         self.reset_on_extinction = True
+        self.seed = SEED
 
 
-RANGE = 3.14
+PI = 3.142
+RANGE = PI * 10
+STD = 1
 
 
 class GenomeConfig(Configuration):
@@ -23,20 +27,20 @@ class GenomeConfig(Configuration):
         super(GenomeConfig, self).__init__('genome config')
 
         self.weight_init_mean       = 0.0
-        self.weight_init_std        = 1.0
+        self.weight_init_std        = STD
         self.weight_max_value       = RANGE
         self.weight_min_value       = -RANGE
-        self.weight_mutate_power    = 0.05
+        self.weight_mutate_power    = 1.0
         self.weight_mutate_rate     = 0.50
-        self.weight_replace_rate    = 0.15
+        self.weight_replace_rate    = 0.05
 
         self.bias_init_mean         = 0.0
-        self.bias_init_std          = 1.0
+        self.bias_init_std          = STD
         self.bias_max_value         = RANGE
         self.bias_min_value         = -RANGE
-        self.bias_mutate_power      = 0.05
-        self.bias_mutate_rate       = 0.40
-        self.bias_replace_rate      = 0.15
+        self.bias_mutate_power      = 1.0
+        self.bias_mutate_rate       = 0.50
+        self.bias_replace_rate      = 0.05
 
         self.compatibility_disjoint_coefficient = 1.0
         self.compatibility_weight_coefficient   = 0.5
@@ -47,7 +51,7 @@ class GenomeConfig(Configuration):
         self.node_del_prob   = 0.2
 
         self.initial_connection = 'full'
-        self.init_type = 'normal'
+        self.init_type = 'uniform'
 
         self.single_structural_mutation = False
 
@@ -72,11 +76,11 @@ class ReproductionConfig(Configuration):
     def __init__(self):
         super(ReproductionConfig, self).__init__('reproduction config')
 
-        self.elitism            = 10
+        self.elitism            = 50
         self.clone_threshold    = 0.00
         self.survival_threshold = 0.20
         self.darwin_multiplier  = 1
-        self.min_species_size   = 20
+        self.min_species_size   = 100
         self.purge              = 0
 
 
@@ -86,6 +90,7 @@ class Config:
             file_name = "default"
         if directory is None:
             directory = f"{STORAGE_DIR}configs"
+        self.dir = directory
         self.path = f"{directory}\\{file_name}-neat_config.txt"
 
         self.general      = GeneralConfig()
@@ -95,9 +100,9 @@ class Config:
         self.reproduction = ReproductionConfig()
 
     def save(self, debug=True):
-        # create = not os.path.exists(self.path)
-        # if create:
-        #     os.makedirs(self.path, exist_ok=True)
+        create = not os.path.exists(self.dir)
+        if create:
+            os.makedirs(self.dir, exist_ok=True)
         self.general.create(self.path, debug=debug)
         self.genome.create(self.path, debug=debug)
         self.species.create(self.path, debug=debug)
@@ -111,9 +116,9 @@ class Config:
         self.stagnation.load(self.path, verbose=verbose)
         self.reproduction.load(self.path, verbose=verbose)
 
-    def update(self, debug=True):
-        self.general.update(self.path, debug=debug)
-        self.genome.update(self.path, debug=debug)
-        self.species.update(self.path, debug=debug)
-        self.stagnation.update(self.path, debug=debug)
-        self.reproduction.update(self.path, debug=debug)
+    def update(self, verbose: int = None):
+        self.general.update(self.path, verbose=verbose)
+        self.genome.update(self.path, verbose=verbose)
+        self.species.update(self.path, verbose=verbose)
+        self.stagnation.update(self.path, verbose=verbose)
+        self.reproduction.update(self.path, verbose=verbose)

@@ -10,13 +10,14 @@ from build.util.fancy_text import CM, Fore
 
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
-from typing import Union, Any
-from numpy import ndarray
+from typing import Union
 
 import torch
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
+
+TensorDict = dict[int, Tensor]
 
 
 class PPO(Algorithm):
@@ -47,21 +48,23 @@ class PPO(Algorithm):
         self.replay.add_buffers('state', 'action', 'prob', 'reward', 'ep_map')
 
         # Options
-        self.norm_rew: bool               = manage_params(options, ['norm_rew'], True)
+        self.norm_rew: bool               = manage_params(options, ['norm_rew'], False)
         self.norm_adv: bool               = manage_params(options, ['norm_adv'], False)
         self.gamma: float                 = manage_params(options, 'gamma', 0.95)
+        self.alpha: float                 = manage_params(options, 'alpha', 1.10)
+        self.alpha_step: int              = manage_params(options, 'alpha_step', 5)
         self.epsilon: float               = manage_params(options, 'epsilon', 1e-10)
         self.clip_range: float            = manage_params(options, 'clip_range', 0.3)
         self.pol_reg: float               = manage_params(options, 'pol_reg', 1.0)
-        self.val_reg: float               = manage_params(options, 'val_reg', 0.5)
-        self.ent_reg: float               = manage_params(options, 'ent_reg', 1e-3)
-        self.loss_reg: float              = manage_params(options, 'loss_reg', 1e-3)
+        self.val_reg: float               = manage_params(options, 'val_reg', 0.9)
+        self.ent_reg: float               = manage_params(options, 'ent_reg', 0.3)
+        self.loss_reg: float              = manage_params(options, 'loss_reg', 0.9)
         self.target_kl: [float, None]     = manage_params(options, 'target_kl', None)
         self.scheduler: [Scheduler, None] = manage_params(options, 'scheduler', None)
 
         # Tensorboard logging
         self.log_dir: str = manage_params(
-            options, 'log_directory', STORAGE_DIR+f"neat_rl_logs/{self.__class__.__name__}/")
+            options, 'log_directory', STORAGE_DIR+f"neat_rl_logs\\{self.__class__.__name__}\\")
         self.log_sub_dir: str = manage_params(options, 'log_sub_dir', "")
         self.log_name: str = manage_params(
             options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
@@ -77,7 +80,11 @@ class PPO(Algorithm):
         self.device         = device
         self.dtype          = dtype
         self.steps_done     = 0
+        self._steps_limit: int = None
         self.episodes_done  = 0
+        self._ep_mapping: list[int] = None
+        self._ep_started: list[bool] = None
+        self._ep_offset: int = 0
         self.updates_done   = 0
 
         # Timing
@@ -85,325 +92,419 @@ class PPO(Algorithm):
         self.__ud: int      = None
         self.__ut: int      = None
 
-    def update(self, observation: Tensor, action: Tensor, probs: Tensor, reward: Tensor, terminated: bool):
-        def convert(tensor: Union[Tensor, ndarray, list]):
-            if isinstance(tensor, Tensor):
-                return tensor.clone()
-            elif isinstance(tensor, (ndarray, list, int, float)):
-                return torch.tensor(tensor, device='cpu', dtype=torch.float32)
-            else:
-                raise ValueError(f"Unsupported tensor type '{type(tensor)}'")
+    def init(self, steps: int):
+        self._steps_limit = self.steps_done + steps
+        self._ep_mapping = None
+        self._ep_started = None
+        self._ep_offset = 0
 
-        self.replay.update(
-            add_dims=[0],
-            state=convert(observation),
-            action=convert(action),
-            prob=convert(probs),
-            reward=convert(reward),
-            ep_map=convert(self.episodes_done),
-        )
-        if terminated:
-            self.episodes_done += 1
+    def update_mapping(self, mapping: dict[int, int]):
+        self.replay.update_mapping(mapping)
+        self.logging.update_mapping(mapping)
 
-    def deque(self, episodes: int):
+    def update(self, observations: Tensor, actions: Tensor, probs: Tensor, rewards: Tensor,
+               terminated: Union[bool, list[bool]], key_index=-2, force_stop=False):
+        if isinstance(terminated, bool):
+            terminated = [terminated]
+
+        envs = len(terminated)
+        if self._ep_mapping is None:
+            self._ep_mapping = [self.episodes_done + ex for ex in range(envs)]
+            self._ep_started = [True for _ in range(envs)]
+            self._ep_offset = envs - 1
+
+        filled = False
+        if self.steps_done < self._steps_limit:
+            for idx, (ended, started) in enumerate(zip(terminated, self._ep_started)):
+                if not started and not ended:
+                    started = self._ep_started[idx] = True
+                    self._ep_offset += 1
+                    self._ep_mapping[idx] = self.episodes_done + self._ep_offset
+
+                if started:
+                    episode_index = self._ep_mapping[idx]
+                    self.replay.update(
+                        state       = observations,
+                        action      = actions,
+                        prob        = probs,
+                        reward      = rewards,
+                        ep_map      = episode_index,
+                        # key_index   = key_index
+                    )
+                    self.steps_done += 1
+
+                if ended:
+                    self._ep_started[idx] = False
+
+            if self.steps_done >= self._steps_limit or force_stop:
+                self.episodes_done += self._ep_offset + 1
+                filled = True
+        else:
+            raise ValueError(f"Steps have already been filled.")
+
+        return filled
+
+    def deque_episodes(self, episodes: int, keys: list[int] = None):
         """
         Deletes the episodes before the last n episodes.
         Used to compensate for the long data collection times of the NEAT evaluation functions.
         :param episodes: (int) Number of recent episodes to keep.
+        :param keys: (list[int])
         :return: (none)
         """
-        assert episodes >= 1
-        episodes_to_del = torch.tensor([ep for ep in range(self.episodes_done) if ep < (self.episodes_done-episodes)])
-        episode_mapping = torch.cat(self.replay.rollout(buffers='ep_map', as_list=True)[0])
-        episode_filter  = torch.isin(episode_mapping, episodes_to_del)
-        record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
-        # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
-        self.replay.deque(record_filter)
+        assert episodes >= 0
+        filters = {}
+        episode_mapping: dict[int, list[int]] = self.replay.rollout(buffers='ep_map', as_list=True)[0]
+        for key in self.replay.mapping.keys():
+            episodes_to_del = torch.tensor([ep for ep in range(self.episodes_done) if ep < (self.episodes_done-episodes)])
+            mapping = torch.tensor(episode_mapping[key])
+            episode_filter  = torch.isin(mapping, episodes_to_del)
+            record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
+            # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
+            filters[key] = record_filter
+        self.replay.deque(filters, keys)
+
+    def deque_steps(self, steps: int, keys: list[int] = None):
+        """
+        Deletes the last n steps.
+        Used to compensate for the large data sizes of the NEAT evaluation functions.
+        :param steps: (int) Number of steps to keep.
+        :param keys: (list[int])
+        :return: (none)
+        """
+        assert steps >= 0
+        filters = {}
+        episode_mapping: dict[int, list[int]] = self.replay.rollout(buffers='ep_map', as_list=True)[0]
+        for key in self.replay.mapping.keys():
+            records = len(episode_mapping[key])
+            limit = max(0, records - steps)
+            filters[key] = [i for i in range(records) if i < limit]
+        self.replay.deque(filters, keys)
 
     def reset(self):
         self.replay.reset()
 
-    def _get_advantages(self, batches: list[list[int]], observations: Tensor, rewards: Tensor):
+    def _get_advantages(self, batches: dict[int, list[list[int]]], observations: TensorDict, rewards: TensorDict,
+                        verbose: int = None):
+        ts, ud, ut = clock.perf_counter(), 0, len(self.replay.mapping)
         with torch.no_grad():
             self.model.eval()
-            value_est = []
-            for batch in batches:
-                val: Tensor = self.model.get_value(observations[batch]).to('cpu', torch.float32)
-                value_est.append(val)
+            advantages = {}
+            for key in batches.keys():
+                adv = []
+                for batch in batches[key]:
+                    # print(f"batch={self.model.pol_proj.embedder.embedding.weights.data.shape, observations[key].shape}")
+                    value: Tensor = self.model.get_value(observations[key][batch].unsqueeze(0).to(self.device), keys=key).squeeze(0)
+                    # print(value.shape, rewards[key][batch].shape)
+                    adv.append(rewards[key][batch].to(self.device) - value)
+                # print(f"end={torch.cat(adv, 0).cpu().shape}")
+                advantages[key] = torch.cat(adv, 0).cpu()
+
+                if verbose and verbose >= 2:
+                    eta(ts, ud, ut, f"getting advantages")
             self.model.train()
-            return rewards - torch.cat(value_est, 0).to(self.device, self.dtype)
 
-    def _train(self, epochs: int, batches: list[list[int]], states: Tensor, actions: Tensor, old_log_probs: Tensor,
-               rewards: Tensor, adv_computations=1):
+            if verbose and verbose >= 2:
+                print(f"\rcalculated advantages in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            return advantages
+
+    def _train(self, batches: dict[int, list[list[int]]], states: TensorDict, actions: TensorDict,
+               old_log_probs: TensorDict, rewards: TensorDict, verbose: int = None):
         self.model.train()
-        assert epochs // adv_computations > 0
-        div = epochs // adv_computations
 
-        # NOTE: The second last dimension is the genome dimension, therefore it is not manipulated on
-        state_dims  = self.get_dims(states)
-        act_dims    = self.get_dims(actions)
-        prob_dims   = self.get_dims(old_log_probs)
-        rew_dims    = self.get_dims(rewards)
+        # Compute advantages
+        advantages = self._get_advantages(batches, states, rewards)
+        # Create dictionaries
+        pl, vl, el, tl, cf, kd = {}, {}, {}, {}, {}, {}
 
-        def append(arrays: list[ndarray]):
-            return np.mean(np.stack(arrays, 0), 0)
+        def cons(consolidation: list[Tensor]):
+            return torch.mean(torch.stack(consolidation, dim=0)).cpu().item()
 
-        advantages: Tensor = None
-        for epoch_idx in range(epochs):
-            if epoch_idx % div == 0:
-                advantages = self._get_advantages(batches, states, rewards)
-            adv_dims = self.get_dims(advantages)
-            pl, vl, el, tl, cf, kd = [], [], [], [], [], []
-            for batch in batches:
-                log_probs, entropy = self.model.evaluate_action(states[batch], actions[batch])
-                values = self.model.get_value(states[batch])
+        ts, ud, ut = clock.perf_counter(), 0, len(self.replay.mapping)
+        # Calculate policy loss for all keys
+        for key in self.replay.mapping.keys():
+            if key in batches:
+                # handle batch for each key
+                pl_, vl_, el_, tl_, cf_, kd_ = [], [], [], [], [], []
+                for batch in batches[key]:
+                    state           = states[key][batch].to(self.device)
+                    action          = actions[key][batch].to(self.device)
+                    old_log_prob    = old_log_probs[key][batch].to(self.device)
+                    reward          = rewards[key][batch].to(self.device)
+                    advantage       = advantages[key][batch].to(self.device)
 
-                if self.norm_adv:
-                    adv_dims_std = adv_dims
-                    if advantages[batch].shape[0] == 1:
-                        adv_dims_std = adv_dims_std[1:]
-                    adv = (advantages[batch] - advantages[batch].mean(adv_dims, True)) / (advantages[batch].std(adv_dims_std, True) + 1e-8)
-                else:
-                    adv = advantages[batch]
-                if adv.shape[-1] > 1:
-                    adv = torch.mean(adv, -1, True)
+                    # Run evaluations
+                    log_prob, entropy = self.model.evaluate_action(state.unsqueeze(0), action, keys=key)
+                    log_prob, entropy = log_prob.unsqueeze(0), entropy.unsqueeze(0)
+                    value = self.model.get_value(state.unsqueeze(0), keys=key).squeeze(0)
 
-                # Policy Loss
-                ratio = torch.exp(log_probs - old_log_probs[batch])
-                if ratio.ndim != adv.ndim:
-                    ratio = ratio.unsqueeze(-1)
-                    prob_dims = self.get_dims(ratio)
-                surr_loss_1 = ratio * adv
-                surr_loss_2 = torch.clamp(ratio, 1-self.clip_range, 1+self.clip_range) * adv
-                policy_loss = - torch.mean(torch.min(torch.stack([surr_loss_1, surr_loss_2]), 0)[0], prob_dims)
-                if torch.any(torch.isnan(policy_loss)):
-                    def debug_(tensor: Tensor):
-                        dims = self.get_dims(tensor)
-                        return f"shape={tensor.shape}, mean={torch.mean(tensor, dims)}, std={torch.std(tensor, dims)}, " \
-                               f"max={np.max(tensor.cpu().numpy(), dims)}, min={np.min(tensor.cpu().numpy(), dims)}"
-                    print(f"")
+                    # Normalize advantage when necessary
+                    if self.norm_adv:
+                        advantage = (advantage - advantage.mean()) / (advantage.std() + 1e-8)
+
+                    # Policy Loss
+                    ratio = torch.exp(log_prob - old_log_prob)
+                    surr_loss_1 = advantage * ratio
+                    surr_loss_2 = advantage * torch.clamp(ratio, 1-self.clip_range, 1+self.clip_range)
+                    policy_loss = - torch.mean(torch.min(torch.stack([surr_loss_1, surr_loss_2]), 0)[0])
+                    if torch.any(torch.isnan(policy_loss)):
+                        def debug_(var: Tensor):
+                            return f"shape={var.shape}, mean={torch.mean(var)}, std={torch.std(var)}, " \
+                                   f"max={np.max(var.cpu().numpy())}, min={np.min(var.cpu().numpy())}"
+                        print(f"")
+                        with torch.no_grad():
+                            print(f"rewards = {debug_(reward)}")
+                            print(f"advantages = {debug_(advantage)}")
+                            print(f"log_probs = {debug_(log_prob)}")
+                            print(f"old_log_probs = {debug_(old_log_prob)}")
+                            print(f"ratio = {debug_(ratio)}")
+                            print(f"surr_loss_1 = {debug_(surr_loss_1)}")
+                            print(f"surr_loss_2 = {debug_(surr_loss_2)}")
+                            print(f"policy_loss = {policy_loss}")
+                            largest_weight_val = None
+                            smallest_weight_val = None
+                            for param in self.model.parameters():
+                                max_val = torch.max(param).cpu().item()
+                                min_val = torch.min(param).cpu().item()
+                                if largest_weight_val is None or max_val > largest_weight_val:
+                                    largest_weight_val = max_val
+                                if smallest_weight_val is None or min_val < smallest_weight_val:
+                                    smallest_weight_val = min_val
+                            print(f"largest weight value = {largest_weight_val}")
+                            print(f"smallest weight value = {smallest_weight_val}")
+                        raise ValueError(f"Infinity or NaN value found in policy loss")
+
+                    # Value Loss
+                    value_loss = torch.mean((reward - value) ** 2)
+                    assert not torch.any(torch.isnan(value_loss))
+
+                    # Entropy Loss
+                    if entropy is not None:
+                        entropy_loss = - torch.mean(entropy)
+                    else:
+                        entropy_loss = - torch.mean(-log_prob)
+                    assert not torch.any(torch.isnan(entropy_loss))
+
+                    try:
+                        loss = (policy_loss * self.pol_reg) + (value_loss * self.val_reg) + (entropy_loss * self.ent_reg)
+                    except RuntimeError as e:
+                        def debug(var: Tensor, name: str):
+                            print(f"\n{name} =>\n{var}\n\tshape = {var.shape}")
+                        debug(policy_loss, 'policy_loss')
+                        debug(value_loss, 'value_loss')
+                        debug(entropy_loss, 'entropy_loss')
+                        debug(entropy, 'entropy')
+                        raise e
+
+                    # Batch Logging
                     with torch.no_grad():
-                        # mean, std = self.model.debug_mean_std(states[batch])
-                        # print(f"mean = {debug_(mean)}")
-                        # print(f"std = {debug_(std)}")
-                        print(f"rewards = {debug_(rewards[batch])}")
-                        print(f"advantages = {debug_(adv)}")
-                        print(f"log_probs = {debug_(log_probs)}")
-                        print(f"old_log_probs = {debug_(old_log_probs[batch])}")
-                        print(f"ratio = {debug_(ratio)}")
-                        print(f"surr_loss_1 = {debug_(surr_loss_1)}")
-                        print(f"surr_loss_2 = {debug_(surr_loss_2)}")
-                        print(f"policy_loss = {policy_loss}")
-                        largest_weight_val = None
-                        smallest_weight_val = None
-                        for param in self.model.parameters():
-                            max_val = torch.max(param).cpu().item()
-                            min_val = torch.min(param).cpu().item()
-                            if largest_weight_val is None or max_val > largest_weight_val:
-                                largest_weight_val = max_val
-                            if smallest_weight_val is None or min_val < smallest_weight_val:
-                                smallest_weight_val = min_val
-                        print(f"largest weight value = {largest_weight_val}")
-                        print(f"smallest weight value = {smallest_weight_val}")
-                    raise ValueError(f"Infinity or NaN value found in policy loss")
+                        # TODO: Add the std-dev to the logging
+                        clip_fraction = torch.mean((torch.abs(ratio - 1) > self.clip_range).float())
+                        log_ratio = log_prob - old_log_prob
+                        approx_kl_div = torch.mean((torch.exp(log_ratio) - 1) - log_ratio)
 
-                # Value Loss
-                value_loss = torch.mean((rewards[batch] - values) ** 2, rew_dims)
-                assert not torch.any(torch.isnan(value_loss))
+                        pl_.append(policy_loss)
+                        vl_.append(value_loss)
+                        el_.append(entropy_loss)
+                        tl_.append(loss)
+                        cf_.append(clip_fraction)
+                        kd_.append(approx_kl_div)
 
-                # Entropy Loss
-                if entropy.ndim != adv.ndim:
-                    entropy = entropy.unsqueeze(-1)
-                if entropy is not None:
-                    entropy_loss = - torch.mean(entropy, self.get_dims(entropy))
-                else:
-                    entropy_loss = - torch.mean(-log_probs, self.get_dims(entropy))
-                assert not torch.any(torch.isnan(entropy_loss))
+                pl[key] = cons(pl_)
+                vl[key] = cons(vl_)
+                el[key] = cons(el_)
+                tl[key] = cons(tl_)
+                cf[key] = cons(cf_)
+                kd[key] = cons(kd_)
+            else:
+                pl[key] = vl[key] = el[key] = tl[key] = cf[key] = kd[key] = np.nan
 
-                try:
-                    loss = (policy_loss * self.pol_reg) + (value_loss * self.val_reg) + (entropy_loss * self.ent_reg)
-                except RuntimeError as e:
-                    def debug(tensor: Tensor, name: str):
-                        print(f"\n{name} =>\n{tensor}\n\tshape = {tensor.shape}")
-                    debug(policy_loss, 'policy_loss')
-                    debug(value_loss, 'value_loss')
-                    debug(entropy_loss, 'entropy_loss')
-                    debug(entropy, 'entropy')
-                    raise e
+            ud += 1
+            if verbose:
+                eta(ts, ud, ut, f"ppo impl")
 
-                # Batch Logging
-                with torch.no_grad():
-                    # TODO: Add the std-dev to the logging
-                    clip_fraction = torch.mean((torch.abs(ratio - 1) > self.clip_range).float(), prob_dims)
-                    # cf_mean, cf_std = clip_fraction.min().cpu().item(), clip_fraction.std().cpu().item()
-                    log_ratio = log_probs - old_log_probs[batch]
-                    if log_ratio.ndim != adv.ndim:
-                        log_ratio = log_ratio.unsqueeze(-1)
-                    approx_kl_div = torch.mean((torch.exp(log_ratio) - 1) - log_ratio, prob_dims)
-                    # kd_mean, kd_std = (approx_kl_div[approx_kl_div != 0] + self.epsilon).min().cpu().item(), approx_kl_div.std().cpu().item()
+        if self.scheduler is not None:
+            self.scheduler.step()
 
-                    pl.append(policy_loss.cpu().numpy())
-                    vl.append(value_loss.cpu().numpy())
-                    el.append(entropy_loss.cpu().numpy())
-                    tl.append(loss.cpu().numpy())
-                    cf.append(clip_fraction.cpu().numpy())
-                    kd.append(approx_kl_div.cpu().numpy())
+        def input(update: dict[int, float]):
+            return list(update.values())
 
-            if self.scheduler is not None:
-                self.scheduler.step()
+        # Logging
+        self.logging.update(policy_loss=input(pl), value_loss=input(vl), entropy_loss=input(el),
+                            loss=input(tl), clip_fraction=input(cf), kl_divergence=input(kd))
+        self.updates_done += 1
 
-            # Logging
-            self.logging.update(policy_loss=append(pl), value_loss=append(vl), entropy_loss=append(el),
-                                loss=append(tl), clip_fraction=append(cf), kl_divergence=append(kd))
-            self.updates_done += 1
-
-    def learn(self, evaluation_function: callable, runs: int, epochs: int, batch_size: int = None,
-              accuracy_error=0.20, accuracy_type='continuous', adv_comp=1, verbose: int = None):
+    def learn(self, evaluation_function: callable, steps: int, epochs: int = None, batch_size: int = None,
+              accuracy_error=0.20, accuracy_type='continuous', verbose: int = None):
         print(f"Logging to {self.log_dir+self.log_name}")
-        iterations = 0
-        steps_done = 0
-        runs_done = 0
-        while runs_done < runs:
+        if epochs is None:
+            epochs = np.inf
+        epoch_done = 0
+        while epoch_done < epochs:
             # Running environment
             torch.cuda.empty_cache()
             ts = clock.perf_counter()
+            self.init(steps)
             self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
             run_time = np.floor(clock.perf_counter() - ts)
-            self.deque(1)
+            if verbose and verbose >= 2:
+                print(f"collected data in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
 
             # Rolling out data
+            invalid_population = len(self.population.to_delete) == len(self.population.genomes)
+            valid_keys = [key for key in self.replay.mapping.keys() if key not in self.population.to_delete or invalid_population]
             with torch.no_grad():
-                states, actions, probabilities, rewards, episode_mapping = self.replay.rollout(as_list=True)
-                episode_mapping = torch.cat(episode_mapping).cpu().numpy()
-                records = len(episode_mapping)
+                ts = clock.perf_counter()
+                states, actions, probabilities, raw_rewards, episode_mapping = self.replay.rollout(
+                    as_list=True, stack=True, keys=valid_keys
+                )
+                if verbose and verbose >= 2:
+                    print(f"rolled out data in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
 
-                sorting_indices = torch.tensor(
-                    sorted([i for i in range(records)], key=lambda idx: (episode_mapping[idx], idx)),
-                    dtype=torch.int)
-                states          = torch.index_select(torch.cat(states), 0, sorting_indices).to(self.device, self.dtype)
-                actions         = torch.index_select(torch.cat(actions), 0, sorting_indices).to(self.device, self.dtype)
-                probabilities   = torch.index_select(torch.cat(probabilities), 0, sorting_indices).to(self.device, self.dtype)
-                raw_rewards     = torch.index_select(torch.cat(rewards), 0, sorting_indices).to(self.device, self.dtype)
-                cum_rewards     = self._get_rewards_to_go(raw_rewards, self.gamma, episode_mapping)
-                episode_mapping = np.array(episode_mapping)[sorting_indices.cpu().tolist()]
-                episodes_count = {}
-                for ep_idx in episode_mapping:
-                    if ep_idx not in episodes_count:
-                        episodes_count[ep_idx] = 1
-                    else:
-                        episodes_count[ep_idx] += 1
-                episode_lengths = [count for count in episodes_count.values()]
-                scores = torch.mean(cum_rewards, self.get_dims(cum_rewards)).cpu().numpy()
+                # Sort episodes wrt. episode index
+                ts = clock.perf_counter()
+                episode_lengths = self.sort_episodes(episode_mapping, states, actions, probabilities, raw_rewards)
+                if verbose and verbose >= 2:
+                    print(f"sorted episodes data in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+                ts = clock.perf_counter()
+                cum_rewards     = self._get_rewards_to_go(raw_rewards, self.gamma, self.alpha, self.alpha_step,
+                                                          episode_mapping, rollout=True)
+                if verbose and verbose >= 2:
+                    print(f"cumulated rewards in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+                scores: dict[int, float] = {
+                    key: torch.mean(cum_rewards[key]).item()
+                    for key in valid_keys
+                }
 
-                def fix(tensor: Tensor, idx: int):
-                    return tensor[..., idx: idx+1, :].expand(*tensor.shape)
+                # Normalize rewards when necessary
+                if self.norm_rew:
+                    rewards = {}
+                    for key in cum_rewards.keys():
+                        rewards[key] = (cum_rewards[key] - cum_rewards[key].mean()) / (cum_rewards[key].std() + self.epsilon)
+                else:
+                    rewards = cum_rewards
 
-                # states          = fix(states, best_genome_idx)
-                # actions         = fix(actions, best_genome_idx)
-                # probabilities   = fix(probabilities, best_genome_idx)
-                # cum_rewards     = fix(cum_rewards, best_genome_idx)
+                # Get batches wrt. steps done per key
+                batch_indices = self._get_batches(valid_keys, batch_size, True)
 
-            if self.norm_rew:
-                dims = self.get_dims(cum_rewards)
-                rewards = (cum_rewards - cum_rewards.mean(dims)) / (cum_rewards.std(dims) + 1e-8)
-            else:
-                rewards = cum_rewards
-            batch_indices = self._get_batches(records, batch_size, True)
+                # Handling of non valid genomes
+                fs = [genome.fitness if genome.fitness else 0 for genome in self.population.genomes.values()]
+                score_range = max(fs) - min(fs)
 
             # Training model
             ts = clock.perf_counter()
             with torch.no_grad():
-                self._train(epochs, batch_indices, states, actions, probabilities, rewards, adv_comp)
+                self._train(batch_indices, states, actions, probabilities, rewards, verbose)
             train_time = np.floor(clock.perf_counter() - ts)
+            if verbose and verbose >= 2:
+                print(f"\rran training in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
 
             # Set values
-            fitness: ndarray = None
-            policy: ndarray = None
+            fitnesses: dict[int, float] = None
+            ppo_score: dict[int, float] = None
+            criterion = self.population.config.general.fitness_criterion
+            buffer_sizes = self.replay.buffer_sizes()
             try:
-                # score_mapping = {idx: score.item() for idx, score in enumerate(scores)}
-                # elite = []
-                # cutoff = np.ceil(self.population.config.reproduction.survival_threshold * len(self.population.genomes))
-                # for idx, score in sorted(score_mapping.items(), key=lambda item: item[1]):
-                #     if len(elite) < cutoff:
-                #         elite.append(idx)
-                p_losses: ndarray = self.normalize(self.logging.rollout(None, 'policy_loss', True)[0][-1])
-                v_losses: ndarray = self.normalize(self.logging.rollout(None, 'value_loss', True)[0][-1])
-                e_losses: ndarray = self.normalize(self.logging.rollout(None, 'entropy_loss', True)[0][-1])
-                losses = p_losses * self.pol_reg + v_losses * self.val_reg + e_losses * self.ent_reg
-                policy = self.normalize(losses)
-                s1 = self.normalize(scores)
-                s2 = policy * self.loss_reg
-                criterion = self.population.config.general.fitness_criterion
+                ts = clock.perf_counter()
+                p_losses = self.normalize(self.logging.rollout('policy_loss', as_list=True, keys=valid_keys)[0], -1)
+                v_losses = self.normalize(self.logging.rollout('value_loss', as_list=True, keys=valid_keys)[0], -1)
+                e_losses = self.normalize(self.logging.rollout('entropy_loss', as_list=True, keys=valid_keys)[0], -1)
+                losses: dict[int, int] = {key: (p_losses[key] * self.pol_reg +
+                                                v_losses[key] * self.val_reg +
+                                                e_losses[key] * self.ent_reg)
+                                          for key in p_losses.keys()}
+
+                ppo_score = {k: v * self.loss_reg for k, v in self.normalize(losses).items()}
+                rew_score = self.normalize(scores)
+
                 if criterion == 'max':
-                    s2 = -s2
+                    ppo_score = {k: -score for k, score in ppo_score.items()}
                 elif criterion == 'min':
                     pass
                 elif criterion == 'mean':
-                    s2 = -((np.mean(s2) - s2) ** 2)
+                    mean = np.mean(list(ppo_score.values())).item()
+                    ppo_score = self.normalize({k: -((mean - score) ** 2) for k, score in ppo_score.items()})
                 else:
                     raise ValueError(f"Unsupported fitness criterion '{criterion}'")
-                fitness = s1 + s2
-                for idx, (genome, fitness) in enumerate(zip(self.population.genomes.values(), fitness)):
-                    genome.fitness = fitness
 
+                fitnesses = {key: rew_score[key] + ppo_score[key] for key in rew_score.keys()}
+                min_fitness = min(list(scores.values()))
+                for genome in self.population.genomes.values():
+                    if genome.key in valid_keys:
+                        genome.fitness = fitnesses[genome.key]
+                    else:
+                        genome.fitness = min_fitness - score_range + genome.fitness
+                if verbose and verbose >= 2:
+                    print(f"set scores in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
             except Exception as e:
                 print(f"\nFailed to set values due to error:\n\t{CM(e, Fore.LIGHTRED_EX)}")
 
-            if self.population.config.general.fitness_criterion == 'max':
-                best_genome_idx = scores.argmax().item()
+            scores_ = np.array([fitnesses[key] for key in valid_keys])
+            if criterion == 'max':
+                best_genome_key = valid_keys[np.argmax(scores_)]
             elif self.population.config.general.fitness_criterion == 'min':
-                best_genome_idx = scores.argmin().item()
+                best_genome_key = valid_keys[np.argmin(scores_)]
             elif self.population.config.general.fitness_criterion == 'mean':
-                best_genome_idx = ((scores.mean() - scores) ** 2).argmin().item()
+                best_genome_key = valid_keys[np.argmin((scores_.mean() - scores_) ** 2)]
             else:
                 raise ValueError(f"unsupported fitness criteria")
 
             # Logging
             with torch.no_grad():
-                ep_len_mean = np.mean(episode_lengths)
-                ep_len_std  = np.std(episode_lengths)
-                episode_indices = np.unique(episode_mapping)
-                episode_rewards = [[reward.mean(self.get_dims(reward))[best_genome_idx].cpu().item() for idx, reward in enumerate(raw_rewards) if episode_mapping[idx] == ep_idx] for ep_idx in episode_indices]
-                cum_episode_rewards = [[reward.mean(self.get_dims(reward))[best_genome_idx].cpu().item() for idx, reward in enumerate(cum_rewards) if episode_mapping[idx] == ep_idx] for ep_idx in episode_indices]
-                ep_rew_mean = np.mean([np.mean(episode) for episode in episode_rewards])
-                ep_rew_std = np.mean([np.std(episode) for episode in episode_rewards])
-                ep_cum_rew = np.mean([np.mean(episode) for episode in cum_episode_rewards])
-                # th_mean, th_std = self._get_threshold(batch_indices, states, actions)
-                policy_acc, reward_acc = self._get_accuracy(batch_indices, states, actions, rewards, best_genome_idx, accuracy_error, accuracy_type, False)
-                explained_variance = self._explained_variance(batch_indices, states, rewards).cpu().item()
+                ts = clock.perf_counter()
+                ep_len_mean = np.mean(episode_lengths[best_genome_key]).item()
+                ep_len_std  = np.std(episode_lengths[best_genome_key]).item()
+                episode_indices: list[int] = np.unique(episode_mapping[best_genome_key])
+                episode_rewards = [[reward.mean().cpu().item()
+                                    for idx, reward in enumerate(raw_rewards[best_genome_key])
+                                    if episode_mapping[best_genome_key][idx] == ep_idx]
+                                   for ep_idx in episode_indices]
+                cum_episode_rewards = [[reward.mean().cpu().item()
+                                        for idx, reward in enumerate(cum_rewards[best_genome_key])
+                                        if episode_mapping[best_genome_key][idx] == ep_idx]
+                                       for ep_idx in episode_indices]
+                ep_rew_mean = np.mean([np.mean(episode) for episode in episode_rewards]).item()
+                ep_rew_std = np.mean([np.std(episode) for episode in episode_rewards]).item()
+                ep_cum_rew = np.mean([np.mean(episode) for episode in cum_episode_rewards]).item()
+                acc = self._get_accuracy(batch_indices, states, actions, rewards, accuracy_error, accuracy_type, False, best_genome_key)
+                try:
+                    policy_acc, reward_acc = acc[0][best_genome_key] * 100, acc[1][best_genome_key] * 100
+                except RuntimeError:
+                    policy_acc, reward_acc = np.nan, np.nan
+                explained_variance = self._explained_variance(batch_indices, states, rewards, best_genome_key)[best_genome_key]
+                policy_reduction = 1 if len(ppo_score) <= 1 else sorted(
+                    list(ppo_score.keys()), key=lambda k: ppo_score[k]).index(best_genome_key) / (len(ppo_score)-1)
 
-                def get_std():
+                def get_range(key: int):
                     try:
                         params = []
-                        for param in self.parameters:
-                            for weight in param.weights:
-                                params.append(weight.flatten())
-                            if param.enable_bias:
-                                for bias in param.biases:
-                                    params.append(bias.flatten())
-                        # for attr, val in vars(obj).items():
-                        #     if 'log_std' in attr:
-                        #         return val
-                        #     if isinstance(val, Model):
-                        #         res = get_std(obj)
-                        #         if res is not None:
-                        #             return res
-                        # return None`
-                        return torch.std(torch.cat(params))
+                        for param in self.model.neat_parameters():
+                            params.append(param[key])
+                        params = torch.cat(params)
+                        return torch.mean(params).cpu().item(), torch.std(params).cpu().item()
                     except Exception as e:
-                        return torch.nan
+                        return torch.nan, torch.nan
 
-                std = get_std()
+                mean, std = get_range(best_genome_key)
+                if verbose and verbose >= 2:
+                    print(f"calculated stats in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
 
                 self.logging.update(
-                    add_dims=[0],
                     ep_len_mean=ep_len_mean, ep_len_std=ep_len_std, ep_rew_mean=ep_rew_mean, ep_rew_std=ep_rew_std,
                     policy_acc=policy_acc, reward_acc=reward_acc, explained_variance=explained_variance, std=std,
                     weight_mutate_power=self.population.config.genome.weight_mutate_power,
                     bias_mutate_power=self.population.config.genome.bias_mutate_power, clip_range=self.clip_range,
                 )
                 temp_data = self.logging.rollout(
-                    buffers=['kl_divergence', 'clip_fraction', 'policy_loss', 'value_loss', 'entropy_loss', 'loss'])
+                    buffers=['kl_divergence', 'clip_fraction', 'policy_loss', 'value_loss', 'entropy_loss', 'loss'],
+                    as_list=True
+                )
+                kl_divergence   = temp_data[0][best_genome_key][-1]
+                clip_fraction   = temp_data[1][best_genome_key][-1]
+                policy_loss     = temp_data[2][best_genome_key][-1]
+                value_loss      = temp_data[3][best_genome_key][-1]
+                entropy_loss    = temp_data[4][best_genome_key][-1]
+                loss            = temp_data[5][best_genome_key][-1]
 
                 # Rollout
                 extra = 'rollout/'
@@ -413,6 +514,7 @@ class PPO(Algorithm):
                 self.writer.add_scalar(extra+'ep_rew_mean', ep_rew_mean, self.updates_done)
                 self.writer.add_scalar(extra+'ep_rew_std', ep_rew_std, self.updates_done)
                 self.writer.add_scalar(extra+'ep_cum_rew', ep_cum_rew, self.updates_done)
+                self.writer.add_scalar(extra+'buffer_size', buffer_sizes[best_genome_key], self.updates_done)
 
                 # Time
                 extra = 'time/'
@@ -423,22 +525,22 @@ class PPO(Algorithm):
                 extra = 'training/'
                 self.writer.add_scalar(extra+'clip_range', self.clip_range, self.updates_done)
                 self.writer.add_scalar(extra+'explained_variance', explained_variance, self.updates_done)
-                self.writer.add_scalar(extra+'std', std, self.updates_done)
+                self.writer.add_scalar(extra+'param_mean', mean, self.updates_done)
+                self.writer.add_scalar(extra+'param_std', std, self.updates_done)
                 self.writer.add_scalar(extra+'policy_accuracy', policy_acc, self.updates_done)
                 self.writer.add_scalar(extra+'reward_accuracy', reward_acc, self.updates_done)
-                self.writer.add_scalar(extra+'policy_reduction', policy[best_genome_idx], self.updates_done)
+                self.writer.add_scalar(extra+'policy_reduction', policy_reduction, self.updates_done)
 
-                for x in range(self.updates_done-epochs, self.updates_done):
-                    self.writer.add_scalar(extra+'kl_divergence', temp_data['kl_divergence'][x][best_genome_idx], x)
-                    self.writer.add_scalar(extra+'clip_fraction', temp_data['clip_fraction'][x][best_genome_idx], x)
-                    self.writer.add_scalar(extra+'policy_loss', temp_data['policy_loss'][x][best_genome_idx], x)
-                    self.writer.add_scalar(extra+'value_loss', temp_data['value_loss'][x][best_genome_idx], x)
-                    self.writer.add_scalar(extra+'entropy_loss', temp_data['entropy_loss'][x][best_genome_idx], x)
-                    self.writer.add_scalar(extra+'loss', temp_data['loss'][x][best_genome_idx], x)
+                self.writer.add_scalar(extra+'kl_divergence', kl_divergence, self.updates_done)
+                self.writer.add_scalar(extra+'clip_fraction', clip_fraction, self.updates_done)
+                self.writer.add_scalar(extra+'policy_loss', policy_loss, self.updates_done)
+                self.writer.add_scalar(extra+'value_loss', value_loss, self.updates_done)
+                self.writer.add_scalar(extra+'entropy_loss', entropy_loss, self.updates_done)
+                self.writer.add_scalar(extra+'loss', loss, self.updates_done)
 
                 # Population
-                survival_rate = self.population.survival_rate if self.population.survival_rate is not None else np.nan
-                best_genome = list(self.population.genomes.values())[best_genome_idx]
+                survival_rate = len(valid_keys) / len(self.population.genomes)
+                best_genome = self.population.genomes[best_genome_key]
                 extra = 'population/'
                 self.writer.add_scalar(extra+'weight_mutate_power', self.population.config.genome.weight_mutate_power, self.updates_done)
                 self.writer.add_scalar(extra+'bias_mutate_power', self.population.config.genome.bias_mutate_power, self.updates_done)
@@ -449,13 +551,9 @@ class PPO(Algorithm):
             self.writer.flush()
             self.model.eval()
 
-            steps_done += records
-            self.steps_done += np.sum(episode_mapping == np.max(episode_mapping))
-
             # Displaying
             if verbose:
 
-                iterations += 1
                 bar = "-"*54
                 print(
                     f"\n{bar}"
@@ -466,20 +564,20 @@ class PPO(Algorithm):
                     f"\n|\t{'ep_rew_std': <25}| {ep_rew_std: <21} |"
                     f"\n|\t{'ep_cum_rew': <25}| {ep_cum_rew: <21} |"
                     f"\n{'|TIME:': <29}|{'': <22} |"
-                    f"\n|\t{'iterations': <25}| {iterations: <21} |"
+                    f"\n|\t{'epochs_done': <25}| {epoch_done+1: <21} |"
                     f"\n|\t{'run_time': <25}| {run_time: <21} |"
                     f"\n|\t{'train_time': <25}| {train_time: <21} |"
                     f"\n|\t{'steps_done': <25}| {self.steps_done: <21} |"
-                    f"\n|\t{'episodes_done': <25}| {len(episode_lengths): <21} |"
+                    f"\n|\t{'episodes_done': <25}| {self._ep_offset+1: <21} |"
                     f"\n|\t{'total_episodes_done': <25}| {self.episodes_done: <21} |"
                     f"\n{'|TRAINING:': <29}|{'': <22} |"
-                    f"\n|\t{'kl_divergence': <25}| {temp_data['kl_divergence'][-1][best_genome_idx]: <21} |"
-                    f"\n|\t{'clip_fraction': <25}| {temp_data['clip_fraction'][-1][best_genome_idx]: <21} |"
+                    f"\n|\t{'kl_divergence': <25}| {kl_divergence: <21} |"
+                    f"\n|\t{'clip_fraction': <25}| {clip_fraction: <21} |"
                     f"\n|\t{'clip_range': <25}| {self.clip_range: <21} |"
-                    f"\n|\t{'policy_loss': <25}| {temp_data['policy_loss'][-1][best_genome_idx]: <21} |"
-                    f"\n|\t{'value_loss': <25}| {temp_data['value_loss'][-1][best_genome_idx]: <21} |"
-                    f"\n|\t{'entropy_loss': <25}| {temp_data['entropy_loss'][-1][best_genome_idx]: <21} |"
-                    f"\n|\t{'loss': <25}| {temp_data['loss'][-1][best_genome_idx]: <21} |"
+                    f"\n|\t{'policy_loss': <25}| {policy_loss: <21} |"
+                    f"\n|\t{'value_loss': <25}| {value_loss: <21} |"
+                    f"\n|\t{'entropy_loss': <25}| {entropy_loss: <21} |"
+                    f"\n|\t{'loss': <25}| {loss: <21} |"
                     f"\n|\t{'updates_done': <25}| {self.updates_done: <21} |"
                     f"\n|\t{'weight_mutate_power': <25}| {self.population.config.genome.weight_mutate_power: <21} |"
                     f"\n|\t{'bias_mutate_power': <25}| {self.population.config.genome.bias_mutate_power: <21} |"
@@ -490,18 +588,34 @@ class PPO(Algorithm):
                     f"\n{bar}"
                 )
 
-            runs_done += 1
+            if epoch_done == epochs - 1:
+                self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self,
+                                    terminate_skip=True)
 
-    def _explained_variance(self, batches: list[list[int]], states: Tensor, rewards: Tensor):
+            epoch_done += 1
+
+    def _explained_variance(self, batches: dict[int, list[list[int]]], states: TensorDict, rewards: TensorDict,
+                            keys: Union[int, list[int]] = None):
+        if isinstance(keys, (int, float)):
+            keys = [keys]
+        keys = list(self.replay.mapping.keys()) if keys is None else keys
         with torch.no_grad():
-            estimations = []
-            for batch in batches:
-                value_est = self.model.get_value(states[batch])
-                estimations.append(value_est)
-            value_est = torch.cat(estimations, 0)
-            dims = [i for i in range(rewards.ndim) if i != rewards.ndim-2]
-            lim = 1 - ((torch.std(rewards-value_est, dims)**2) / (torch.std(rewards, dims)**2))
-            return torch.min(torch.max(torch.stack([lim, torch.full_like(lim, -1)]), 0)[0])
+            ex_var = {}
+
+            # Calculate accuracy for each key
+            for key in keys:
+                ev = []
+                for batch in batches[key]:
+                    # Calculate
+                    state = states[key][batch].to(self.device)
+                    value: Tensor = self.model.get_value(state.unsqueeze(0), keys=key).squeeze(0)
+                    reward = rewards[key][batch].to(self.device)
+                    value = ((torch.std(reward - value) ** 2) / (torch.std(reward) ** 2)) - 1
+                    ev.append(value)
+
+                ex_var[key] = torch.clamp(torch.mean(torch.stack(ev)), None, 1).cpu().item()
+
+            return ex_var
 
     @staticmethod
     def plotter(name: str, title: str = None, **buffers: list[float]):
@@ -518,79 +632,98 @@ class PPO(Algorithm):
 if __name__ == '__main__':
     import build as neat
     from build.models.main import Linear
+    from build.util.datetime import eta, clock
+
+    SEED = 100
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    np.random.seed(SEED)
 
     class RModel(Model):
         def __init__(self, inputs, outputs, dim_size, device, dtype):
             super().__init__()
-            self.act_proj = Linear(inputs, dim_size, True, DEVICE, DTYPE, torch.nn.SiLU())
-            self.mean = Linear(dim_size, outputs, True, DEVICE, DTYPE, torch.nn.SiLU())
-            self.log_std = Linear(dim_size, outputs, True, DEVICE, DTYPE, torch.nn.SiLU())
-            self.rew_proj = Linear(inputs, dim_size, True, DEVICE, DTYPE, torch.nn.SiLU())
-            self.decode = Linear(dim_size, 1, True, DEVICE, DTYPE, torch.nn.SiLU())
+            self.act_proj   = Linear(inputs, dim_size, True, device, dtype)
+            self.mean       = Linear(dim_size, outputs, True, device, dtype)
+            self.log_std    = Linear(dim_size, outputs, True, device, dtype)
+            self.rew_proj   = Linear(inputs, dim_size, True, device, dtype)
+            self.decode     = Linear(dim_size, 1, True, device, dtype)
 
         def forward(self, state: Tensor):
             return self.get_policy(state)
 
-        def get_mean(self, latent: Tensor) -> Tensor:
-            return self.mean(latent)
+        def get_mean(self, latent: Tensor, key: int = None) -> Tensor:
+            return self.mean(latent, key=key) * 100
 
-        def get_std(self, latent: Tensor) -> Tensor:
-            return torch.exp(self.log_std(latent))
+        def get_std(self, latent: Tensor, key: int = None) -> Tensor:
+            return 10 ** (-2 + self.log_std(latent, key=key) * 3)
 
-        def get_action(self, state: Tensor) -> tuple[Tensor, Tensor]:
-            latent = self.act_proj(state)
-            mean, std = self.get_mean(latent), self.get_std(latent)
+        def get_action(self, state: Tensor, key: int = None) -> tuple[Tensor, Tensor]:
+            latent = self.act_proj(state, key=key)
+            mean, std = self.get_mean(latent, key=key), self.get_std(latent, key=key)
             dist = torch.distributions.Normal(mean, std)
             action = dist.sample()
             log_prob = dist.log_prob(action)
             return action, log_prob
 
-        def evaluate_action(self, state: Tensor, action: Tensor) -> [Tensor, Union[Tensor, None]]:
-            latent = self.act_proj(state)
-            mean, std = self.get_mean(latent), self.get_std(latent)
+        def evaluate_action(self, state: Tensor, action: Tensor, key: int = None) -> [Tensor, Union[Tensor, None]]:
+            latent = self.act_proj(state, key=key)
+            mean, std = self.get_mean(latent, key=key), self.get_std(latent, key=key)
             dist = torch.distributions.Normal(mean, std)
             log_prob = dist.log_prob(action)
             entropy = dist.entropy()
             return log_prob, entropy
 
-        def get_policy(self, state: Tensor, **options) -> Tensor:
-            latent = self.act_proj(state)
-            mean, std = self.get_mean(latent), self.get_std(latent)
+        def get_policy(self, state: Tensor, key: int = None, **options) -> Tensor:
+            latent = self.act_proj(state, key=key)
+            mean, std = self.get_mean(latent, key=key), self.get_std(latent, key=key)
             dist = torch.distributions.Normal(mean, std)
             action = dist.sample()
             return action
 
-        def get_value(self, state: Tensor) -> Tensor:
-            latent = self.rew_proj(state)
-            value = self.decode(latent)
+        def get_value(self, state: Tensor, key: int = None) -> Tensor:
+            latent = self.rew_proj(state, key=key)
+            value = self.decode(latent, key=key)
             return value
 
     DEVICE      = 'cuda'
     DTYPE       = torch.float32
     INPUTS      = 2
     OUTPUTS     = 2
-    DIM_SIZE    = 256
+    DIM_SIZE    = 64
     MODEL       = RModel(INPUTS, OUTPUTS, DIM_SIZE, DEVICE, DTYPE)
     CONFIG      = neat.Config("ppo_test")
+    CONFIG.reproduction.elitism = 50
+    CONFIG.reproduction.min_species_size = 100
     GENOMES     = 100
     POPULATION  = neat.Population(GENOMES, MODEL, CONFIG, init_reporter=True)
-    TRAINER     = PPO(MODEL, POPULATION, DEVICE, DTYPE, )
+    TRAINER     = PPO(MODEL, POPULATION, DEVICE, DTYPE, loss_reg=0.1, gamma=0.0,
+                      scheduler=neat.scheduler.CosineAnnealing(CONFIG, 100, 50, 0.001, True, True))
     STEPS       = 100
 
     def evaluate(population: Population, **options):
         trainer: PPO = options['trainer']
+        trainer.update_mapping(population.get_mapping())
+        genomes = len(population.genomes)
 
-        for step in range(STEPS):
-            observations = torch.rand(GENOMES, INPUTS, device=DEVICE, dtype=DTYPE)
+        terminate = False
+        step = 0
+        ts, ud, ut = clock.perf_counter(), 0, STEPS
+        while not terminate:
+            observations = torch.randint(0, 100, (genomes, INPUTS), device=DEVICE, dtype=DTYPE)
             actions, probs = MODEL.get_action(observations)
             # probs = torch.rand(GENOMES, OUTPUTS, device=DEVICE, dtype=DTYPE)
-            rewards = torch.rand(GENOMES, 1, device=DEVICE, dtype=DTYPE)
+            rewards = 1 - ((observations - actions) ** 2)
 
-            trainer.update(observations, actions, probs, rewards, step == STEPS-1)
-        trainer.deque(1)
+            terminate = trainer.update(observations, actions, probs, rewards, step == STEPS-1)
 
-    POPULATION.load_dict(name='ppo_test')
+            ud += 1
+            eta(ts, ud, ut, 'fetching data')
+            step += 1
+        trainer.deque_episodes(20)
+        print(f"")
 
-    TRAINER.learn(evaluate, 30, 1, 64, 0.50, 1, True)
+    # POPULATION.load_dict(name='ppo_test')
+
+    TRAINER.learn(evaluate, STEPS, 500, 64, 0.50, 'continuous', True)
 
     POPULATION.save_dict('ppo_test')

@@ -57,7 +57,6 @@ class CosineAnnealing(Scheduler):
     def modify(self, *params):
         if self._step_idx == self._steps:
             self._step_idx = 0
-            raise ValueError(f"End of scheduler steps")
         self.config.genome.weight_mutate_power = self.modifier(self.config_.genome.weight_mutate_power)
         self.config.genome.bias_mutate_power   = self.modifier(self.config_.genome.bias_mutate_power)
         self._step_idx += 1

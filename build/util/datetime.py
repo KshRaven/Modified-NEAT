@@ -11,7 +11,7 @@ def unix_to_datetime(unix_time: int):
 
 def unix_to_datetime_file(unix_time: int):
     dt = datetime.datetime.fromtimestamp(int(unix_time))
-    formatted_datetime = dt.strftime("%d-%m-%Y_%H-%M-%S")
+    formatted_datetime = dt.strftime("%Y_%m_%d-%H_%M_%S")
     return formatted_datetime
 
 

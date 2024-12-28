@@ -1,13 +1,15 @@
 """Implements the core evolution algorithm."""
 import sys
 
-from build.nn.base import get_modules, NeatModule, bind_modules
+from build.nn.base import NeatModule
 from build.nn.genome import Genome, load_genome, INT
 from build.config import Config
 from build.species import SpeciesSet, load_species, GENOME, SPECIES
 from build.reporter.base import ReporterSet
 from build.reporter.reporters import StdOutReporter
 from build.reproduction import Reproduction
+from build.base.reproduction import reproduce
+from build.base.speciation import speciate
 from build.util.qol import manage_params
 from build.util.storage import save, load
 from build.util.fancy_text import CM, Fore
@@ -36,13 +38,13 @@ class Population(object):
         5. Go to 1.
     """
 
-    def __init__(self, genomes: int, model: Union[nn.Module, list[nn.Module]], config: Config = None,
+    def __init__(self, genomes: int, module: NeatModule, config: Config = None,
                  save_dict: dict = None, **options):
-        init_rep = manage_params(options, 'init_reporter', False)
+        init_rep = manage_params(options, 'init_reporter', True)
         self._init_pop_size = genomes
-        self.modules: list[NeatModule] = get_modules(model)
-        if len(self.modules) is None:
-            raise ValueError(f"Model has no NeatModules()")
+        self.module: NeatModule = module
+        if len(module.neat_parameters()) is None:
+            raise ValueError(f"Model has no NeatParameters()")
         self.config       = config
         self.reporters    = ReporterSet()
         if init_rep:
@@ -62,18 +64,23 @@ class Population(object):
 
         if save_dict is None:
             # Create a population from scratch, then partition into species.
-            self.genomes = self.reproduction.create_new(self.pop_size, self.modules, init_rep)
+            self.genomes = self.reproduction.create_new(self.pop_size, self.module, tpb=4, verbose=init_rep)
             self.generation = 0
             self.species = SpeciesSet(self.config, self.reporters)
-            self.species.speciate(self.genomes, self.generation, True)
+            # self.species.speciate(self.genomes, self.generation, True)
+            speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=True)
         self.best_genome: Genome = None
+        self.ranking: dict[int, Genome] = {}
+        self.avatars: list[Genome] = [] # List.empty_list(GENOME)
         self.loop_idx: int = 0
         self._skipped = False
-        self.ranking: dict[int, Genome] = {}
 
     @property
     def pop_size(self):
         return self._init_pop_size if not hasattr(self, 'genomes') else len(self.genomes)
+
+    def get_mapping(self):
+        return self.module.mapping
 
     def add_reporter(self, reporter):
         self.reporters.add(reporter)
@@ -125,6 +132,23 @@ class Population(object):
             return best_genome
         # Track the best genome ever seen.
         self.best_genome = get_best_genomes(List(self.genomes.values()), self.config.general.fitness_criterion, None)
+
+        def update_avatars(avatars: list[Genome], best_genome: Genome, genomes: dict[int, Genome]):
+            # Remove avatars that are no longer within population
+            index = 0
+            while index < len(avatars):
+                genome = avatars[index]
+                if genome.key not in genomes:
+                    avatars.remove(genome)
+                index += 1
+            # Append best genome to avatars
+            if best_genome not in avatars:
+                avatars.append(best_genome)
+            else:
+                avatars.remove(best_genome)
+                avatars.append(best_genome)
+        update_avatars(self.avatars, self.best_genome, self.genomes)
+
         self.reporters.post_evaluate(self.config, self.genomes, self.species, self.best_genome)
 
         # End if the fitness threshold is reached.
@@ -142,13 +166,13 @@ class Population(object):
 
             # If requested by the user, create a completely new population,
             if self.config.general.reset_on_extinction:
-                self.genomes = self.reproduction.create_new(self.pop_size, self.modules)
+                self.genomes = self.reproduction.create_new(self.pop_size, self.module, tpb=4, verbose=True)
             # otherwise raise an exception.
             else:
                 raise CompleteExtinctionException(f"Complete extinction of Population")
 
         # Divide the new population into species.
-        self.species.speciate(self.genomes, self.generation, True)
+        speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=True)
 
         self.reporters.end_generation(self.config, self.genomes, self.species)
 
@@ -175,6 +199,7 @@ class Population(object):
         or the configuration object.
         """
 
+        terminate = manage_params(options, 'terminate_skip', False)
         if skip:
             generations = 1
 
@@ -192,6 +217,7 @@ class Population(object):
                     self.ranking = {}
                     for genome in self.genomes.values():
                         self.ranking[genome.key] = genome
+                    self.ranking = dict(sorted(self.ranking.items(), key=lambda item: item[1].fitness, reverse=True))
 
                 if skip:
                     if not self._skipped:
@@ -207,11 +233,20 @@ class Population(object):
                     if not self._init_population_update():
                         break
                     # Create the next generation from the current generation.
-                    if reproduction_function is None:
-                        reproduction_function = self.reproduction.types.value_crossover
-                    self.reproduction.reproduce(self.species, self.genomes, self.modules, self.generation,
-                                                self.to_delete, reproduction_function, verbose)
+                    temp = np.unique(list(self.to_delete))
+                    self.to_delete: list[int] = List.empty_list(INT)
+                    for i in temp:
+                        self.to_delete.append(i)
                     self.survival_rate = 1 - (len(self.to_delete) / len(self.genomes))
+                    # self.reproduction.reproduce(self.species, self.genomes, self.modules, self.generation,
+                    #                             self.to_delete, reproduction_function, verbose)
+
+                    self.reproduction.genome_indexer = reproduce(
+                        self.config, self.module, self.genomes, self.reproduction.ancestors, self.generation,
+                        self.to_delete, self.reproduction.genome_indexer, self.reproduction._stagnation, self.species,
+                        self.reporters, tpb=4, verbose=True
+                    )
+
                     self.to_delete = List.empty_list(INT)
                     # Mutate all genomes using the user-provided function.
                     if mutation_function is not None:
@@ -223,11 +258,11 @@ class Population(object):
 
                     self._adv_population_update()
 
-                    if verbose and verbose >= 2:
-                        for p in self.modules:
-                            print(p)
+                    # if verbose and verbose >= 2:
+                    #     for p in self.modules:
+                    #         print(p)
 
-                    if skip:
+                    if skip and not terminate:
                         _, ranking = self.run(fitness_function, generations, reproduction_function, mutation_function,
                                               skip, verbose, **options)
                         break
@@ -263,6 +298,7 @@ class Population(object):
                 'networks': networks,
             }
             genomes.append(genome_dict)
+        best_key = self.best_genome.key if self.best_genome else None
         # Species
         species = []
         for specie in self.species.species.values():
@@ -281,6 +317,8 @@ class Population(object):
             'generation': self.generation,
             'genomes': genomes,
             'genome_indexer': self.reproduction.genome_indexer,
+            'best_genome': best_key if best_key is not None and best_key in self.genomes else None,
+            'avatars': [genome.key for genome in self.avatars if genome.key in self.genomes],
             'species': species,
             'species_indexer': self.species.species_indexer,
         }
@@ -288,35 +326,52 @@ class Population(object):
         if name is not None:
             if directory is None:
                 directory = 'neat_save'
-            save(state, name, directory, file_no, replace, items_name='NEAT Population')
+            _, file_no = save(state, name, directory, file_no, replace, items_name='NEAT Population')
 
-        return state
+        return state, file_no
 
-    def load_dict(self, save_state: dict = None, name: str = None, directory: str = None, file_no: int = None):
+    def load_dict(self, save_state: dict = None, name: str = None, directory: str = None, file_no: int = None, verbose: int = None):
         if save_state is None and name is not None:
             if directory is None:
                 directory = 'neat_save'
             file = load(name, directory, file_no, items_name='NEAT Population')
             if file is not None:
-                save_state = file
+                save_state: dict = file
             else:
                 return
         else:
             raise ValueError(f"Cannot load save state with no save_dict nor filename")
+        gts = clock.perf_counter()
         self.generation = save_state['generation']
         self.genomes = Dict.empty(INT, GENOME)
+        ts, ud, ut = clock.perf_counter(), 0, len(save_state['genomes'])
         for gs in save_state['genomes']:
             # gs['networks'] = [dict(ns) for ns in gs['networks']]
             # gs = Dict(gs)
             genome = load_genome(gs)
             self.genomes[genome.key] = genome
+            ud += 1
+            eta(ts, ud, ut, 'loading genomes')
+        print(f"\rloaded genomes in {round(clock.perf_counter() - ts, 2)}s")
         self.reproduction.genome_indexer = save_state['genome_indexer']
+        best_genome_key = save_state.get('best_genome')
+        if best_genome_key is not None:
+            self.best_genome = self.genomes[best_genome_key]
+        avatars = save_state.get('avatars')
+        if avatars is not None:
+            for key in save_state['avatars']:
+                self.avatars.append(self.genomes[key])
         self.species.species = Dict.empty(INT, SPECIES)
+        ts, ud, ut = clock.perf_counter(), 0, len(save_state['species'])
         for ss in save_state['species']:
             # ss = Dict(ss)
             specie = load_species(self.genomes, ss)
             self.species.species[specie.key] = specie
+            ud += 1
+            eta(ts, ud, ut, 'loading species')
+        print(f"\rloaded species in {round(clock.perf_counter() - ts, 2)}s")
         self.species.species_indexer = save_state['species_indexer']
+        print(f"Loaded NEAT Population species in {round(clock.perf_counter() - gts, 2)}s")
 
         bind_modules(self.modules, list(self.genomes.values()))
         self.species.speciate(self.genomes, self.generation, True)

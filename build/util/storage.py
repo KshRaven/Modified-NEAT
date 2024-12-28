@@ -22,7 +22,7 @@ STORAGE_DIR = PROJECT_DIR + "\\storage\\"
 
 def save(items: dict[str, Any], filename: str, directory: str, file_no: int = None, replace=False,
          subdirectory: str = None, save_location: str = None, extension: str = None,
-         items_name: str = None, time: int = None, debug=True) -> bool:
+         items_name: str = None, time: int = None, debug=True):
     # Use default directory and name as subdirectory
     if save_location is None:
         save_location = STORAGE_DIR
@@ -37,20 +37,20 @@ def save(items: dict[str, Any], filename: str, directory: str, file_no: int = No
         filepath = directory + filename + extension
         # Get the latest filepath if replace
         if replace:
-            counter = 0
+            file_no = 0
             while True:
-                counter += 1
-                filepath_to_check = f'{directory+filename}-{counter}{extension}'
+                file_no += 1
+                filepath_to_check = f'{directory+filename}-{file_no}{extension}'
                 if os.path.exists(filepath_to_check):
                     filepath = filepath_to_check
                 else:
                     break
         # Else get the next name
         else:
-            counter = 0
+            file_no = 0
             while os.path.exists(filepath):
-                counter += 1
-                filepath = f'{directory + filename}-{counter}{extension}'
+                file_no += 1
+                filepath = f'{directory + filename}-{file_no}{extension}'
     else:
         # Get specific file
         filepath = f'{directory + filename}-{file_no}{extension}'
@@ -69,12 +69,13 @@ def save(items: dict[str, Any], filename: str, directory: str, file_no: int = No
             else:
                 pickle.dump(save_data, file)
         if debug:
-            print(CM(f"\nSuccessfully dumped {items_name if items_name is not None else ''} "
+            print(CM(f"Successfully dumped {items_name if items_name is not None else ''} "
                      f"save file to '{filepath}'.", PRINT_COLOUR))
 
-        return True
+        return True, file_no
     except Exception as e:
-        raise RuntimeError(f"\nUtilityError: Failed to save the items: {items}; \n{e}.")
+        print(CM(f"\nUtilityError: Failed to save the items: {items}; \n{e}."), Fore.LIGHTRED_EX)
+        return False, file_no
 
 
 def load(filename: str, directory: str, file_no: int = None,
@@ -97,18 +98,16 @@ def load(filename: str, directory: str, file_no: int = None,
             extension = '.pkl'
         filepath = directory + filename + extension
 
-        if file_no == 0:
-            filepath = directory + filename + extension
-        elif file_no is None:
-            counter = 0
+        if file_no is None:
+            file_no = -1
             while True:
-                counter += 1
-                filepath_to_check = f'{directory+filename}-{counter}{extension}'
+                file_no += 1
+                filepath_to_check = f'{directory+filename}-{file_no}{extension}'
                 if os.path.exists(filepath_to_check):
                     filepath = filepath_to_check
                 else:
                     break
-        elif file_no > 0:
+        elif file_no >= 0:
             filepath = f'{directory+filename}-{file_no}{extension}'
         else:
             raise NotADirectoryError(f"Failed to load save folder; invalid 'file_no'")
@@ -132,7 +131,7 @@ def load(filename: str, directory: str, file_no: int = None,
         if items is None:
             raise ValueError(f"No items found in save file {filepath}")
         if debug:
-            print(CM(f"\nSuccessfully loaded {items_name if items_name is not None else ''} "
+            print(CM(f"Successfully loaded {items_name if items_name is not None else ''} "
                      f"save file from '{filepath}'.", PRINT_COLOUR))
         return items
     except Exception as e:

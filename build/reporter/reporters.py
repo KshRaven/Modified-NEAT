@@ -62,7 +62,8 @@ class StdOutReporter(BaseReporter):
         best_species_id = species.get_species_id(best_genome.key)
         print(f"\nPopulation's average fitness: {fit_mean:3.5f} std_dev: {fit_std:3.5f}")
         print(f"Best fitness: {CM(f'{best_genome.fitness:3.5f}', Fore.LIGHTGREEN_EX)}"
-              f" - size: { best_genome.size()!r}"
+              # TODO: Enable Genome complexity calculation, or scrap it
+              # f" - size: { best_genome.size()!r}"
               f" - species {best_species_id} - id {best_genome.key}")
 
     def complete_extinction(self):
@@ -71,7 +72,10 @@ class StdOutReporter(BaseReporter):
 
     def found_solution(self, config: Config, generation: int, best: Genome):
         print(f"\nBest individual in generation {CM(self.generation, Fore.LIGHTGREEN_EX)} "
-              f"meets fitness threshold - complexity: {best.size()!r}")
+              f"meets fitness threshold"
+              # TODO: Enable Genome complexity calculation, or scrap it
+              # f" - complexity: {best.size()!r}"
+              )
 
     def species_stagnant(self, sid: int, species):
         if self.show_species_detail:

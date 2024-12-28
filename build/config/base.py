@@ -102,7 +102,7 @@ class Configuration:
         return False
 
     def update(self, path: str, **ex):
-        debug = manage_params(ex, 'debug', True)
+        verbose = manage_params(ex, 'verbose', None)
         variables = {attr: val for attr, val in vars(self).items() if attr[0] != '_'}
         try:
             # Fetch lines
@@ -122,11 +122,13 @@ class Configuration:
                             value = variables[label]
                             text = f"{self._handle_spacing(label)} = {self._set_value(value)}\n"
                             file.write(text)
+                            if verbose and verbose >= 2:
+                                print(f"{text_fill(label, 25)} = {value}")
                         else:
                             file.write(line)
                     file.close()
                 # Debugging
-                if debug:
+                if verbose:
                     name, extension = os.path.splitext(os.path.basename(path))
                     print(f"Updated configuration '{CM(self._name.upper(), Fore.LIGHTCYAN_EX)}' "
                           f"in NEAT Configuration {CM(f'{name}{extension}', Fore.LIGHTMAGENTA_EX)}")
@@ -135,7 +137,8 @@ class Configuration:
                 print(CM(f"File is not a NEAT configuration file", Fore.LIGHTRED_EX))
                 file.close()
         except FileNotFoundError as error:
-            print(CM(f"The NEAT configuration file does not exist", Fore.LIGHTRED_EX) + f"; {error}")
+            print(CM(f"The NEAT configuration update failed", Fore.LIGHTRED_EX) + f"; {error}")
+            self.create(path, **ex)
         return False
 
     def load(self, path: str, **ex):
@@ -180,6 +183,7 @@ class Configuration:
                 file.close()
         except FileNotFoundError as error:
             print(CM(f"The NEAT configuration file does not exist", Fore.LIGHTRED_EX) + f"; {error}")
+            self.create(path, **ex)
         return False
 
     def set(self, **parameters):

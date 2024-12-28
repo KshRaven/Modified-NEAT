@@ -10,7 +10,7 @@ from build import rl
 
 from build.population import Population
 from build.nn.genome import Genome, initialize_genome
-from build.nn.base import NeatModule, bind_modules
+from build.nn.base import NeatModule
 from build.species import Species, SpeciesSet
 from build.reproduction import Reproduction
 from build.reporter import *

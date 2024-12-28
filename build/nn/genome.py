@@ -365,13 +365,13 @@ NETWORK = Network.class_type.instance_type
 
 @jitclass([
     ('key', INT),
-    ('networks', types.DictType(INT, NETWORK)),
+    # ('networks', types.DictType(INT, NETWORK)),
     ('fitness', optional(FLOAT)),
 ])
 class Genome(object):
     def __init__(self, key: int):
         self.key = key
-        self.networks: dict[int, Network] = Dict.empty(INT, NETWORK)
+        # self.networks: dict[int, Network] = Dict.empty(INT, NETWORK)
         self.fitness: float = None
 
     def add_network(self, network_key: int, inputs: int, outputs: int, hidden_layers: list[int] = None):
