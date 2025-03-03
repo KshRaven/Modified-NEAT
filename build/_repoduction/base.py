@@ -1,7 +1,7 @@
 
-from build.repoduction.types import ReproductionMethods
+from build._repoduction.types import ReproductionMethods
 from build.config import Config
-from build.nn.base import NeatModule, bind_modules
+from build.nn.base import NeatModule #, bind_modules
 from build.nn.genome import Genome, initialize_genome
 from build.reporter.base import ReporterSet
 from build.species import SpeciesSet, Species, SPECIES
@@ -15,6 +15,8 @@ from itertools import count
 
 import numpy as np
 
+
+# TODO: Re-support this module for NEAT CPU capability
 FLOAT   = types.float64
 INT     = types.int64
 # STR     = typeof('str')

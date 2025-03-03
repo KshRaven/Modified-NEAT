@@ -6,7 +6,7 @@ from build.reporter.base import ReporterSet
 from build.species import SpeciesSet, Species, SPECIES
 from build.stagnation import Stagnation
 from build.util.datetime import eta, clock
-from build.base import initialize
+from build.cuda import initialize
 
 from numba import types, typeof, njit, optional, prange, cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray

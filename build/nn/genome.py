@@ -696,10 +696,10 @@ def load_genome(struct: Dict):
     key             = struct['key']
     genome          = Genome(key)
     genome.fitness  = struct['fitness']
-    networks        = Dict.empty(INT, NETWORK)
-    for i, ns in enumerate(struct['networks']):
-        network = Network(i, 1, 1)
-        load_network(network, ns)
-        networks[network.key] = network
-    genome.networks  = networks
+    # networks        = Dict.empty(INT, NETWORK)
+    # for i, ns in enumerate(struct['networks']):
+    #     network = Network(i, 1, 1)
+    #     load_network(network, ns)
+    #     networks[network.key] = network
+    # genome.networks  = networks
     return genome

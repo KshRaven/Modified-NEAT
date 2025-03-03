@@ -1,7 +1,7 @@
 
 from torch import Tensor
 from typing import Union
-from torch.nn import ReLU
+from torch.nn import ReLU, SiLU
 
 import torch
 import torch.nn as nn

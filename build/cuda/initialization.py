@@ -1,7 +1,7 @@
 
 from build.nn.base import NeatModule
 from build.config import Config
-from build.functional import calc_grid, get_rng_states, clamp, normal, uniform
+from build.cuda.functional import calc_grid, get_rng_states, clamp, normal, uniform
 from build.util.fancy_text import CM, Fore
 
 from numba import cuda
@@ -86,7 +86,7 @@ def initialize(config: Config, module: NeatModule, tpb=4, verbose: int = None):
                 config.genome.weight_min_value, config.genome.weight_max_value, rng_states)
 
         # remove RNG data from GPU
-        _ = rng_states.copy_to_host()
+        rng_states = rng_states.copy_to_host()
         # Copy data back to parameter
         array = array.copy_to_host()
         param.data[:] = torch.tensor(array, device=param.device, dtype=param.dtype).view(original_shape)

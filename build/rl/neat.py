@@ -20,11 +20,11 @@ import matplotlib.pyplot as plt
 TensorDict = dict[int, Tensor]
 
 
-# TODO: Update this Trainer
-class PPO(Algorithm):
+# TODO: Implement this
+class NEAT(Algorithm):
     def __init__(self, model: Model, population: Population, device=torch.device('cpu'), dtype=torch.float32, **options):
         """
-        Proximal Policy Optimization (PPO) algorithm initialization.
+        Simple NEAT algorithm initialization.
 
         :param model: The model to be used, expected to be of type Reformer.
         :param device: The device to be used for computation (default is 'cpu').
@@ -81,11 +81,8 @@ class PPO(Algorithm):
         self.device         = device
         self.dtype          = dtype
         self.steps_done     = 0
-        self._prev_steps_done = self.steps_done
         self._steps_limit: int = None
         self.episodes_done  = 0
-        self.episode_mapping: dict[int, int] = {}
-        self.episode_lengths: dict[int, int] = None
         self._ep_mapping: list[int] = None
         self._ep_started: list[bool] = None
         self._ep_offset: int = 0
@@ -109,73 +106,44 @@ class PPO(Algorithm):
         self.logging.update_mapping(mapping)
 
     def update(self, observations: Tensor, actions: Tensor, probs: Tensor, rewards: Tensor,
-               terminated: Union[bool, list[bool]], force_stop=False, envs: list[object, list[object]] = None):
+               terminated: Union[bool, list[bool]], key_index=-2, force_stop=False):
         if isinstance(terminated, bool):
             terminated = [terminated]
-        if envs is not None and not isinstance(envs, (list, tuple)):
-            envs = [envs]
 
-        # Handle episode mapping
-        if self.steps_done == self._prev_steps_done:
-            # Give env new mapping if it is done
-            if envs is not None:
-                self.episode_mapping: dict[int, int] = {
-                    env_idx: next(self.mapping_indexer)
-                    if (self.episode_mapping.get(env_idx) is None or hasattr(env, 'done') and env.done)
-                    else self.episode_mapping[env_idx]
-                    for env_idx, env in enumerate(envs)
-                }
-            # When no env obj passed remap all env
-            else:
-                self.episode_mapping = {
-                    env_idx: next(self.mapping_indexer) for env_idx in range(len(terminated))
-                }
-            # Delete invalid ep mapping
-            for env_idx in list(self.episode_mapping.keys()):
-                if 0 > env_idx > len(terminated) - 1:
-                    del self.episode_mapping[env_idx]
-            mapping_list = list(self.episode_mapping.values())
-            # Initialize the episode lengths mapping
-            if self.episode_lengths is None:
-                self.episode_lengths: dict[int, int] = {
-                    env_map: 0 for env_map in self.episode_mapping.values()
-                }
-            # Reset episode lengths after training regardless if env was not done and remove invalids
-            else:
-                for ep_map in list(self.episode_lengths.keys()):
-                    if ep_map not in mapping_list:
-                        del self.episode_lengths[ep_map]
-                    else:
-                        self.episode_lengths[ep_map] = 0
-                for ep_map in mapping_list:
-                    if ep_map not in self.episode_lengths:
-                        self.episode_lengths[ep_map] = 0
+        envs = len(terminated)
+        if self._ep_mapping is None:
+            self._ep_mapping = [self.episodes_done + ex for ex in range(envs)]
+            self._ep_started = [True for _ in range(envs)]
+            self._ep_offset = envs - 1
 
         filled = False
         if self.steps_done < self._steps_limit:
-            for idx, ended in enumerate(terminated):
-                self.replay.update(
-                    state       = observations,
-                    action      = actions,
-                    prob        = probs,
-                    reward      = rewards,
-                    ep_map      = self.episode_mapping[idx],
-                    # key_index   = key_index
-                )
+            for idx, (ended, started) in enumerate(zip(terminated, self._ep_started)):
+                if not started and not ended:
+                    started = self._ep_started[idx] = True
+                    self._ep_offset += 1
+                    self._ep_mapping[idx] = self.episodes_done + self._ep_offset
 
-                self.steps_done += 1
-                self.episodes_done = max(self.episode_mapping.values()) + 1
-                self.episode_lengths[self.episode_mapping[idx]] += 1
+                if started:
+                    episode_index = self._ep_mapping[idx]
+                    self.replay.update(
+                        state       = observations,
+                        action      = actions,
+                        prob        = probs,
+                        reward      = rewards,
+                        ep_map      = episode_index,
+                        # key_index   = key_index
+                    )
+                    self.steps_done += 1
 
-                if self.steps_done >= self._steps_limit or force_stop:
-                    self._prev_steps_done = self.steps_done
-                    filled = True
-                else:
-                    if ended:
-                        self.episode_mapping[idx] = next(self.mapping_indexer)
-                        self.episode_lengths[self.episode_mapping[idx]] = 0
+                if ended:
+                    self._ep_started[idx] = False
+
+            if self.steps_done >= self._steps_limit or force_stop:
+                self.episodes_done += self._ep_offset + 1
+                filled = True
         else:
-            raise RuntimeError(f"Steps have already been filled.")
+            raise ValueError(f"Steps have already been filled.")
 
         return filled
 
@@ -219,7 +187,6 @@ class PPO(Algorithm):
     def reset(self):
         self.replay.reset()
 
-    # TODO: Update to get returns instead
     def _get_advantages(self, batches: dict[int, list[list[int]]], observations: TensorDict, rewards: TensorDict,
                         verbose: int = None):
         ts, ud, ut = clock.perf_counter(), 0, len(self.replay.mapping)
@@ -388,7 +355,6 @@ class PPO(Algorithm):
                 print(f"collected data in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
 
             # Rolling out data
-            pts = clock.perf_counter()
             invalid_population = len(self.population.to_delete) == len(self.population.genomes)
             valid_keys = [key for key in self.replay.mapping.keys() if key not in self.population.to_delete or invalid_population]
             with torch.no_grad():
@@ -428,7 +394,6 @@ class PPO(Algorithm):
                 # Handling of non valid genomes
                 fs = [genome.fitness if genome.fitness else 0 for genome in self.population.genomes.values()]
                 score_range = max(fs) - min(fs)
-            processing_time1 = np.floor(clock.perf_counter() - pts)
 
             # Training model
             ts = clock.perf_counter()
@@ -439,7 +404,6 @@ class PPO(Algorithm):
                 print(f"\rran training in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
 
             # Set values
-            pts = clock.perf_counter()
             fitnesses: dict[int, float] = None
             ppo_score: dict[int, float] = None
             criterion = self.population.config.general.fitness_criterion
@@ -526,8 +490,6 @@ class PPO(Algorithm):
                         return torch.nan, torch.nan
 
                 mean, std = get_range(best_genome_key)
-                processing_time2 = np.floor(clock.perf_counter() - pts)
-
                 if verbose and verbose >= 2:
                     print(f"calculated stats in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
 
@@ -562,12 +524,13 @@ class PPO(Algorithm):
                 extra = 'time/'
                 self.writer.add_scalar(extra+'run_time', run_time, self.updates_done)
                 self.writer.add_scalar(extra+'train_time', train_time, self.updates_done)
-                self.writer.add_scalar(extra+'processing_time', processing_time1+processing_time2, self.updates_done)
 
                 # Training
                 extra = 'training/'
                 self.writer.add_scalar(extra+'clip_range', self.clip_range, self.updates_done)
                 self.writer.add_scalar(extra+'explained_variance', explained_variance, self.updates_done)
+                self.writer.add_scalar(extra+'param_mean', mean, self.updates_done)
+                self.writer.add_scalar(extra+'param_std', std, self.updates_done)
                 self.writer.add_scalar(extra+'policy_accuracy', policy_acc, self.updates_done)
                 self.writer.add_scalar(extra+'reward_accuracy', reward_acc, self.updates_done)
                 self.writer.add_scalar(extra+'policy_reduction', policy_reduction, self.updates_done)
@@ -578,11 +541,6 @@ class PPO(Algorithm):
                 self.writer.add_scalar(extra+'value_loss', value_loss, self.updates_done)
                 self.writer.add_scalar(extra+'entropy_loss', entropy_loss, self.updates_done)
                 self.writer.add_scalar(extra+'loss', loss, self.updates_done)
-
-                # Module
-                extra = 'module/'
-                self.writer.add_scalar(extra+'param_mean', mean, self.updates_done)
-                self.writer.add_scalar(extra+'param_std', std, self.updates_done)
 
                 # Population
                 survival_rate = len(valid_keys) / len(self.population.genomes)
@@ -742,12 +700,12 @@ if __name__ == '__main__':
     CONFIG.reproduction.min_species_size = 100
     GENOMES     = 100
     POPULATION  = neat.Population(GENOMES, MODEL, CONFIG, init_reporter=True)
-    TRAINER     = PPO(MODEL, POPULATION, DEVICE, DTYPE, loss_reg=0.1, gamma=0.0,
-                      scheduler=neat.scheduler.CosineAnnealing(CONFIG, 100, 50, 0.001, True, True))
+    TRAINER     = NEAT(MODEL, POPULATION, DEVICE, DTYPE, loss_reg=0.1, gamma=0.0,
+                       scheduler=neat.scheduler.CosineAnnealing(CONFIG, 100, 50, 0.001, True, True))
     STEPS       = 100
 
     def evaluate(population: Population, **options):
-        trainer: PPO = options['trainer']
+        trainer: NEAT = options['trainer']
         trainer.update_mapping(population.get_mapping())
         genomes = len(population.genomes)
 

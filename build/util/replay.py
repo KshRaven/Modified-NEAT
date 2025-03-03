@@ -24,6 +24,15 @@ class ReplayBuffer(object):
         maximum = np.min([np.mean([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
         return maximum
 
+    def episodes(self):
+        listing = []
+        if 'ep_map' in self.buffer_names:
+            for key_data in self.data.values():
+                for ep_idx in key_data['ep_map']:
+                    if ep_idx not in listing:
+                        listing.append(ep_idx)
+        return listing
+
     def buffer_sizes(self, normalize=False):
         lengths: dict[int, float] = {key: np.mean([len(buffer) for buffer in buffers.values()]) for key, buffers in self.data.items()}
         if normalize:

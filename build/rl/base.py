@@ -11,6 +11,7 @@ from torch import Tensor
 from numba import njit
 from numpy import ndarray
 from typing import Any, Union
+from itertools import count
 
 import torch
 import torch.nn as nn
@@ -21,10 +22,14 @@ TensorDict = dict[int, Tensor]
 
 
 class Algorithm(object):
-    def __init__(self, model: Model, population: Population):
+    mapping_indexer = count(0)
+
+    def __init__(self, model: Model, population: Population, schedulers: list[Scheduler] = None):
         self.model                      = model
         self.population: Population     = population
-        self.scheduler: Scheduler       = None
+        self.schedulers: list[Scheduler] = schedulers
+        if isinstance(self.schedulers, Scheduler):
+            self.schedulers = [self.schedulers]
         self.replay                     = ReplayBuffer()
         self.logging                    = ReplayBuffer()
         self.alpha_steps_done           = 0
@@ -128,8 +133,8 @@ class Algorithm(object):
                     observation = observations[key][batch].to(self.device)
                     action      = actions[key][batch].to(self.device)
                     reward      = rewards[key][batch].to(self.device)
-                    action_pred: Tensor = self.model.get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
-                    reward_pred: Tensor = self.model.get_value(observation.unsqueeze(0), keys=key).squeeze(0)
+                    action_pred: Tensor = self.model.get_policy(observation.unsqueeze(0), keys=keys).squeeze(0)
+                    reward_pred: Tensor = self.model.get_value(observation.unsqueeze(0), keys=keys).squeeze(0)
 
                     # Get action accuracy
                     if type == 'continuous':
@@ -250,44 +255,47 @@ class Algorithm(object):
 
         return episode_lengths
 
+    # TODO: Implement saving and loading of Reinforcing
     def save(self, name: str = None, directory: str = None, file_no: int = None, replace=False):
-        exclude = ['population', 'parameters', 'model', 'replay', 'logging', 'writer']
-        state = {var: getattr(self, var) for var in vars(self).keys() if var not in exclude}
-
-        algo = self.__class__.__name__
-        if name is None:
-            name = 'default'
-        if directory is None:
-            directory = f'{algo.lower()}'
-
-        # Save Trainer data
-        if save(state, name, directory, file_no, replace, items_name=f'NEAT {algo}')[0]:
-            # Save population
-            self.population.save_dict(name, directory, file_no, replace)
-
-            print(CM(f"Successfully saved trainer to '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
-        else:
-            print(CM(f"Failed to save trainer to '{directory}\\{name}'", Fore.LIGHTRED_EX))
+        # exclude = ['population', 'parameters', 'model', 'replay', 'logging', 'writer']
+        # state = {var: getattr(self, var) for var in vars(self).keys() if var not in exclude}
+        #
+        # algo = self.__class__.__name__
+        # if name is None:
+        #     name = 'default'
+        # if directory is None:
+        #     directory = f'{algo.lower()}'
+        #
+        # # Save Trainer data
+        # if save(state, name, directory, file_no, replace, items_name=f'NEAT {algo}')[0]:
+        #     # Save population
+        #     self.population.save_dict(name, directory, file_no, replace)
+        #
+        #     print(CM(f"Successfully saved trainer to '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
+        # else:
+        #     print(CM(f"Failed to save trainer to '{directory}\\{name}'", Fore.LIGHTRED_EX))
+        raise NotImplementedError()
 
     def load(self, name: str = None, directory: str = None, file_no: int = None):
-        algo = self.__class__.__name__
-        if name is None:
-            name = 'default'
-        if directory is None:
-            directory = f'{algo.lower()}'
-        state = load(name, directory, file_no, items_name=f'NEAT {algo}')
-        if state is not None:
-            # Load Trainer data
-            for var, val in state.items():
-                setattr(self, var, val)
-
-            # Load Population
-            self.population.load_dict(None, name, directory, file_no)
-
-            # Load Model and Params
-            self._get_params(self.model)
-            bind_modules(self.parameters, self.population.genomes, True)
-
-            print(CM(f"Successfully loaded trainer from '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
-        else:
-            print(CM(f"Failed to load trainer from '{directory}\\{name}'", Fore.LIGHTRED_EX))
+        # algo = self.__class__.__name__
+        # if name is None:
+        #     name = 'default'
+        # if directory is None:
+        #     directory = f'{algo.lower()}'
+        # state = load(name, directory, file_no, items_name=f'NEAT {algo}')
+        # if state is not None:
+        #     # Load Trainer data
+        #     for var, val in state.items():
+        #         setattr(self, var, val)
+        #
+        #     # Load Population
+        #     self.population.load_dict(None, name, directory, file_no)
+        #
+        #     # Load Model and Params
+        #     self._get_params(self.model)
+        #     bind_modules(self.parameters, self.population.genomes, True)
+        #
+        #     print(CM(f"Successfully loaded trainer from '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
+        # else:
+        #     print(CM(f"Failed to load trainer from '{directory}\\{name}'", Fore.LIGHTRED_EX))
+        raise NotImplementedError()

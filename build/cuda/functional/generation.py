@@ -5,7 +5,12 @@ from numba.cuda import random
 
 import numpy as np
 
-SEED = int(np.random.randint(0, int(1e2)))
+SEED = int(np.random.randint(0, int(1e3)))
+
+
+def set_seed(seed: int):
+    global SEED
+    SEED = seed
 
 
 def get_rng_states(kernel_shape: tuple, seed: int = None):

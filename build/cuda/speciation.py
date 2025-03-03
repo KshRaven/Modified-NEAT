@@ -3,7 +3,7 @@ from build.config import Config
 from build.nn.base import NeatModule
 from build.nn.genome import Genome, FLOAT, INT
 from build.species import Species, SpeciesSet, GenomeDistanceCache, get_ct
-from build.functional import get_value, calc_grid
+from build.cuda.functional import get_value, calc_grid
 from build.util.fancy_text import CM, Fore
 
 from numba import types, njit, optional, prange, cuda
@@ -104,7 +104,7 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
             )
 
         # remove data from GPU
-        _ = array.copy_to_host()
+        array = array.copy_to_host()
 
     total_distance = total_distance.copy_to_host()
     if verbose and verbose >= 2:

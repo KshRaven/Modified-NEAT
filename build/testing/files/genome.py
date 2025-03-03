@@ -49,6 +49,6 @@ if __name__ == "__main__":
     print(child.networks[0].output_keys)
     print(child.networks[0])
     print(child.networks[0].build)
-    print([w.shape for w in child.networks[0].weights])
+    print([w.shape for w in child.networks[0].kernels])
     print([w.shape for w in child.networks[0].biases])
 

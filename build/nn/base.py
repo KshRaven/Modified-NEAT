@@ -13,6 +13,18 @@ import torch.nn as nn
 LAYER_DEF = types.Tuple([INT, INT])
 
 
+def _addindent(s_, numSpaces):
+    s = s_.split("\n")
+    # don't do anything for single-line stuff
+    if len(s) == 1:
+        return s_
+    first = s.pop(0)
+    s = [(numSpaces * " ") + line for line in s]
+    s = "\n".join(s)
+    s = first + "\n" + s
+    return s
+
+
 class NeatParameter(nn.Module):
     __indexer = count(0)
 
@@ -26,6 +38,19 @@ class NeatParameter(nn.Module):
 
         # BUILD
         self.data = nn.Parameter(torch.randn(1, *shape, device=device, dtype=dtype), requires_grad=requires_grad)
+        self.mapping: dict[int, int] = None
+
+        # ATTRIBUTES
+        self.genome_num: int = None
+
+        self.cd: CPUArray = None
+        self.md: CPUArray = None
+
+    def reset(self):
+        # BUILD
+        self.data = nn.Parameter(
+            torch.randn(1, *self.original_shape, device=self.device, dtype=self.dtype),
+            requires_grad=self.requires_grad)
         self.mapping: dict[int, int] = None
 
         # ATTRIBUTES
@@ -48,6 +73,10 @@ class NeatParameter(nn.Module):
     @property
     def dtype(self):
         return self.data.dtype
+
+    @property
+    def requires_grad(self):
+        return self.data.requires_grad
 
     def _update_data(self, tensor: Tensor):
         remove_rg = self.data.requires_grad
@@ -232,7 +261,8 @@ class NeatModule(nn.Module):
         # else:
         #     raise ValueError(f"Not all keys included in global tensor")
 
-    def expand(self, tensor: Union[Tensor, None], target: Tensor, offset: int = None, keys=None):
+    @staticmethod
+    def expand(tensor: Union[Tensor, None], target: Tensor, offset: int = None, keys=None):
         if tensor is not None:
             # print(tensor.shape)
             # tensor = self.fetch(tensor, keys)
@@ -307,7 +337,29 @@ class Model(NeatModule):
 
     def __repr__(self):
         if len(self.params) == 0:
-            return super(nn.Module, self).__repr__()
+            # We treat the extra repr like the sub-module, one item per line
+            extra_lines = []
+            extra_repr = self.extra_repr()
+            # empty string will be split into list ['']
+            if extra_repr:
+                extra_lines = extra_repr.split("\n")
+            child_lines = []
+            for key, module in self._modules.items():
+                mod_str = repr(module)
+                mod_str = _addindent(mod_str, 2)
+                child_lines.append("(" + key + "): " + mod_str)
+            lines = extra_lines + child_lines
+
+            main_str = self._get_name() + "("
+            if lines:
+                # simple one-liner info, which most builtin Modules will use
+                if len(extra_lines) == 1 and not child_lines:
+                    main_str += extra_lines[0]
+                else:
+                    main_str += "\n  " + "\n  ".join(lines) + "\n"
+
+            main_str += ")"
+            return main_str
         else:
             params = ""
             for i, (param, value) in enumerate(self.params.items()):
@@ -315,38 +367,3 @@ class Model(NeatModule):
                 if i < len(self.params)-1:
                     params += ", "
             return f"{self.__class__.__name__}[NeatModule]({params})"
-
-#     def save(self, symbol: str, timeframe: Timeframe, file_no: int = None, replace: bool = False) -> None:
-#         model_type = self.__class__.__name__
-#         cons_name = f'{symbol}-{timeframe.name}-{model_type}'
-#         storage.save(self, 'model', 'trading_models', file_no=file_no, replace=replace,
-#                      subdirectory=cons_name, items_name=f'{model_type} Model')
-#
-#     def load(self, symbol: str, timeframe: Timeframe, file_no: int = None):
-#         model_type = self.__class__.__name__
-#         cons_name = f'{symbol}-{timeframe.name}-{model_type}'
-#         model = storage.load('model', 'trading_models', file_no=file_no,
-#                              subdirectory=cons_name, items_name=f'{model_type} Model')
-#         if model is not None:
-#             for attr, val in vars(model).items():
-#                 setattr(self, attr, val)
-#
-#
-# def save(
-#         model: Model, symbol: str, timeframe: Timeframe, file_no: int = None, replace: bool = False
-# ) -> None:
-#     if model is None:
-#         raise ValueError("Model cannot be None")
-#
-#     model_type = type(model).__name__
-#     cons_name = f'{symbol}-{timeframe.name}-{model_type}'
-#     storage.save(model, 'model', 'trading_models', file_no=file_no, replace=replace,
-#                  subdirectory=cons_name, items_name='Model')
-#
-#
-# def load(
-#         model_class: str, symbol: str, timeframe: Timeframe, file_no: int = None
-# ) -> tuple[Union[Model, None]]:
-#     cons_name = f'{symbol}-{timeframe.name}-{model_class}'
-#     model = storage.load('model', 'trading_models', file_no=file_no, subdirectory=cons_name, items_name='Model')
-#     return model

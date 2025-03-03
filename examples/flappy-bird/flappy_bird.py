@@ -1,13 +1,14 @@
 
 from build.util.fancy_text import CM, Fore
 from build.nn.base import Model
-from build.models.sub import Linear
-from build.models import Reformer
+from build.nn.modules.sub import Linear, Conv1d, Transpose, ResidualBlock, Sequential, GroupNorm, ConverBase
+from build.nn.modules import Reformer
 from build.util.datetime import unix_to_datetime_file
 
 import build as neat
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 
 from torch import Tensor
@@ -24,10 +25,11 @@ import numpy as np
 torch.set_printoptions(threshold=10)
 pygame.font.init()  # init font
 
-DEVICE = 'cpu' # 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cpu' if torch.cuda.is_available() else 'cpu'
 DTYPE = torch.float32
 
 # Define window
+THRESHOLD = 0.9
 WIN_HEIGHT = 800
 WIN_WIDTH  = 550
 WIN = pygame.display.set_mode((WIN_WIDTH, WIN_HEIGHT))
@@ -42,7 +44,7 @@ DRAW_LINES = False
 # BG_IMG      = pygame.transform.scale(pygame.image.load(os.path.join("imgs", "bg.png")).convert_alpha(), (600, 900))
 # BIRD_IMGS   = [pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "bird" + str(x) + ".png")))
 #                for x in range(1, 4)]
-# BASE_IMG    = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "base.png")).convert_alpha())
+# BASE_IMG    = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "cuda.png")).convert_alpha())
 
 gen = 0
 
@@ -51,9 +53,11 @@ class Pipe(object):
     image = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "pipe.png")).convert_alpha())
     u_lim: int = 0
     l_lim: int = 50
+    pxt: float = 1.0
 
-    def __init__(self, x: int, gap=200, velocity=6):
-        self.gap = gap
+    def __init__(self, x: int, gap_l_lim=180, gap_u_lim=230, velocity=6):
+        self.gap_l_lim = gap_l_lim
+        self.gap_u_lim = gap_u_lim
         self.velocity = velocity
         self.x = x
         self.height = 0
@@ -73,7 +77,7 @@ class Pipe(object):
     def set_height(self,):
         self.height = random.randrange(self.u_lim, self.l_lim)
         self.top    = self.height - self.pipe_top.get_height()
-        self.bottom = self.height + self.gap
+        self.bottom = self.height + random.randint(self.gap_l_lim, self.gap_u_lim)
 
     def move(self):
         self.x -= self.velocity
@@ -97,7 +101,7 @@ class Pipe(object):
         bottom_offset = (self.x - bird.x, self.bottom - round(bird.y))
 
         b_point = bird_mask.overlap(bottom_mask, bottom_offset)
-        t_point = bird_mask.overlap(top_mask,top_offset)
+        t_point = bird_mask.overlap(top_mask, top_offset)
 
         if b_point or t_point:
             return True
@@ -220,8 +224,12 @@ class Birds(object):
         pass
 
     def jump(self, activation: Tensor):
+        if len(activation) != len(self.dead):
+            raise ValueError(f"Activation num do not match; Got {len(activation)}, expected {len(self.dead)}")
+        if activation.ndim == 2:
+            activation = activation.squeeze(-1)
         # activation shape (batch_size / seq_len, genomes, features)
-        activation = (~self.dead & (activation[:, 0] >= 0.90))
+        activation = (~self.dead & (activation >= THRESHOLD))
         self.vel[activation]        = -10.5
         self.tick_count[activation] = 0
         self.height[activation]     = self.y[activation].clone()
@@ -276,7 +284,7 @@ class Birds(object):
                 break
 
         # so when bird is nose diving it isn't flapping
-        nd                 = self.tilt[mask] <= -80
+        nd = self.tilt[mask] <= -80
         self.img_ref[mask][nd]   = 1
         self.img_count[mask][nd] = self.animation_time*2
 
@@ -314,28 +322,33 @@ class Birds(object):
 
     def check_passed(self, pipes: Pipes):
         self.score[~self.dead] += 1
-        self.score[self.dead] = -100
+        self.score[self.dead] += -1
         add_pipe = False
         for pipe in pipes.pipes:
-            passed = (pipe.x + pipe.image.get_width() * 0.9 < self.x) & ~self.dead
+            passed = (pipe.x + pipe.image.get_width() * pipe.pxt < self.x) & ~self.dead
             if not pipe.passed and torch.any(passed):
                 self.score[passed] += 50
                 pipe.passed = True
                 add_pipe = True
             elif pipe.passed:
                 pass
+            if not pipe.passed:
+                # centre = pipe.top + (pipe.top - pipe.bottom)/2
+                # self.score[~self.dead] -= ((centre - self.y[~self.dead])/WIN_HEIGHT)**2 + \
+                #                           ((pipe.x+pipe.image.get_width()*pipe.pxt - self.x[~self.dead])/WIN_WIDTH)**2
+                self.score[self.dead] -= 1
 
         return add_pipe
 
     def get_state(self, pipe: Pipe):
-        # Get state(seq_len=1, genomes, action_features)
-        tensor = torch.cat(
-            [self.y.unsqueeze(-1),
-             (self.y - pipe.height).unsqueeze(-1),
-             (self.y - pipe.bottom).unsqueeze(-1),
-             # (self.x - pipe.x + pipe.image.get_width() * 0.9).unsqueeze(-1),
-             # self.reward,
-             ], dim=-1) # .unsqueeze(0)
+        # Get state(genomes, seq_len=1, action_features)
+        tensor = torch.stack([
+            self.y,
+            (self.y - pipe.height),
+            (self.y - pipe.bottom),
+            (pipe.x - self.x),
+            (pipe.x + pipe.image.get_width()*pipe.pxt - self.x),
+        ], dim=-1) # .unsqueeze(0)
         # disabled = torch.full_like(tensor, -1).to(tensor.device, tensor.dtype)
         tensor[self.dead] = -1
         return tensor
@@ -371,7 +384,7 @@ class Game(object):
         self.text_color = (255, 255, 255)
         self.line_color = (255, 0, 0)
 
-    def tick(self, val=30):
+    def tick(self, val=100):
         self.clock.tick(val)
 
     def update(self, activation: Tensor):
@@ -392,7 +405,7 @@ class Game(object):
         # Draw pipes
         self.pipes.draw(self.window.display)
 
-        # Draw base
+        # Draw cuda
         self.base.draw(self.window.display)
 
         # Draw birds or debug
@@ -405,9 +418,10 @@ class Game(object):
                     x                  = self.birds.x[bird_index].item()
                     y                  = self.birds.y[bird_index].item()
                     img                = self.birds.get_image(bird_index)
+                    pxt = pipe.pxt
                     bird_center        = (x + img.get_width() / 2, y + img.get_height() / 2)
-                    pipe_top_center    = (pipe.x + pipe.pipe_top.get_width() / 2, pipe.height)
-                    pipe_bottom_center = (pipe.x + pipe.pipe_bottom.get_width() / 2, pipe.bottom)
+                    pipe_top_center    = (pipe.x + pipe.pipe_top.get_width() * pxt, pipe.height)
+                    pipe_bottom_center = (pipe.x + pipe.pipe_bottom.get_width() * pxt, pipe.bottom)
 
                     pygame.draw.line(self.window.display, self.line_color, bird_center, pipe_top_center, 5)
                     pygame.draw.line(self.window.display, self.line_color, bird_center, pipe_bottom_center, 5)
@@ -433,73 +447,120 @@ class Game(object):
 
 
 class RModel(Model):
-    def __init__(self, inputs, outputs, dim_size, bias, device, dtype):
+    def __init__(self, inputs: int, outputs: int, seq_len: int, dim_size: int, layers: int,
+                 kernel_size=1, heads: int = None, kv_heads: int = None, differential: int = False, norm_groups=1,
+                 bias=False, device: torch.device = 'cpu', dtype: torch.device = torch.float32):
         super().__init__()
-        self.distribution = 'normal'
-        self.act_proj   = Linear(inputs, dim_size, bias, device, dtype, nn.SiLU())
-        if self.distribution == 'discrete':
-            outputs = 2 ** outputs
-        self.mean       = Linear(dim_size, outputs, bias, device, dtype, nn.Sigmoid())
-        self.log_std    = Linear(dim_size, outputs, bias, device, dtype, nn.Sigmoid())
-        self.rew_proj   = Linear(inputs, dim_size, bias, device, dtype, nn.SiLU())
-        self.decode     = Linear(dim_size, 1, bias, device, dtype, None)
+        # Attributes
+        self.inputs         = inputs
+        self.outputs        = outputs
+        self.dim_size       = dim_size
+        self.layers         = layers
+        self.distribution   = 'normal'
+        self.kernel_size    = kernel_size
+        self.stride         = 1
+        self.norm_groups    = norm_groups
+        self.differential   = differential
 
-    def forward(self, state: Tensor):
-        return self.get_policy(state)
+        # Build
+        self.pri_actv = nn.SiLU()
+        self.pol_proj = neat.nn.Sequential(*[
+            Transpose(),
+            # GroupNorm(1, inputs, affine=True, bias=bias, device=device, dtype=dtype),
+            Conv1d(inputs, dim_size, self.kernel_size, self.stride, -1, bias=bias, device=device, dtype=dtype),
+            ResidualBlock(dim_size, dim_size, self.kernel_size, self.norm_groups,
+                          bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+            ConverBase((seq_len,), dim_size, self.kernel_size, self.norm_groups, layers, heads, kv_heads,
+                       self.differential, True, bias, device, dtype, actv=self.pri_actv, auto_single=True),
+            ResidualBlock(dim_size, dim_size, 1, self.norm_groups,
+                          bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+            nn.Flatten(-2, -1),
+            self.pri_actv,
+        ])
+        self.mean_log_std = Linear(dim_size, 2*outputs, bias, device, dtype)
+        self.sec_actv   = None
+        self.val_proj   = neat.nn.Sequential(*[
+            Transpose(),
+            Conv1d(inputs, dim_size, self.kernel_size, self.stride, -1, bias=bias, device=device, dtype=dtype),
+            ResidualBlock(dim_size, dim_size, self.kernel_size, self.norm_groups,
+                          bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+            ConverBase((seq_len,), dim_size, self.kernel_size, self.norm_groups, layers, heads, kv_heads,
+                       self.differential, True, bias, device, dtype, actv=self.pri_actv, auto_single=True),
+            # ResidualBlock(dim_size, dim_size, 1, self.norm_groups,
+            #               bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+            nn.Flatten(-2, -1),
+            self.pri_actv,
+        ])
+        self.decode     = Linear(dim_size, 1, bias, device, dtype)
 
-    def get_mean(self, latent: Tensor, key: int = None) -> Tensor:
-        return self.mean(latent, key=key)
+    def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
+        return self.get_policy(state, keys=keys, **kwargs)
 
-    def get_std(self, latent: Tensor, key: int = None) -> Tensor:
-        return 10 ** (-4 + self.log_std(latent, key=key) * 3)
+    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
+        mean_std        = self.mean_log_std(latent, keys=keys)
+        mean, log_std   = torch.chunk(mean_std, 2, -1)
+        mean            = F.tanh(mean)
+        std             = torch.exp(F.hardtanh(log_std, -10, 0))
+        return mean, std
 
-    def get_action(self, state: Tensor, key: int = None) -> tuple[Tensor, Tensor]:
-        latent = self.act_proj(state, key=key)
-        mean, std = self.get_mean(latent, key=key), self.get_std(latent, key=key)
-        dist = torch.distributions.Normal(mean, std)
-        action = dist.sample()
-        log_prob = dist.log_prob(action)
+    def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
+        latent      = self.pol_proj(state, keys=keys)
+        mean, std   = self.get_mean_std(latent, keys=keys)
+        dist        = torch.distributions.Normal(mean, std)
+        action      = dist.sample()
+        if self.sec_actv is not None:
+            action = self.sec_actv(action)
+        log_prob    = dist.log_prob(action)
         return action, log_prob
 
-    def evaluate_action(self, state: Tensor, action: Tensor, key: int = None) -> [Tensor, Union[Tensor, None]]:
-        latent = self.act_proj(state, key=key)
-        mean, std = self.get_mean(latent, key=key), self.get_std(latent, key=key)
-        dist = torch.distributions.Normal(mean, std)
-        log_prob = dist.log_prob(action)
-        entropy = dist.entropy()
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None) -> [Tensor, Union[Tensor, None]]:
+        latent      = self.pol_proj(state, keys=keys)
+        mean, std   = self.get_mean_std(latent, keys=keys)
+        dist        = torch.distributions.Normal(mean, std)
+        log_prob    = dist.log_prob(action)
+        entropy     = dist.entropy()
         return log_prob, entropy
 
-    def get_policy(self, state: Tensor, key: int = None, **options) -> Tensor:
-        latent = self.act_proj(state, key=key)
-        mean, std = self.get_mean(latent, key=key), self.get_std(latent, key=key)
-        dist = torch.distributions.Normal(mean, std)
-        action = dist.sample()
+    def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
+        latent      = self.pol_proj(state, keys=keys)
+        mean, std   = self.get_mean_std(latent, keys=keys)
+        dist        = torch.distributions.Normal(mean, std)
+        action      = dist.sample()
+        if self.sec_actv is not None:
+            action = self.sec_actv(action)
         return action
 
-    def get_value(self, state: Tensor, key: int = None) -> Tensor:
-            latent = self.rew_proj(state, key=key)
-            value = self.decode(latent, key=key)
-            return value
+    def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
+        latent      = self.val_proj(state, keys=keys)
+        value       = self.decode(latent, keys=keys)
+        return value
 
 
 # Network
-INPUTS      = 3
+INPUTS      = 5
 OUTPUTS     = 1
 GENOMES     = 200
 EMBED_SIZE  = 32
-SEQ_LEN     = 64
-LAYERS      = 1
-HEADS       = 1
+KERNEL_SIZE = 1
+NORM_GROUPS = 4
+SEQ_LEN     = 32
+LAYERS      = 4
+HEADS       = 2
 KV_HEADS    = 1
-ENABLE_BIAS = False
-GAMMA       = 0.1
-LOSS_REG    = 0.001
-# MODEL = build.models.MiniFormer(INPUTS, OUTPUTS, EMBED_SIZE, SEQ_LEN, LAYERS, 1, 1, 0.1, ENABLE_BIAS, DEVICE, DTYPE,
-#                                distribution='normal', pri_actv=build.nn.activations.Tanh(), sec_actv=nn.Sigmoid())
-MODEL = Reformer(INPUTS, OUTPUTS, 1, EMBED_SIZE, SEQ_LEN, LAYERS, HEADS, KV_HEADS, True, 0.1, ENABLE_BIAS,
-                 False, DEVICE, DTYPE,
-                 constant=2 ** np.floor(np.log2(SEQ_LEN * EMBED_SIZE)) // 2,
-                 pri_actv=nn.SiLU(), sec_actv=nn.Sigmoid())
+ENABLE_BIAS = True
+DIFFERENTIAL = 2
+GAMMA       = 0.8660
+ALPHA       = 1.3
+LOSS_REG    = 0.
+
+# MODEL = Reformer(INPUTS, OUTPUTS, 1, EMBED_SIZE, SEQ_LEN, LAYERS, HEADS, KV_HEADS, True, 0.1, ENABLE_BIAS,
+#                  False, DEVICE, DTYPE,
+#                  constant=2 ** np.floor(np.log2(SEQ_LEN * EMBED_SIZE)) // 2,
+#                  pri_actv=nn.SiLU(), sec_actv=nn.Sigmoid())
+
+MODEL = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
+               ENABLE_BIAS, DEVICE, DTYPE)
+
 INIT_GEN: int = None
 
 RUNS = 1
@@ -524,22 +585,29 @@ def evaluate(population: neat.Population, **options):
     for genome in population.genomes.values():
         genome.fitness = 0
 
-    trainer.deque_episodes(1)
+    trainer.deque_episodes(2)
     terminate = False
     start = 0
     run_step = 0
     game_step = 0
     DEBUG = True
     DEBUG_STEP = 0
+    MODEL.train()
     while not terminate:
         game = Game(population.pop_size, DEVICE, DTYPE)
         action_buffer = torch.zeros(population.pop_size, SEQ_LEN, INPUTS).to(DEVICE, DTYPE)
         reward_buffer = torch.zeros(population.pop_size, SEQ_LEN, 1).to(DEVICE, DTYPE)
+        ph, mh, pw = FLOOR, FLOOR-70, WIN_WIDTH
+        global_mean = torch.tensor([ph/2, mh/2, mh/2, pw/2, pw/2], device=DEVICE, dtype=DTYPE).unsqueeze(0)
+        global_std = torch.tensor([ph/4, mh/6, mh/6, pw/4, pw/4], device=DEVICE, dtype=DTYPE).unsqueeze(0)
 
         limit = 30
         exe = True
         gts = clock.perf_counter()
         step = 0
+        forward_mapping = population.get_mapping()
+        reverse_mapping = {index: key for key, index in forward_mapping.items()}
+
         while exe and game.birds.active() > 0:
             # BUFFER[:] = 0
             game.tick(1000)
@@ -551,6 +619,7 @@ def evaluate(population: neat.Population, **options):
                 # Get Inputs ~ send bird location, top pipe location and bottom pipe location
                 # and determine from network whether to jump or not
                 observations = game.get_state() # shape(features_in)
+                observations = (observations - global_mean) / global_std
                 observations = observations.unsqueeze(-2) # .expand(population.pop_size, *observations.shape)
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"\nobservations =>\n{observations}\n\tshape = {observations.shape}")
@@ -559,29 +628,63 @@ def evaluate(population: neat.Population, **options):
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"extended inputs =>\n{observations}\n\tshape = {observations.shape}")
                 ts = clock.perf_counter()
-                actions, probs = MODEL.get_action(observations.unsqueeze(1)) # genome_mask=~game.birds.dead) # shape(seq_len=1, genomes, features_out)
+                keys = []
+                indices = []
+                for index, dead in enumerate(game.birds.dead):
+                    if not dead:
+                        keys.append(reverse_mapping[index])
+                        indices.append(index)
+                if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
+                    print(f"keys =>\n{keys}")
+                    print(f"indices =>\n{indices}")
+                actions, probs = MODEL.get_action(observations[indices].unsqueeze(1), keys=keys)
+                # actions, probs = MODEL.get_action(observations.unsqueeze(1))
+                # shape(seq_len=1, genomes, features_out)
+                actions, probs = actions.squeeze(1), probs.squeeze(1)
                 # actions = (actions >= 0.95).float()
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"actions =>\n{actions}\n\tshape = {actions.shape}")
                     print(f"probs =>\n{probs}\n\tshape = {probs.shape}")
+                if True:
+                    padding = game.birds.bird_num - actions.shape[0]
+                    if padding > 0:
+                        fill = actions.clone()
+                        actions = torch.zeros(
+                            game.birds.bird_num, *actions.shape[1:], device=DEVICE, dtype=DTYPE
+                        )
+                        actions[indices] = fill
+                        fill = probs.clone()
+                        probs = torch.zeros(
+                            game.birds.bird_num, *probs.shape[1:], device=DEVICE, dtype=DTYPE
+                        )
+                        probs[indices] = fill
+                    pass
+                if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
+                    print(f"filled actions =>\n{actions}\n\tshape = {actions.shape}")
                 calc_time = clock.perf_counter() - ts
-                game.update(actions[:, 0])
-                game.draw()
-                rewards = game.birds.score.unsqueeze(-1) # extend(reward_buffer, game.birds.score.unsqueeze(-1))
+                # game.update(actions[:, 0])
+                game.update(actions)
+                game.draw(True)
+                rewards = game.birds.score.unsqueeze(-1)
+                # extend(reward_buffer, game.birds.score.unsqueeze(-1))
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"rewards =>\n{rewards}\n\tshape = {rewards.shape}")
-                    v = MODEL.get_value(observations.unsqueeze(1))
+                    v = MODEL.get_value(observations.unsqueeze(1)).squeeze(1)
                     print(f"values =>\n{v}\n\tshape = {v.shape}")
                     del v
                 # print(f"\rO = {outputs.flatten().cpu().numpy()} SCORE: = {game.birds.score.cpu().numpy()}", end='')
 
                 round_end = (game.birds.active() == 0 and game_step == RUNS-1) or game.score >= LIMIT
-                terminate = trainer.update(observations, actions, probs, rewards, round_end)
+                terminate = trainer.update(observations, actions, probs, rewards, round_end, round_end)
 
                 alive = round((torch.sum(~game.birds.dead) / game.birds.dead.numel() * 100).item(), 2)
                 max_score = round(rewards.max().item(), 2)
+                if alive > 0:
+                    best_index = torch.argmax(game.birds.score).cpu().item()
+                    best_key = reverse_mapping[best_index]
                 print(f"\r{CM('Executing', Fore.GREEN)}: time_elapsed = {round(clock.perf_counter()-gts)}s, "
-                      f"alive = {alive}, max_rew = {max_score}, ct={calc_time:.2e}, sd={trainer.steps_done}", end='')
+                      f"alive = {alive}, max_rew = {max_score}, best_key={best_key}, ct={calc_time:.2e}, sd={trainer.steps_done} "
+                      f"bl={trainer.replay.max_size()}", end='')
 
             # break if score gets large enough
             if round_end or terminate:
@@ -593,6 +696,8 @@ def evaluate(population: neat.Population, **options):
             run_step += 1
             if step == DEBUG_STEP:
                 DEBUG = False
+
+        print(f"\n\nEpisodes = {trainer.replay.episodes()}")
 
         u_lim, l_lim = game.window.height * 0.95, (game.window.height - game.window.floor) * 1.05
         # print(f"u lim = {u_lim}, l lim = {l_lim}")
@@ -606,29 +711,29 @@ def evaluate(population: neat.Population, **options):
         game_step += 1
     print(f"\n")
 
-    # population.save_dict('flappy_bird', replace=population.generation != INIT_GEN)
+    population.save_dict('flappy_bird', replace=population.generation != INIT_GEN)
     # trainer.save('flappy_bird', replace=population.generation != INIT_GEN)
 
 
 def run():
-    MODEL.single_mode(True)
+    # MODEL.single_mode(True)
     # Configuration
     print(f"creating config")
     config = neat.Config()
-    config.genome.init_type = 'normal'
-    config.genome.weight_init_mean = 0
-    config.genome.weight_init_std = 1
-    config.genome.weight_min_value = -np.pi * 10
-    config.genome.weight_max_value = np.pi * 10
-    config.genome.weight_mutate_power = 1
-    config.genome.weight_mutate_rate = 0.5
-    config.reproduction.min_species_size = 150
-    config.reproduction.purge = 1
-    config.reproduction.survival_threshold = 0.033
-    config.reproduction.elitism = 30
-    config.species.compatibility_threshold = 2
-    config.stagnation.max_stagnation = 1
-    config.species.compatibility_threshold = 1000000
+    config.genome.init_type             = 'normal'
+    config.genome.weight_init_mean      = 0
+    config.genome.weight_init_std       = 0.5
+    config.genome.weight_min_value      = -np.pi * 1
+    config.genome.weight_max_value      = np.pi * 1
+    config.genome.weight_mutate_power   = 0.1
+    config.genome.weight_mutate_rate    = 0.7
+    config.reproduction.min_species_size = 100
+    config.reproduction.purge           = 1
+    config.reproduction.survival_threshold = 0.10
+    config.reproduction.elitism         = 10
+    config.species.compatibility_threshold = 1.0
+    config.stagnation.max_stagnation    = 1
+    config.stagnation.species_elitism   = 3
     config.save()
     config.load(2)
 
@@ -636,22 +741,26 @@ def run():
     print(f"creating population")
     population = neat.Population(GENOMES, MODEL, config, init_reporter=True)
     print(MODEL.pol_proj)
-    # population.load_dict(name='flappy_bird', file_no=23)
+    population.load_dict(name='flappy_bird', file_no=None)
 
-    trainer = neat.rl.PPO(MODEL, population, DEVICE, DTYPE, gamma=GAMMA,
-                          scheduler=neat.scheduler.CosineAnnealing(config, 100, 10, 0.01, True, True),
-                          loss_reg=LOSS_REG, pol_reg=0.5, val_reg=1.0, ent_reg=0e-6,
-                          norm_rew=True, norm_adv=False,
-                          log_sub_dir='flappy_bird\\',
-                          log_name=f"{unix_to_datetime_file(clock.time())}-"
+    trainer = neat.rl.PPO(
+        MODEL, population, DEVICE, DTYPE, gamma=GAMMA, alpha=ALPHA,
+        schedulers=[
+            neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_mutate_power', True, True),
+            neat.optim.scheduler.CosineAnnealing(config, 6, 0.7, 'weight_mutate_rate', True, True),
+        ],
+        loss_reg=LOSS_REG, pol_reg=0.5, val_reg=1.0, ent_reg=0e-6,
+        norm_rew=True, norm_adv=False,
+        log_sub_dir='flappy_bird\\',
+        log_name=f"{unix_to_datetime_file(clock.time())}-"
                                    f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                                    f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}"
-                          )
+    )
 
     # Run for up to 50 generations.
     print(f"starting evaluation: population={len(population.genomes)}")
     # trainer.load(name='flappy_bird', file_no=None)
-    trainer.learn(evaluate, STEPS, 30, 1024, 0.1, 'binary', 2)
+    trainer.learn(evaluate, STEPS, 30, 2048, 0.1, 'binary', 2)
 
     # for p in population.get(winner):
     #     print(p)
@@ -661,4 +770,5 @@ def run():
 
 
 if __name__ == '__main__':
+    print(MODEL)
     run()

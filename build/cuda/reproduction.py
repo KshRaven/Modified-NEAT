@@ -5,8 +5,8 @@ from build.config import Config
 from build.species import Species, SpeciesSet, FLOAT, INT, SPECIES
 from build.stagnation import Stagnation
 from build.reporter.base import ReporterSet
-from build.functional import calc_grid, prob, normal, clamp, get_rng_states, get_value, set_value
-from build.base.initialization import initialize_genome
+from build.cuda.functional import calc_grid, prob, normal, clamp, get_rng_states, get_value, set_value
+from build.cuda.initialization import initialize_genome
 from build.util.fancy_text import CM, Fore
 
 from numba import njit, types, prange, cuda
@@ -206,9 +206,11 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
 
 
 @cuda.jit
-def mutate(updates: GPUArray, children: GPUArray, mutate_rate: float, mutate_power: float, replace_rate: float,
-           init_type: str, mean: float, std: float, minimum: float, maximum: float, rng_states: GPUArray,
-           debugging: GPUArray):
+def mutate(
+        updates: GPUArray, children: GPUArray, mutate_rate: float, mutate_power: float, replace_rate: float,
+        init_type: str, mean: float, std: float, minimum: float, maximum: float, rng_states: GPUArray,
+        # debugging: GPUArray
+):
     genome_idx, x, y = cuda.grid(3)
     # Parameter shape (genomes, *spatial_dims)
     g_lim = updates.shape[0]
@@ -268,7 +270,7 @@ def update_children(
             for _ in range(3-array_source.ndim):
                 array_source = np.expand_dims(array_source, -1)
                 array_update = np.expand_dims(array_update, -1)
-        mutate_debug = cuda.to_device(np.zeros_like(array_update))
+        # mutate_debug = cuda.to_device(np.zeros_like(array_update))
         array_source, array_update = cuda.to_device(array_source), cuda.to_device(array_update)
         kernel_shape = calc_grid(max_pop_size, *array_update.shape[1:3], tpb=tpb)
         rng_states, threads_total = get_rng_states(kernel_shape, seed)
@@ -286,7 +288,7 @@ def update_children(
         mutate[*kernel_shape](
             array_update, child_filter, config.genome.weight_mutate_rate, config.genome.weight_mutate_power,
             config.genome.weight_replace_rate, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,
-            config.genome.weight_min_value, config.genome.weight_max_value, rng_states, mutate_debug
+            config.genome.weight_min_value, config.genome.weight_max_value, rng_states, # mutate_debug
         )
         if verbose and verbose >= 4:
             param.md = array_update.copy_to_host() - param.cd
@@ -295,7 +297,7 @@ def update_children(
         rng_states = rng_states.copy_to_host()
         array_source = array_source.copy_to_host()
         # Add update to update list
-        array_update = array_update.copy_to_host()
+        # array_update = array_update.copy_to_host()
         update = torch.tensor(array_update, device=param.device, dtype=param.dtype).view(au_shape)
 
         updates[param.param_index] = update
@@ -367,7 +369,7 @@ def reproduce(
     ts = clock.perf_counter()
     genome_indexer = create_children(
         new_population, species_set.species, genome_indexer, spawn_amounts, remaining_species, to_delete,
-        config.reproduction.elitism, config.reproduction.survival_threshold, config.reproduction.darwin_multiplier,
+        int(config.reproduction.elitism), config.reproduction.survival_threshold, config.reproduction.darwin_multiplier,
         config.general.fitness_criterion, ancestors
     )
     update_children(

@@ -1,7 +1,7 @@
 
 from build.nn.base import Model
-from build.models.base import NeatModule, Linear, RMSNorm, NeatParameter
-from build.models.sub import BufferEmbedding, BufferEncoding, TransformerBase
+from build.nn.modules.base import NeatModule, Linear, RMSNorm
+from build.nn.modules.sub import BufferEmbedding, BufferEncoding, TransformerBase
 from build.util.qol import manage_params
 
 from torch import Tensor
@@ -37,6 +37,8 @@ class Transformer(NeatModule):
         self.dec_norm   = RMSNorm(embed_size, self.epsilon, self.affine, device, dtype)
         output_dim      = outputs if self.distribution != 'discrete' else 2 ** outputs
         self.decode     = Linear(embed_size, output_dim, bias, device, dtype)
+        if dropout is None:
+            dropout = 0
         self.dropout    = nn.Dropout(dropout)
 
         # STATE
@@ -211,7 +213,7 @@ class Reformer(Model, NeatModule):
         return self.reduce(value)
 
     def forward(
-            self, observations: Tensor, keys: Union[int, Iterable[int]] = None, get=False, single=False, **options
+            self, observations: Tensor, keys: Union[int, Iterable[int]] = None, get=False, **options
     ):
         actions = self.get_policy(observations, keys=keys, get=get, single=self.single, **options)
         return actions
@@ -232,3 +234,40 @@ class Reformer(Model, NeatModule):
         if self.single:
             tensor = tensor.squeeze(-2)
         return tensor
+
+    @staticmethod
+    def _addindent(s_, numSpaces):
+        s = s_.split("\n")
+        # don't do anything for single-line stuff
+        if len(s) == 1:
+            return s_
+        first = s.pop(0)
+        s = [(numSpaces * " ") + line for line in s]
+        s = "\n".join(s)
+        s = first + "\n" + s
+        return s
+
+    def __repr__(self):
+        # We treat the extra repr like the sub-module, one item per line
+        extra_lines = []
+        extra_repr = self.extra_repr()
+        # empty string will be split into list ['']
+        if extra_repr:
+            extra_lines = extra_repr.split("\n")
+        child_lines = []
+        for key, module in self._modules.items():
+            mod_str = repr(module)
+            mod_str = self._addindent(mod_str, 2)
+            child_lines.append("(" + key + "): " + mod_str)
+        lines = extra_lines + child_lines
+
+        main_str = self._get_name() + "("
+        if lines:
+            # simple one-liner info, which most builtin Modules will use
+            if len(extra_lines) == 1 and not child_lines:
+                main_str += extra_lines[0]
+            else:
+                main_str += "\n  " + "\n  ".join(lines) + "\n"
+
+        main_str += ")"
+        return main_str

@@ -9,6 +9,7 @@ import torch
 import numpy as np
 
 
+# TODO: Delete or re-support this module
 FRACT_PV  = torch.arange(-1, -52-1, -1, dtype=torch.float64)
 EXP_PV    = torch.arange(10, 0-1, -1, dtype=torch.float64)
 FRACT_SEL = (64 - 52) + torch.arange(52, dtype=torch.int)

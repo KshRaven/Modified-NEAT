@@ -1,0 +1,10 @@
+
+numba
+numpy
+torch
+matplotlib
+colorama
+json5
+protobuf
+PyYAML
+jupyter

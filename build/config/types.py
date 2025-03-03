@@ -1,7 +1,7 @@
 
 from build.config.base import Configuration
 from build.util.storage import STORAGE_DIR
-from build.functional import SEED
+from build.cuda.functional import SEED
 
 import os
 

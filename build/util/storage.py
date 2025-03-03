@@ -14,10 +14,36 @@ import warnings
 PRINT_COLOUR = Fore.GREEN
 CURRENT_DIR = os.path.abspath(__file__)
 PROJECT_DIR = CURRENT_DIR
-while not PROJECT_DIR.endswith("build"):
-    PROJECT_DIR = os.path.dirname(PROJECT_DIR)
-PROJECT_DIR = os.path.dirname(PROJECT_DIR)
+TRIES = 10
+errored = False
+for trial_idx in range(TRIES):
+    try:
+        # print(f"{trial_idx} = {PROJECT_DIR}")
+        if PROJECT_DIR.endswith("build"):
+            PROJECT_DIR = os.path.dirname(PROJECT_DIR)
+            break
+        elif PROJECT_DIR.endswith("Modified-NEAT"):
+            PROJECT_DIR = PROJECT_DIR
+            break
+        PROJECT_DIR = os.path.dirname(PROJECT_DIR)
+    except Exception as e:
+        print(CM(e, Fore.LIGHTRED_EX))
+        errored = True
+    if trial_idx == TRIES-1 or errored:
+        # Define possible cuda directories
+        directories = ["./home", "C:/Users/Default/AppData/Local"]
+        # Check which directory exists
+        PROJECT_DIR = "./root"
+        for base_dir in directories:
+            if os.path.exists(base_dir):
+                PROJECT_DIR = base_dir + '/PythonProjectData'
+                break
 STORAGE_DIR = PROJECT_DIR + "\\storage\\"
+
+
+def set_storage_location(directory: str = STORAGE_DIR):
+    global STORAGE_DIR
+    STORAGE_DIR = directory
 
 
 def save(items: dict[str, Any], filename: str, directory: str, file_no: int = None, replace=False,
@@ -98,16 +124,18 @@ def load(filename: str, directory: str, file_no: int = None,
             extension = '.pkl'
         filepath = directory + filename + extension
 
-        if file_no is None:
-            file_no = -1
+        if file_no == 0:
+            filepath = directory + filename + extension
+        elif file_no is None:
+            counter = 0
             while True:
-                file_no += 1
-                filepath_to_check = f'{directory+filename}-{file_no}{extension}'
+                counter += 1
+                filepath_to_check = f'{directory+filename}-{counter}{extension}'
                 if os.path.exists(filepath_to_check):
                     filepath = filepath_to_check
                 else:
                     break
-        elif file_no >= 0:
+        elif file_no > 0:
             filepath = f'{directory+filename}-{file_no}{extension}'
         else:
             raise NotADirectoryError(f"Failed to load save folder; invalid 'file_no'")

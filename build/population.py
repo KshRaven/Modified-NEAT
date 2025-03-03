@@ -1,5 +1,4 @@
 """Implements the core evolution algorithm."""
-import sys
 
 from build.nn.base import NeatModule
 from build.nn.genome import Genome, load_genome, INT
@@ -8,13 +7,13 @@ from build.species import SpeciesSet, load_species, GENOME, SPECIES
 from build.reporter.base import ReporterSet
 from build.reporter.reporters import StdOutReporter
 from build.reproduction import Reproduction
-from build.base.reproduction import reproduce
-from build.base.speciation import speciate
+from build.cuda.reproduction import reproduce
+from build.cuda.speciation import speciate
 from build.util.qol import manage_params
 from build.util.storage import save, load
 from build.util.fancy_text import CM, Fore
 from build.util.datetime import eta, clock
-from build.sequential import RollbackBuffer
+from build.util.replay import ReplayBuffer
 
 from typing import Union
 from numba import njit
@@ -52,7 +51,7 @@ class Population(object):
         self.reproduction = Reproduction(self.reporters, self.config)
         self.to_delete: list[int] = List.empty_list(INT)
         self.survival_rate: float = None
-        self.buffers      = RollbackBuffer()
+        self.buffers      = ReplayBuffer()
         if config.general.fitness_criterion == 'max':
             self.fitness_criterion = np.max
         elif config.general.fitness_criterion == 'min':
@@ -274,28 +273,30 @@ class Population(object):
         return self.best_genome, self.ranking
 
     def save_dict(self, name: str = None, directory: str = None, file_no: int = None, replace=False):
+        # Model
+        module_state = self.module.state_dict()
         # Genomes
         genomes = []
         for genome in self.genomes.values():
-            networks = []
-            for network in genome.networks.values():
-                network_dict = {
-                    'key': network.key,
-                    'inp_num': network.inp_num,
-                    'out_num': network.out_num,
-                    'hidden_layers_num': list(network.hidden_layers_num),
-                    'input_keys': list(network.input_keys),
-                    'output_keys': list(network.output_keys),
-                    'nodes': [(n.key, n.bias) for n in network.nodes.values()],
-                    'connections': [(c.key, c.weight) for c in network.connections.values()],
-                    'layers': [list(i) for i in network.layers],
-                    'build': list(network.build),
-                }
-                networks.append(network_dict)
+            # networks = []
+            # for network in genome.networks.values():
+            #     network_dict = {
+            #         'key': network.key,
+            #         'inp_num': network.inp_num,
+            #         'out_num': network.out_num,
+            #         'hidden_layers_num': list(network.hidden_layers_num),
+            #         'input_keys': list(network.input_keys),
+            #         'output_keys': list(network.output_keys),
+            #         'nodes': [(n.key, n.bias) for n in network.nodes.values()],
+            #         'connections': [(c.key, c.weight) for c in network.connections.values()],
+            #         'layers': [list(i) for i in network.layers],
+            #         'build': list(network.build),
+            #     }
+            #     networks.append(network_dict)
             genome_dict = {
                 'key': genome.key,
                 'fitness': genome.fitness,
-                'networks': networks,
+                # 'networks': networks,
             }
             genomes.append(genome_dict)
         best_key = self.best_genome.key if self.best_genome else None
@@ -314,6 +315,7 @@ class Population(object):
             }
             species.append(specie_dict)
         state = {
+            'module_state': module_state,
             'generation': self.generation,
             'genomes': genomes,
             'genome_indexer': self.reproduction.genome_indexer,
@@ -345,13 +347,20 @@ class Population(object):
         self.generation = save_state['generation']
         self.genomes = Dict.empty(INT, GENOME)
         ts, ud, ut = clock.perf_counter(), 0, len(save_state['genomes'])
-        for gs in save_state['genomes']:
+        genomes_data = save_state['genomes']
+        for gs in genomes_data:
             # gs['networks'] = [dict(ns) for ns in gs['networks']]
             # gs = Dict(gs)
             genome = load_genome(gs)
             self.genomes[genome.key] = genome
             ud += 1
-            eta(ts, ud, ut, 'loading genomes')
+            eta(ts, ud, ut, f'loading {len(genomes_data)}')
+        for m in self.module.neat_modules():
+            m.updated = False
+        for p in self.module.neat_parameters():
+            p.reset()
+        self.module.update(self.genomes)
+        self.module.load_state_dict(save_state['module_state'])
         print(f"\rloaded genomes in {round(clock.perf_counter() - ts, 2)}s")
         self.reproduction.genome_indexer = save_state['genome_indexer']
         best_genome_key = save_state.get('best_genome')
@@ -373,5 +382,4 @@ class Population(object):
         self.species.species_indexer = save_state['species_indexer']
         print(f"Loaded NEAT Population species in {round(clock.perf_counter() - gts, 2)}s")
 
-        bind_modules(self.modules, list(self.genomes.values()))
-        self.species.speciate(self.genomes, self.generation, True)
+        speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=True)
