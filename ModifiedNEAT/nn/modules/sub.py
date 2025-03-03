@@ -749,8 +749,8 @@ class ConvSelfAttention(NeatModule):
         if self.auto_single and len(self.pixels) == 1 and pretext is None:
             pretext = tensor.select(-1, -1).unsqueeze(-1)
         if pos_idx is not None:
-            pos_idx = self.max_seq_len + pos_idx if pos_idx < 0 else pos_idx
-            assert 0 < pos_idx < self.max_seq_len
+            pos_idx = self.pixels_total + pos_idx if pos_idx < 0 else pos_idx
+            assert 0 < pos_idx < self.pixels_total
         if verbose:
             print(f'\n{CM("Executing Self Attention", Fore.LIGHTBLUE_EX)}')
 
@@ -977,9 +977,9 @@ class ConvCrossAttention(NeatModule):
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None,
                 context: Tensor = None, pos_idx: int = None, verbose: int = None, get=False):
-        if pos_idx is not None:
-            pos_idx = self.max_seq_len + pos_idx if pos_idx < 0 else pos_idx
-            assert 0 < pos_idx < self.max_seq_len
+        if pos_idx is not None and len(self.pixels) == 1:
+            pos_idx = self.pixels_total + pos_idx if pos_idx < 0 else pos_idx
+            assert 0 < pos_idx < self.pixels_total
         if verbose:
             print(f'\n{CM("Executing Cross Attention", Fore.LIGHTBLUE_EX)}')
 
@@ -1212,7 +1212,7 @@ class TransformerBlock(NeatModule):
 
 class TransformerBase(NeatModule):
     def __init__(
-            self, seq_len: int, embed_size: int, layers: int, heads: int = None, kv_heads: int = None, fwd_exp=4, 
+            self, seq_len: int, embed_size: int, layers: int, heads: int = None, kv_heads: int = None, fwd_exp=4,
             differential=True, constant=10000.0, eps=1e-8, affine=True, causal_mask=True, dropout: int = None,
             bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32,):
         super(TransformerBase, self).__init__()
@@ -1379,7 +1379,7 @@ class ConverBase(NeatModule):
         # Pass through the encoder blocks
         for layer_idx, layer in enumerate(self.layers):
             # Single mode is only when on final layer, pixels span 1 dimension and tensor has 3 dimensions only
-            single_fetch = single and layer_idx == len(self.layers) - 1 and len(self.max_pixels) == 1 and tensor.ndim == 3
+            single_fetch = single and layer_idx == len(self.layers) - 1 and len(self.max_pixels) == 1 and tensor.ndim == 4
             # shape (batch_size, channels, *pixels)
             if single_fetch:
                 # Using last token index in sequence to get the next token

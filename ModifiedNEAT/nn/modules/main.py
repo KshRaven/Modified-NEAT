@@ -287,8 +287,8 @@ class Conver(NeatModule):
         super(Conver, self).__init__()
         if channels is None:
             channels = dim_size
-        self.enc_layers         = manage_params(options, ['enc_layers', 'encoder_layers'], 2) + 1
-        self.dec_layers         = manage_params(options, ['dec_layers', 'decoder_layers'], 2) + 1
+        self.enc_layers         = manage_params(options, ['enc_layers', 'encoder_layers'], 0) + 1
+        self.dec_layers         = manage_params(options, ['dec_layers', 'decoder_layers'], 0) + 1
         self.distribution       = manage_params(options, 'distribution', 'normal')
         self.causal_mask        = manage_params(options, 'causal_mask', True)
         self.epsilon            = manage_params(options, 'epsilon', 1e-6)
@@ -352,7 +352,7 @@ class Conver(NeatModule):
         self.decoder = Sequential(*decoder)
         self.primary_activation = manage_params(options, 'pri_actv', None)
         self.secondary_activation = manage_params(options, 'sec_actv', None)
-        self.selector = torch.arange(max_seq_len, device=device, dtype=dtype)
+        self.selector = torch.arange(max_seq_len, device=device, dtype=torch.int)
 
         # STATE
         self.device = device

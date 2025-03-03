@@ -232,7 +232,7 @@ class Population(object):
 
                 if not self._skipped:
                     if verbose:
-                        print(f"#----# Updating population #----#") # , skip-enabled={skip}")
+                        print(f"------ Updating population ------") # , skip-enabled={skip}")
                     # Update Population
                     if not self._init_population_update():
                         break

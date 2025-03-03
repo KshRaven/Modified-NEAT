@@ -64,6 +64,8 @@ class PPO(Algorithm):
         self.target_kl: Union[float, None] = manage_params(options, 'target_kl', None)
 
         # Tensorboard logging
+        from ModifiedNEAT.util.storage import STORAGE_DIR
+
         self.log_dir: str = manage_params(
             options, 'log_directory', STORAGE_DIR+f"neat_rl_logs\\{self.__class__.__name__}\\")
         self.log_sub_dir: str = manage_params(options, 'log_sub_dir', "")

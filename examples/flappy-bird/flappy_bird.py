@@ -25,7 +25,7 @@ import numpy as np
 torch.set_printoptions(threshold=10)
 pygame.font.init()  # init font
 
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cpu' if torch.cuda.is_available() else 'cpu'
 DTYPE = torch.float64
 
 # Define window
@@ -543,12 +543,12 @@ GENOMES     = 200
 EMBED_SIZE  = 64
 KERNEL_SIZE = 1
 NORM_GROUPS = 4
-SEQ_LEN     = 64
-LAYERS      = 3
+SEQ_LEN     = 16
+LAYERS      = 1
 HEADS       = 4
 KV_HEADS    = 1
-ENABLE_BIAS = True
-DIFFERENTIAL = 2
+ENABLE_BIAS = False
+DIFFERENTIAL = 3
 GAMMA       = 0.8660
 ALPHA       = 1.3
 LOSS_REG    = 0.
@@ -664,7 +664,7 @@ def evaluate(population: neat.Population, **options):
                 calc_time = clock.perf_counter() - ts
                 # game.update(actions[:, 0])
                 game.update(actions)
-                # game.draw(False)
+                game.draw(False)
                 rewards = game.birds.score.unsqueeze(-1)
                 # extend(reward_buffer, game.birds.score.unsqueeze(-1))
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
@@ -725,8 +725,8 @@ def run():
     config.genome.weight_init_std       = 1
     config.genome.weight_min_value      = -np.inf
     config.genome.weight_max_value      = np.inf
-    config.genome.weight_mutate_power   = 0.1
-    config.genome.weight_mutate_rate    = 0.7
+    config.genome.weight_mutate_power   = 1
+    config.genome.weight_mutate_rate    = 0.8
     config.reproduction.min_species_size = 100
     config.reproduction.purge           = 1
     config.reproduction.survival_threshold = 0.10
@@ -741,7 +741,7 @@ def run():
     print(f"creating population")
     population = neat.Population(GENOMES, MODEL, config, init_reporter=True)
     print(MODEL.pol_proj)
-    population.load_dict(name='flappy_bird', file_no=None)
+    # population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.PPO(
         MODEL, population, DEVICE, DTYPE, gamma=GAMMA, alpha=ALPHA,
