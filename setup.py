@@ -16,7 +16,7 @@ def load_requirements(filename='requirements.txt'):
 
 
 setup(
-    name='Modified-NEAT',
+    name='ModifiedNEAT',
     version='0.1.0',
     author='Bradley Odimmasi',
     author_email='bodimmasi@students.uonbi.ac.ke',
