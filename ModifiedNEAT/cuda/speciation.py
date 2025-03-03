@@ -250,7 +250,7 @@ def speciate(config: Config, module: NeatModule, species_set: SpeciesSet, popula
     # Update distances cache
     gts = clock.perf_counter()
     update_distances_cache(config, module, distances_cache, tpb=tpb, verbose=verbose)
-    if verbose:
+    if verbose and verbose >= 2:
         print(f"\n{CM('Created distances cache', Fore.CYAN)} in {round(clock.perf_counter() - gts, 2)} s")
 
     # Find the best representatives for each existing species.
@@ -261,7 +261,7 @@ def speciate(config: Config, module: NeatModule, species_set: SpeciesSet, popula
     _get_representatives(
         species_set.species, population, unspeciated, new_representatives, new_members, distances_cache
     )
-    if verbose:
+    if verbose and verbose >= 2:
         print(f"{CM('Collected species representatives', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
 
     # Partition population into species based on genetic similarity.
@@ -270,7 +270,7 @@ def speciate(config: Config, module: NeatModule, species_set: SpeciesSet, popula
         species_set.species_indexer, population, unspeciated, new_representatives, new_members,
         distances_cache, compatibility_threshold
     )
-    if verbose:
+    if verbose and verbose >= 2:
         print(f"{CM('Filled species', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
 
     # Update species collection based on new speciation.
@@ -278,7 +278,7 @@ def speciate(config: Config, module: NeatModule, species_set: SpeciesSet, popula
     species_set.genome_to_species = _update_collection(
         species_set.species, population, new_representatives, new_members, generation
     )
-    if verbose:
+    if verbose and verbose >= 2:
         print(f"{CM('Updated species mapping', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
         print(f"{CM('Completed speciating', Fore.CYAN)} in {round(clock.perf_counter() - gts, 2)} s")
 
@@ -286,8 +286,9 @@ def speciate(config: Config, module: NeatModule, species_set: SpeciesSet, popula
     gd_mean = np.mean(distances)
     gd_std = np.std(distances)
     species_set.last_ct = (gd_mean, gd_std)
-    species_set.reporters.info(
-        f"Mean genetic distance {CM(f'{gd_mean:.3f}', Fore.LIGHTYELLOW_EX)}, "
-        f"standard deviation {CM(f'{gd_std:.3f}', Fore.LIGHTYELLOW_EX)}, "
-        f"with {CM(len(species_set.species), Fore.LIGHTMAGENTA_EX)} species"
-    )
+    if verbose:
+        species_set.reporters.info(
+            f"Mean genetic distance {CM(f'{gd_mean:.3f}', Fore.LIGHTYELLOW_EX)}, "
+            f"standard deviation {CM(f'{gd_std:.3f}', Fore.LIGHTYELLOW_EX)}, "
+            f"with {CM(len(species_set.species), Fore.LIGHTMAGENTA_EX)} species"
+        )

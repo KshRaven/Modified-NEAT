@@ -1,13 +1,11 @@
 
 from ModifiedNEAT.nn.modules.base import *
 from ModifiedNEAT.nn.modules.util import get_tensor_info
-from ModifiedNEAT.nn.genome import Genome
 from ModifiedNEAT.util.fancy_text import CM, Fore
 from ModifiedNEAT.util.qol import manage_params
 
 from torch import Tensor, device as DEVICE, dtype as DTYPE
 from typing import Union, Iterable
-from numpy import ndarray as CPUArray
 
 import torch
 import torch.nn as nn
@@ -708,7 +706,7 @@ class ConvSelfAttention(NeatModule):
 
         if mask:
             # Mask where the upper triangle (above the principal diagonal) is 1
-            mask_ = torch.ones_like(energy, dtype=torch.bool).triu(2)
+            mask_ = torch.ones_like(energy, dtype=torch.bool).triu(1)
             # Fill the upper triangle with -inf
             energy.masked_fill_(mask_, -torch.inf)
             if verbose and verbose >= 2 and not self.differential:
@@ -728,7 +726,7 @@ class ConvSelfAttention(NeatModule):
             ) # * lambdas)
 
             if mask:
-                scores.masked_fill_(torch.ones_like(scores, dtype=torch.bool).triu(2), -torch.inf)
+                scores.masked_fill_(torch.ones_like(scores, dtype=torch.bool).triu(1), -torch.inf)
                 if verbose and verbose >= 2 and not self.differential:
                     print(get_tensor_info(scores, 'Differential Masked Energy', verbose))
             scores = self.softmax(scores)
@@ -939,7 +937,7 @@ class ConvCrossAttention(NeatModule):
 
         if mask:
             # Mask where the upper triangle (above the principal diagonal) is 1
-            mask_ = torch.ones_like(energy, dtype=torch.bool).triu(2)
+            mask_ = torch.ones_like(energy, dtype=torch.bool).triu(1)
             # Fill the upper triangle with -inf
             energy.masked_fill_(mask_, -torch.inf)
             if verbose and verbose >= 2 and not self.differential:
@@ -959,7 +957,7 @@ class ConvCrossAttention(NeatModule):
             ) # * lambdas)
 
             if mask:
-                scores.masked_fill_(torch.ones_like(scores, dtype=torch.bool).triu(2), -torch.inf)
+                scores.masked_fill_(torch.ones_like(scores, dtype=torch.bool).triu(1), -torch.inf)
                 if verbose and verbose >= 2 and not self.differential:
                     print(get_tensor_info(scores, 'Differential Masked Energy', verbose))
             scores = self.softmax(scores)

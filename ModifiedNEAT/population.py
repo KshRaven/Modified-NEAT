@@ -63,11 +63,11 @@ class Population(object):
 
         if save_dict is None:
             # Create a population from scratch, then partition into species.
-            self.genomes = self.reproduction.create_new(self.pop_size, self.module, tpb=4, verbose=init_rep)
+            self.genomes = self.reproduction.create_new(self.pop_size, self.module, tpb=4, verbose=2)
             self.generation = 0
             self.species = SpeciesSet(self.config, self.reporters)
             # self.species.speciate(self.genomes, self.generation, True)
-            speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=True)
+            speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=2)
         self.best_genome: Genome = None
         self.ranking: dict[int, Genome] = {}
         self.avatars: list[Genome] = [] # List.empty_list(GENOME)
@@ -93,10 +93,10 @@ class Population(object):
     def reset_buffers(self):
         self.buffers.reset()
 
-    def rollout_buffers(self, sequence_length: int = None, buffers: [str, list[str]] = None):
-        return self.buffers.get(sequence_length, buffers)
+    def rollout_buffers(self, sequence_length: int = None, buffers: [str, list[str]] = None, keys=None):
+        return self.buffers.rollout(buffers, sequence_length, keys, stack=True)
 
-    def _init_population_update(self):
+    def _init_population_update(self, verbose: int = None):
         # Gather and report statistics.
         @njit
         def get_best_genomes(genomes: list[Genome], criteria: str, best_genome: Union[Genome, None]) -> Genome:
@@ -146,9 +146,10 @@ class Population(object):
             else:
                 avatars.remove(best_genome)
                 avatars.append(best_genome)
-        update_avatars(self.avatars, self.best_genome, self.genomes)
+        update_avatars(list(set(self.avatars)), self.best_genome, self.genomes)
 
-        self.reporters.post_evaluate(self.config, self.genomes, self.species, self.best_genome)
+        if verbose:
+            self.reporters.post_evaluate(self.config, self.genomes, self.species, self.best_genome)
 
         # End if the fitness threshold is reached.
         fitness_aggr = self.fitness_criterion([genome.fitness for genome in self.genomes.values()])
@@ -158,22 +159,23 @@ class Population(object):
 
         return True
 
-    def _adv_population_update(self) -> None:
+    def _adv_population_update(self, verbose: int = None) -> None:
         # Check for complete extinction.
         if not self.species.species:
             self.reporters.complete_extinction()
 
             # If requested by the user, create a completely new population,
             if self.config.general.reset_on_extinction:
-                self.genomes = self.reproduction.create_new(self.pop_size, self.module, tpb=4, verbose=True)
+                self.genomes = self.reproduction.create_new(self.pop_size, self.module, tpb=4, verbose=verbose)
             # otherwise raise an exception.
             else:
                 raise CompleteExtinctionException(f"Complete extinction of Population")
 
         # Divide the new population into species.
-        speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=True)
+        speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=verbose)
 
-        self.reporters.end_generation(self.config, self.genomes, self.species)
+        if verbose:
+            self.reporters.end_generation(self.config, self.genomes, self.species)
 
         self.generation += 1
 
@@ -207,10 +209,12 @@ class Population(object):
             while generations is None or gen < generations:
                 if not self._skipped:
                     # Update reporters
-                    self.reporters.start_generation(self.generation)
+                    if verbose:
+                        self.reporters.start_generation(self.generation)
 
                     # Evaluate all genomes using the user-provided function.
-                    print(f"executing fitness function {fitness_function} on population, skip-enabled={skip}")
+                    if verbose and verbose >= 2:
+                        print(f"executing fitness function {fitness_function} on population, skip-enabled={skip}")
                     fitness_function(self, **options)
 
                     self.ranking = {}
@@ -243,7 +247,7 @@ class Population(object):
                     self.reproduction.genome_indexer = reproduce(
                         self.config, self.module, self.genomes, self.reproduction.ancestors, self.generation,
                         self.to_delete, self.reproduction.genome_indexer, self.reproduction._stagnation, self.species,
-                        self.reporters, tpb=4, verbose=True
+                        self.reporters, tpb=4, verbose=verbose
                     )
 
                     self.to_delete = List.empty_list(INT)
@@ -382,4 +386,4 @@ class Population(object):
         self.species.species_indexer = save_state['species_indexer']
         print(f"Loaded NEAT Population species in {round(clock.perf_counter() - gts, 2)}s")
 
-        speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=True)
+        speciate(self.config, self.module, self.species, self.genomes, self.generation, tpb=4, verbose=verbose)

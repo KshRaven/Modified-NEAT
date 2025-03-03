@@ -4,6 +4,7 @@ from ModifiedNEAT.util.storage import STORAGE_DIR
 from ModifiedNEAT.cuda.functional import SEED
 
 import os
+import math
 
 
 class GeneralConfig(Configuration):
@@ -11,33 +12,32 @@ class GeneralConfig(Configuration):
         super(GeneralConfig, self).__init__('general config')
 
         self.fitness_criterion   = 'max'
-        self.fitness_threshold   = 100
-        self.pop_size            = 10000
+        self.fitness_threshold   = math.inf
+        self.pop_size            = 100
         self.reset_on_extinction = True
-        self.seed = SEED
+        self.seed                = SEED
 
 
-PI = 3.142
-RANGE = PI * 10
-STD = 1
+MEAN = 0.0
+STD = 1.0
 
 
 class GenomeConfig(Configuration):
     def __init__(self):
         super(GenomeConfig, self).__init__('genome config')
 
-        self.weight_init_mean       = 0.0
+        self.weight_init_mean       = MEAN
         self.weight_init_std        = STD
-        self.weight_max_value       = RANGE
-        self.weight_min_value       = -RANGE
+        self.weight_max_value       = math.inf
+        self.weight_min_value       = -math.inf
         self.weight_mutate_power    = 1.0
         self.weight_mutate_rate     = 0.50
         self.weight_replace_rate    = 0.05
 
-        self.bias_init_mean         = 0.0
+        self.bias_init_mean         = MEAN
         self.bias_init_std          = STD
-        self.bias_max_value         = RANGE
-        self.bias_min_value         = -RANGE
+        self.bias_max_value         = math.inf
+        self.bias_min_value         = -math.inf
         self.bias_mutate_power      = 1.0
         self.bias_mutate_rate       = 0.50
         self.bias_replace_rate      = 0.05
@@ -60,7 +60,7 @@ class SpeciesConfig(Configuration):
     def __init__(self):
         super(SpeciesConfig, self).__init__('species config')
 
-        self.compatibility_threshold = 7.0 # 3.0
+        self.compatibility_threshold = 5.0 # 3.0
 
 
 class StagnationConfig(Configuration):
@@ -78,7 +78,7 @@ class ReproductionConfig(Configuration):
 
         self.elitism            = 50
         self.clone_threshold    = 0.00
-        self.survival_threshold = 0.20
+        self.survival_threshold = 0.10
         self.darwin_multiplier  = 1
         self.min_species_size   = 100
         self.purge              = 0

@@ -323,7 +323,7 @@ def reproduce(
     all_fitnesses: list[float]       = List.empty_list(FLOAT)
     remaining_species: list[Species] = List.empty_list(SPECIES)
     for sid, specie, stagnant in stagnation.update(species_set, generation):
-        if stagnant:
+        if stagnant and verbose:
             reporters.species_stagnant(sid, specie)
         else:
             all_fitnesses.extend([m.fitness for m in specie.members.values()])
@@ -349,7 +349,8 @@ def reproduce(
 
     adjusted_fitnesses = [s.adjusted_fitness for s in remaining_species]
     avg_adjusted_fitness = np.mean(adjusted_fitnesses)
-    reporters.info(f"Average adjusted fitness: {avg_adjusted_fitness:.3f}")
+    if verbose:
+        reporters.info(f"Average adjusted fitness: {avg_adjusted_fitness:.3f}")
 
     # Compute the number of new members for each species in the new generation.
     previous_sizes = [len(s.members) for s in remaining_species]
@@ -375,7 +376,7 @@ def reproduce(
     update_children(
         config, module, population, new_population, ancestors, tpb, config.general.seed, verbose
     )
-    if verbose:
+    if verbose and verbose >= 2:
         print(f"\n{CM('Spawned new genomes in ', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)}s")
 
     # update population

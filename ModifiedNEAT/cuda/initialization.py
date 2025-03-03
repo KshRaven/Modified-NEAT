@@ -96,5 +96,5 @@ def initialize(config: Config, module: NeatModule, tpb=4, verbose: int = None):
     for m in module.neat_modules():
         m.update_limit()
 
-    if verbose:
+    if verbose and verbose >= 2:
         print(f"\n{CM('Initialized genomes in ', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)}s")

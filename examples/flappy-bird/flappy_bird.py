@@ -25,8 +25,8 @@ import numpy as np
 torch.set_printoptions(threshold=10)
 pygame.font.init()  # init font
 
-DEVICE = 'cpu' if torch.cuda.is_available() else 'cpu'
-DTYPE = torch.float32
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DTYPE = torch.float64
 
 # Define window
 THRESHOLD = 0.9
@@ -540,12 +540,12 @@ class RModel(Model):
 INPUTS      = 5
 OUTPUTS     = 1
 GENOMES     = 200
-EMBED_SIZE  = 32
+EMBED_SIZE  = 64
 KERNEL_SIZE = 1
 NORM_GROUPS = 4
-SEQ_LEN     = 32
-LAYERS      = 4
-HEADS       = 2
+SEQ_LEN     = 64
+LAYERS      = 3
+HEADS       = 4
 KV_HEADS    = 1
 ENABLE_BIAS = True
 DIFFERENTIAL = 2
@@ -664,7 +664,7 @@ def evaluate(population: neat.Population, **options):
                 calc_time = clock.perf_counter() - ts
                 # game.update(actions[:, 0])
                 game.update(actions)
-                game.draw(True)
+                # game.draw(False)
                 rewards = game.birds.score.unsqueeze(-1)
                 # extend(reward_buffer, game.birds.score.unsqueeze(-1))
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
@@ -722,16 +722,16 @@ def run():
     config = neat.Config()
     config.genome.init_type             = 'normal'
     config.genome.weight_init_mean      = 0
-    config.genome.weight_init_std       = 0.5
-    config.genome.weight_min_value      = -np.pi * 1
-    config.genome.weight_max_value      = np.pi * 1
+    config.genome.weight_init_std       = 1
+    config.genome.weight_min_value      = -np.inf
+    config.genome.weight_max_value      = np.inf
     config.genome.weight_mutate_power   = 0.1
     config.genome.weight_mutate_rate    = 0.7
     config.reproduction.min_species_size = 100
     config.reproduction.purge           = 1
     config.reproduction.survival_threshold = 0.10
     config.reproduction.elitism         = 10
-    config.species.compatibility_threshold = 1.0
+    config.species.compatibility_threshold = 3.0
     config.stagnation.max_stagnation    = 1
     config.stagnation.species_elitism   = 3
     config.save()
@@ -746,7 +746,7 @@ def run():
     trainer = neat.rl.PPO(
         MODEL, population, DEVICE, DTYPE, gamma=GAMMA, alpha=ALPHA,
         schedulers=[
-            neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_mutate_power', True, True),
+            neat.optim.scheduler.CosineAnnealing(config, 10, 0.01, 'weight_mutate_power', True, True),
             neat.optim.scheduler.CosineAnnealing(config, 6, 0.7, 'weight_mutate_rate', True, True),
         ],
         loss_reg=LOSS_REG, pol_reg=0.5, val_reg=1.0, ent_reg=0e-6,
