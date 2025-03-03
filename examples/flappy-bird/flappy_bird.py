@@ -1,11 +1,11 @@
 
-from build.util.fancy_text import CM, Fore
-from build.nn.base import Model
-from build.nn.modules.sub import Linear, Conv1d, Transpose, ResidualBlock, Sequential, GroupNorm, ConverBase
-from build.nn.modules import Reformer
-from build.util.datetime import unix_to_datetime_file
+from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.nn.base import Model
+from ModifiedNEAT.nn.modules.sub import Linear, Conv1d, Transpose, ResidualBlock, Sequential, GroupNorm, ConverBase
+from ModifiedNEAT.nn.modules import Reformer
+from ModifiedNEAT.util.datetime import unix_to_datetime_file
 
-import build as neat
+import ModifiedNEAT as neat
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
