@@ -679,7 +679,7 @@ class ConvSelfAttention(NeatModule):
             return tensor
         else:
             return tensor.unsqueeze(-2).expand(genomes, batch_size, seq_len, kv_heads, self.q_kv_ratio, head_dim).\
-                view(genomes, batch_size, seq_len, kv_heads * self.q_kv_ratio, head_dim)
+                contiguous().view(genomes, batch_size, seq_len, kv_heads * self.q_kv_ratio, head_dim)
 
     @staticmethod
     def convert(image: Tensor, heads: int, head_dim: int, multiplier: int = 1):

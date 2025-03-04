@@ -521,6 +521,8 @@ class Reformer(Model):
         std         = self.get_std(source, keys)
         dist        = self.dist(mean, std, None, None)
         action      = dist.sample()
+        if self.sec_actv is not None:
+            action = self.sec_actv(action)
         log_prob    = dist.log_prob(action)
         return action, log_prob
 
@@ -549,6 +551,8 @@ class Reformer(Model):
                 print(f"\n{CM('Std =>', Fore.LIGHTCYAN_EX)}\n{std}, \n\tdim = {std.shape}")
         dist    = self.dist(mean, std, None, None)
         action  = dist.sample()
+        if self.sec_actv is not None:
+            action = self.sec_actv(action)
         if single:
             action = action.squeeze(-2)
         return action
@@ -589,6 +593,8 @@ class Reformer(Model):
             outputs = mean + self.randomize(std, noise)
         else:
             outputs = mean
+        if self.sec_actv is not None:
+            action = self.sec_actv(outputs)
         return outputs
 
     def infer(self, inputs: Tensor, keys: Union[int, Iterable[int]] = None, pos_idx: int = None, verbose: int = None, get=False, single=True):

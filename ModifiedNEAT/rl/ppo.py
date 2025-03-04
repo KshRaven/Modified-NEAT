@@ -88,9 +88,6 @@ class PPO(Algorithm):
         self.episodes_done  = 0
         self.episode_mapping: dict[int, int] = {}
         self.episode_lengths: dict[int, int] = None
-        self._ep_mapping: list[int] = None
-        self._ep_started: list[bool] = None
-        self._ep_offset: int = 0
         self.updates_done   = 0
 
         # Timing
@@ -102,9 +99,6 @@ class PPO(Algorithm):
 
     def init(self, steps: int):
         self._steps_limit = self.steps_done + steps
-        self._ep_mapping = None
-        self._ep_started = None
-        self._ep_offset = 0
 
     def update_mapping(self, mapping: dict[int, int]):
         self.replay.update_mapping(mapping)

@@ -234,7 +234,7 @@ class Population(object):
                     if verbose:
                         print(f"------ Updating population ------") # , skip-enabled={skip}")
                     # Update Population
-                    if not self._init_population_update():
+                    if not self._init_population_update(verbose):
                         break
                     # Create the next generation from the current generation.
                     temp = np.unique(list(self.to_delete))
@@ -251,6 +251,10 @@ class Population(object):
                         self.reporters, tpb=4, verbose=verbose
                     )
 
+                    for key in List(self.ranking.keys()):
+                        if key not in self.genomes:
+                            del self.ranking[key]
+
                     self.to_delete = List.empty_list(INT)
                     # Mutate all genomes using the user-provided function.
                     if mutation_function is not None:
@@ -260,7 +264,7 @@ class Population(object):
                         # TODO: Implement what to do when no mutation function is not set
                         pass
 
-                    self._adv_population_update()
+                    self._adv_population_update(verbose)
 
                     # if verbose and verbose >= 2:
                     #     for p in self.modules:
