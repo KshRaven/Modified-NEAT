@@ -4,17 +4,19 @@ from ModifiedNEAT.population import Population
 from ModifiedNEAT.optim.scheduler import Scheduler
 from ModifiedNEAT.util.replay import ReplayBuffer
 from ModifiedNEAT.util.datetime import eta, clock
-from ModifiedNEAT.util.storage import save, load
-from ModifiedNEAT.util.fancy_text import CM, Fore
+# from ModifiedNEAT.util.storage import save, load
+from ModifiedNEAT.util.qol import manage_params
+from ModifiedNEAT.util.datetime import unix_to_datetime_file
+# from ModifiedNEAT.util.fancy_text import CM, Fore
 
 from torch import Tensor
+from torch.utils.tensorboard import SummaryWriter
 from numba import njit
 from numpy import ndarray
 from typing import Any, Union
 from itertools import count
 
 import torch
-import torch.nn as nn
 import random
 import numpy as np
 
@@ -24,20 +26,90 @@ TensorDict = dict[int, Tensor]
 class Algorithm(object):
     mapping_indexer = count(0)
 
-    def __init__(self, model: Model, population: Population, schedulers: list[Scheduler] = None):
+    def __init__(self, model: Model, population: Population, schedulers: list[Scheduler] = None,
+                 device=torch.device('cpu'), dtype: torch.dtype = torch.float32, **options):
+        # ------------------------------ Handle input ------------------------------ #
+        if isinstance(schedulers, Scheduler):
+            schedulers = [schedulers]
+        # ------------------------------ Build ------------------------------ #
         self.model                      = model
         self.population: Population     = population
         self.schedulers: list[Scheduler] = schedulers
-        if isinstance(self.schedulers, Scheduler):
-            self.schedulers = [self.schedulers]
         self.replay                     = ReplayBuffer()
         self.logging                    = ReplayBuffer()
-        self.alpha_steps_done           = 0
+        # ------------------------------ Attributes ------------------------------ #
+        self.steps_done                 = 0
+        self.prev_steps_done            = self.steps_done
+        self.steps_limit: int           = None
+        self.episodes_done              = 0
+        self.prev_episodes_done         = self.episodes_done
+        self.updates_done               = 0
+        self.batch_size                 = manage_params(options, 'batch_size', 512)
+        # ------------------------------ States ------------------------------ #
+        self.device: torch.device       = device
+        self.dtype: torch.dtype         = dtype
+        self.episode_mapping: dict[int, int] = {}
+        self.episode_lengths: dict[int, int] = None
+        # ------------------------------ Tensorboard logging ------------------------------ #
+        from ModifiedNEAT.util.storage import STORAGE_DIR
 
-        self.device: torch.device       = 'cpu'
-        self.dtype: torch.dtype         = torch.float32
+        self.log_dir: str = manage_params(options, ['log_dir', 'log_directory'], STORAGE_DIR+f"neat_rl_logs\\{self.__class__.__name__}\\")
+        self.log_sub_dir: str = manage_params(options, 'log_sub_dir', "")
+        self.log_name: str = manage_params(options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
+        self.writer = SummaryWriter(self.log_dir+self.log_sub_dir+self.log_name)
 
-    def _get_batches(self, keys: list[int], batch_size: int = None, shuffle=False):
+    def update_mapping(self, mapping: dict[int, int]):
+        self.replay.update_mapping(mapping)
+        self.logging.update_mapping(mapping)
+
+    def deque_episodes(self, episodes: int, keys: list[int] = None):
+        """
+        Deletes the episodes before the last n episodes.
+        Used to compensate for the long data collection times of the NEAT evaluation functions.
+        :param episodes: (int) Number of recent episodes to keep.
+        :param keys: (list[int])
+        :return: (none)
+        """
+        assert episodes >= 0
+        filters = {}
+        episode_mapping: dict[int, list[int]] = self.replay.rollout(buffers='ep_map', as_list=True)[0]
+        for key in self.replay.mapping.keys():
+            episodes_to_del = torch.tensor([ep for ep in range(self.episodes_done) if ep < (self.episodes_done-episodes)])
+            mapping = torch.tensor(episode_mapping[key])
+            episode_filter  = torch.isin(mapping, episodes_to_del)
+            record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
+            # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
+            filters[key] = record_filter
+        self.replay.deque(filters, keys)
+
+    def deque_steps(self, steps: int, keys: list[int] = None):
+        """
+        Deletes the last n steps.
+        Used to compensate for the large data sizes of the NEAT evaluation functions.
+        :param steps: (int) Number of steps to keep.
+        :param keys: (list[int])
+        :return: (none)
+        """
+        assert steps >= 0
+        filters = {}
+        episode_mapping: dict[int, list[int]] = self.replay.rollout(buffers='ep_map', as_list=True)[0]
+        for key in self.replay.mapping.keys():
+            records = len(episode_mapping[key])
+            limit = max(0, records - steps)
+            filters[key] = [i for i in range(records) if i < limit]
+        self.replay.deque(filters, keys)
+
+    def reset_buffers(self):
+        self.replay.reset()
+
+    def init_limit(self, steps: int):
+        """
+        Used to set the steps_done to stop at when running evaluation function
+        :param steps:
+        """
+        self.steps_limit = self.steps_done + steps
+
+    def get_batches(self, keys: list[int], batch_size: int = None, shuffle=False):
         batches = {}
         for key in keys:
             records = len(list(self.replay.data[key].values())[0])
@@ -67,9 +139,96 @@ class Algorithm(object):
             batches[key] = batch_indices
         return batches
 
+    # TODO: Complete
+    def compute_returns_and_advantage(
+            self, rewards: TensorDict, values: Union[TensorDict, None],
+            gamma=0.95, gae_lambda=0.91, alpha=1.10, reverse=False,
+            episodes: dict[int, list[int]] = None, observations: TensorDict = None, device: torch.device = None
+    ):
+        """
+        Post-processing step: compute the lambda-return (TD(lambda) estimate)
+        and GAE(lambda) advantage.
+
+        Uses Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
+        to compute the advantage. To obtain Monte-Carlo advantage estimate (A(s) = R - V(S))
+        where R is the sum of discounted reward with value bootstrap
+        (because we don't always have full episode), set ``gae_lambda=1.0`` during initialization.
+
+        The TD(lambda) estimator has also two special cases:
+        - TD(1) is Monte-Carlo estimate (sum of discounted rewards)
+        - TD(0) is one-step estimate with bootstrapping (r_t + gamma * v(s_{t+1}))
+
+        For more information, see discussion in https://github.com/DLR-RM/stable-baselines3/pull/375.
+        """
+
+        keys = list(rewards.keys())
+        max_records = int(np.max([tensor.shape for tensor in rewards.values()]))
+        if episodes is None:
+            episodes = {key: [0 for _ in range(max_records)] for key in keys}
+
+        @njit
+        def sorting_is_correct(eps_: list[int]):
+            idx_ = eps_[0]
+            for ep_idx_ in eps_:
+                if ep_idx_ < idx_ or ep_idx_ > idx_ + 1:
+                    return False
+                idx_ = ep_idx_
+            return True
+
+        for key, eps in episodes.items():
+            if not sorting_is_correct(eps):
+                raise ValueError(f"{self.__class__.__name__} episodes have not been sorted well for key '{key}'. "
+                                 f"Got: \n{eps}")
+
+        # Get values in case they aren't available
+        if values is None:
+            if observations is None:
+                raise RuntimeError(f"Cannot compute returns and advantages without values or observations")
+            values = {}
+            for key, observation in observations.items():
+                stack = []
+                for batch in self.get_batches([key], self.batch_size, False)[key]:
+                    value = self.model.get_value(observation[batch].to(self.device), keys=key)
+                    stack.append(value)
+                values[key] = torch.cat(stack).cpu()
+
+        advantages  = {}
+        returns     = {}
+        for (key, rewards_), (ck1, values_), (ck2, episodes_) in zip(rewards.items(), values.items(), episodes.items()):
+            assert key == ck1 == ck2
+            prev_ep_idx = episodes_[-1]
+            adv_stack = []
+            ret_stack = []
+            future_value: Tensor = torch.zeros_like(values_[0])
+            future_advantage: Tensor = torch.zeros_like(values_[0])
+            factor = len(np.unique(episodes_))-1 if not reverse else 0
+            for reward, value, ep_idx in reversed(list(zip(rewards_, values_, episodes_))):
+                if prev_ep_idx != ep_idx:
+                    future_value = torch.zeros_like(values_[0])
+                    future_advantage = torch.zeros_like(values_[0])
+                    if not reverse:
+                        factor -= 1
+                    else:
+                        factor += 1
+                reward = reward * (alpha ** factor)
+                # reward = reward * ((alpha if (reward > 0 and alpha > 1) or (reward < 0 and alpha < 1) else 1) ** factor)
+                delta = reward + gamma*future_value - value
+                future_value = value
+                future_advantage = delta + gamma*gae_lambda*future_advantage
+                adv_stack.insert(0, future_advantage)
+                ret_stack.insert(0, future_advantage + value)
+                prev_ep_idx = ep_idx
+            adv, ret = torch.stack(adv_stack), torch.stack(ret_stack)
+            if device is not None:
+                adv, ret = adv.to(device=device), ret.to(device=device)
+            advantages[key] = adv
+            returns[key] = ret
+
+        return returns, advantages
+
     @staticmethod
-    def _get_rewards_to_go(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, step: int = 5,
-                           episodes: dict[int, list[int]] = None, device: torch.device = None, rollout=False):
+    def compute_returns(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False,
+                        episodes: dict[int, list[int]] = None, device: torch.device = None):
         keys = list(rewards.keys())
         max_records = int(np.max([tensor.shape for tensor in rewards.values()]))
         if episodes is None:
@@ -88,78 +247,84 @@ class Algorithm(object):
             if not sorting_is_correct(eps):
                 raise ValueError(f"Episodes have not been sorted well for key '{key}'.")
 
-        # print(episodes)
-        cumulative_rewards: TensorDict = {}
+        returns: TensorDict = {}
         for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):
             assert key == c_key
             rewards_to_go = []
             idx = episodes_[-1]
             discounted_reward: Tensor = 0.
-            factor = 0
+            factor = len(np.unique(episodes_))-1 if not reverse else 0
             for reward, ep_idx in reversed(list(zip(rewards_, episodes_))):
                 if idx != ep_idx:
                     discounted_reward = 0.
-                    factor += 1
+                    if not reverse:
+                        factor -= 1
+                    else:
+                        factor += 1
+                reward = reward * (alpha ** factor)
+                # ((alpha if (reward > 0 and alpha > 1) or (reward < 0 and alpha < 1) else 1) ** factor)
                 discounted_reward = reward + (discounted_reward * gamma)
-                # if rollout and step is not None and self.alpha_steps_done % step == 0:
-                reward = discounted_reward * (alpha ** factor)
-                # else:
-                #     reward = discounted_reward
-                rewards_to_go.insert(0, reward)
+                rewards_to_go.insert(0, discounted_reward)
                 idx = ep_idx
             cm = torch.stack(rewards_to_go).to(rewards_.device, rewards_.dtype)
             if device is not None:
                 cm = cm.to(device=device)
-            cumulative_rewards[key] = cm
-        # if rollout:
-        #     self.alpha_steps_done += 1
-        return cumulative_rewards
+            returns[key] = cm
+        return returns
 
-    def _get_accuracy(self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
-                      rewards: TensorDict, error=0.10, type='continuous', verbose: int = None,
-                      keys: Union[int, list[int]] = None):
+    def get_accuracy(self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
+                     rewards: TensorDict = None, error=0.10, type='continuous', verbose: int = None,
+                     keys: Union[int, list[int]] = None) -> tuple[dict[int, float], dict[int, float]]:
         if isinstance(keys, (int, float)):
             keys = [keys]
-        keys = list(self.replay.mapping.keys()) if keys is None else keys
+        all_keys = list(self.replay.mapping.keys())
+        keys = all_keys if keys is None else keys
         with torch.no_grad():
             ts, ud, ut = clock.perf_counter(), 0, len(batches)
             actions_acc, rewards_acc = {}, {}
 
             # Calculate accuracy for each key
-            for key in keys:
-                action_sum, reward_sum = [], []
-                for batch in batches[key]:
-                    # Calculate
-                    observation = observations[key][batch].to(self.device)
-                    action      = actions[key][batch].to(self.device)
-                    reward      = rewards[key][batch].to(self.device)
-                    action_pred: Tensor = self.model.get_policy(observation.unsqueeze(0), keys=keys).squeeze(0)
-                    reward_pred: Tensor = self.model.get_value(observation.unsqueeze(0), keys=keys).squeeze(0)
+            for key in all_keys:
+                if key in keys:
+                    action_sum, reward_sum = [], []
+                    for batch in batches[key]:
+                        # Calculate
+                        observation = observations[key][batch].to(self.device)
 
-                    # Get action accuracy
-                    if type == 'continuous':
-                        action_res = ((action_pred <= action * (1+error)) & (action_pred >= action * (1-error))).float()
-                    elif type == 'binary':
-                        action_res = ((action_pred >= (1 - error)).float() == 1).float()
-                    elif type == 'discrete':
-                        action_res = (action_pred == action).float()
-                    else:
-                        raise ValueError(f"Unsupported accuracy type '{type}'")
-                    action_sum.append(action_res)
+                        # Get action accuracy
+                        action      = actions[key][batch].to(self.device)
+                        action_pred: Tensor = self.model.get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
+                        if type == 'continuous':
+                            action_res = ((action_pred <= action * (1+error)) & (action_pred >= action * (1-error))).float()
+                        elif type == 'binary':
+                            action_res = ((action_pred >= (1 - error)) == (action >= (1 - error))).float()
+                        elif type == 'discrete':
+                            action_res = (action_pred == action).float()
+                        else:
+                            raise ValueError(f"Unsupported accuracy type '{type}'")
+                        action_sum.append(action_res)
 
-                    # Get reward accuracy
-                    reward_sum.append(
-                        ((reward_pred <= reward * (1+error)) & (reward_pred >= reward * (1-error))).float()
-                    )
+                        # Get reward accuracy
+                        if rewards is not None:
+                            reward = rewards[key][batch].to(self.device)
+                            reward_pred: Tensor = self.model.get_value(observation.unsqueeze(0), keys=key).squeeze(0)
+                            reward_sum.append(
+                                ((reward_pred <= reward * (1+error)) & (reward_pred >= reward * (1-error))).float()
+                            )
+                        else:
+                            reward_sum.append(torch.zeros(1).float())
 
-                    if verbose:
-                        ud += 1
-                        eta(ts, ud, ut, 'getting accuracy')
-                r = torch.concat(reward_sum)
-                a = torch.concat(action_sum)
+                        if verbose:
+                            ud += 1
+                            eta(ts, ud, ut, 'getting accuracy')
+                    r = torch.concat(reward_sum)
+                    a = torch.concat(action_sum)
 
-                actions_acc[key] = a.mean().cpu().item()
-                rewards_acc[key] = r.mean().cpu().item()
+                    actions_acc[key] = a.mean().cpu().item()
+                    rewards_acc[key] = r.mean().cpu().item()
+                else:
+                    actions_acc[key] = 0
+                    rewards_acc[key] = 0
 
                 if verbose:
                     ud += 1
@@ -169,17 +334,34 @@ class Algorithm(object):
                 print(f"\rGot accuracy in {round(clock.perf_counter() - ts, 2)}s")
             return actions_acc, rewards_acc
 
+    def log_scheduler_params(self):
+        values: dict[str, Union[int, float, bool]] = {}
+        for scheduler in self.schedulers:
+            for param in scheduler.params:
+                values[param] = scheduler.get(param, scheduler.config)
+        return values
+
     @staticmethod
-    def normalize(array: dict[int, Any], index: int = None) -> dict[int, float]:
+    def segregate(ranking: dict[int, float], groups: int):
+        size = len(ranking) // groups
+        keys = list(ranking.keys())
+        index = 0
+        clusters: list[dict[int, float]] = []
+        while index < len(ranking):
+            clusters.append({key: ranking[key] for key in keys[index:index + size]})
+            index += size
+        return clusters
+
+    def normalize(self, array: dict[int, Any], index: int = None, groups: int = None, ranking: dict[int, float] = None):
         keys, source = list(array.keys()), list(array.values())
 
         # Handle errors
         if len(source) == 0:
             raise ValueError("No keys in dict")
-        if isinstance(source[0], list):
+        if isinstance(source[0], (list, tuple)):
             for i, (key, item) in enumerate(zip(keys, source)):
                 if len(item) == 0:
-                    raise ValueError(f"Empty array found in key '{key}'")
+                    raise ValueError(f"Empty Iterable found in key '{key}'")
                 if isinstance(item[0], (int, float)):
                     if index is None:
                         source[i] = np.mean(item).item()
@@ -199,10 +381,27 @@ class Algorithm(object):
         # print(np.max(source), np.min(source), source.mean(), source.std())
         maximum, minimum = np.max(source), np.min(source)
         if maximum > minimum:
-            norm_source: ndarray = (source - minimum) / (maximum - minimum)
+            norm_source: ndarray[float] = (source - minimum) / (maximum - minimum)
         else:
             norm_source = np.full_like(source, 1.0)
-        return {k: v for k, v in zip(keys, norm_source)}
+
+        norm_array = dict(zip(keys, norm_source))
+
+        # Segregate normalization when enabled
+        if groups is not None:
+            # Sort if ranking is not given
+            if ranking is None:
+                norm_array = dict(sorted(norm_array.items(), key=lambda item: (item[1], -item[0]), reverse=True))
+            else:
+                norm_array = {key: norm_array[key] for key in ranking.keys()}
+
+            segr_norm_array: dict[int, float] = {}
+            for cluster in self.segregate(norm_array, groups):
+                for key, norm_value in self.normalize(cluster).items():
+                    segr_norm_array[key] = norm_value
+            norm_array = segr_norm_array
+
+        return norm_array
 
     @staticmethod
     def level(array: dict[int, Any]) -> dict[int, float]:
@@ -214,7 +413,7 @@ class Algorithm(object):
         if isinstance(source[0], list):
             for i, (key, item) in enumerate(zip(keys, source)):
                 if len(item) == 0:
-                    raise ValueError(f"Empty array found in key '{key}'")
+                    raise ValueError(f"Empty Iterable found in key '{key}'")
                 if isinstance(item, (int, float)):
                     source[i] = np.mean(item).item()
                 else:
@@ -244,58 +443,58 @@ class Algorithm(object):
 
             episode_mapping[key] = np.array(episode_mapping[key])[sorting_indices.cpu().tolist()].tolist()
 
-            count = {}
+            length = {}
             for ep_idx in episode_mapping[key]:
-                if ep_idx not in count:
-                    count[ep_idx] = 1
+                if ep_idx not in length:
+                    length[ep_idx] = 1
                 else:
-                    count[ep_idx] += 1
-            lengths = list(count.values())
+                    length[ep_idx] += 1
+            lengths = list(length.values())
             episode_lengths[key] = lengths
 
         return episode_lengths
 
-    # TODO: Implement saving and loading of Reinforcing
-    def save(self, name: str = None, directory: str = None, file_no: int = None, replace=False):
-        # exclude = ['population', 'parameters', 'model', 'replay', 'logging', 'writer']
-        # state = {var: getattr(self, var) for var in vars(self).keys() if var not in exclude}
-        #
-        # algo = self.__class__.__name__
-        # if name is None:
-        #     name = 'default'
-        # if directory is None:
-        #     directory = f'{algo.lower()}'
-        #
-        # # Save Trainer data
-        # if save(state, name, directory, file_no, replace, items_name=f'NEAT {algo}')[0]:
-        #     # Save population
-        #     self.population.save_dict(name, directory, file_no, replace)
-        #
-        #     print(CM(f"Successfully saved trainer to '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
-        # else:
-        #     print(CM(f"Failed to save trainer to '{directory}\\{name}'", Fore.LIGHTRED_EX))
-        raise NotImplementedError()
-
-    def load(self, name: str = None, directory: str = None, file_no: int = None):
-        # algo = self.__class__.__name__
-        # if name is None:
-        #     name = 'default'
-        # if directory is None:
-        #     directory = f'{algo.lower()}'
-        # state = load(name, directory, file_no, items_name=f'NEAT {algo}')
-        # if state is not None:
-        #     # Load Trainer data
-        #     for var, val in state.items():
-        #         setattr(self, var, val)
-        #
-        #     # Load Population
-        #     self.population.load_dict(None, name, directory, file_no)
-        #
-        #     # Load Model and Params
-        #     self._get_params(self.model)
-        #     bind_modules(self.parameters, self.population.genomes, True)
-        #
-        #     print(CM(f"Successfully loaded trainer from '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
-        # else:
-        #     print(CM(f"Failed to load trainer from '{directory}\\{name}'", Fore.LIGHTRED_EX))
-        raise NotImplementedError()
+    # # TODO: Implement saving and loading of Reinforcing
+    # def save(self, name: str = None, directory: str = None, file_no: int = None, replace=False):
+    #     # exclude = ['population', 'parameters', 'model', 'replay', 'logging', 'writer']
+    #     # state = {var: getattr(self, var) for var in vars(self).keys() if var not in exclude}
+    #     #
+    #     # algo = self.__class__.__name__
+    #     # if name is None:
+    #     #     name = 'default'
+    #     # if directory is None:
+    #     #     directory = f'{algo.lower()}'
+    #     #
+    #     # # Save Trainer data
+    #     # if save(state, name, directory, file_no, replace, items_name=f'NEAT {algo}')[0]:
+    #     #     # Save population
+    #     #     self.population.save_dict(name, directory, file_no, replace)
+    #     #
+    #     #     print(CM(f"Successfully saved trainer to '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
+    #     # else:
+    #     #     print(CM(f"Failed to save trainer to '{directory}\\{name}'", Fore.LIGHTRED_EX))
+    #     raise NotImplementedError()
+    #
+    # def load(self, name: str = None, directory: str = None, file_no: int = None):
+    #     # algo = self.__class__.__name__
+    #     # if name is None:
+    #     #     name = 'default'
+    #     # if directory is None:
+    #     #     directory = f'{algo.lower()}'
+    #     # state = load(name, directory, file_no, items_name=f'NEAT {algo}')
+    #     # if state is not None:
+    #     #     # Load Trainer data
+    #     #     for var, val in state.items():
+    #     #         setattr(self, var, val)
+    #     #
+    #     #     # Load Population
+    #     #     self.population.load_dict(None, name, directory, file_no)
+    #     #
+    #     #     # Load Model and Params
+    #     #     self._get_params(self.model)
+    #     #     bind_modules(self.parameters, self.population.genomes, True)
+    #     #
+    #     #     print(CM(f"Successfully loaded trainer from '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
+    #     # else:
+    #     #     print(CM(f"Failed to load trainer from '{directory}\\{name}'", Fore.LIGHTRED_EX))
+    #     raise NotImplementedError()

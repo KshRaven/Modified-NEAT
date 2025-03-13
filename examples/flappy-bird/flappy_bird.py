@@ -540,17 +540,17 @@ class RModel(Model):
 INPUTS      = 5
 OUTPUTS     = 1
 GENOMES     = 200
-EMBED_SIZE  = 64
+EMBED_SIZE  = 16
 KERNEL_SIZE = 1
-NORM_GROUPS = 4
+NORM_GROUPS = 1
 SEQ_LEN     = 16
 LAYERS      = 1
-HEADS       = 4
+HEADS       = 1
 KV_HEADS    = 1
-ENABLE_BIAS = False
-DIFFERENTIAL = 3
-GAMMA       = 0.8660
-ALPHA       = 1.3
+ENABLE_BIAS = True
+DIFFERENTIAL = True
+GAMMA       = np.exp(np.log(0.10) / (16 - 1))
+ALPHA       = np.exp(np.log(1.5) / (2 - 1))
 LOSS_REG    = 0.
 
 # MODEL = Reformer(INPUTS, OUTPUTS, 1, EMBED_SIZE, SEQ_LEN, LAYERS, HEADS, KV_HEADS, True, 0.1, ENABLE_BIAS,
@@ -569,7 +569,7 @@ STEPS = LIMIT * 100 * RUNS
 
 
 def evaluate(population: neat.Population, **options):
-    trainer: neat.rl.PPO = options['trainer']
+    trainer: neat.rl.NEAT = options['trainer']
     trainer.update_mapping(population.get_mapping())
     # BUFFER = torch.zeros(SEQ_LEN, population.pop_size, INPUTS).to(DEVICE, DTYPE)
     global INIT_GEN
@@ -585,7 +585,7 @@ def evaluate(population: neat.Population, **options):
     for genome in population.genomes.values():
         genome.fitness = 0
 
-    trainer.deque_episodes(2)
+    trainer.deque_episodes(1)
     terminate = False
     start = 0
     run_step = 0
@@ -675,7 +675,7 @@ def evaluate(population: neat.Population, **options):
                 # print(f"\rO = {outputs.flatten().cpu().numpy()} SCORE: = {game.birds.score.cpu().numpy()}", end='')
 
                 round_end = (game.birds.active() == 0 and game_step == RUNS-1) or game.score >= LIMIT
-                terminate = trainer.update(observations, actions, probs, rewards, round_end, round_end)
+                terminate = trainer.update(observations, actions, rewards, round_end, round_end)
 
                 alive = round((torch.sum(~game.birds.dead) / game.birds.dead.numel() * 100).item(), 2)
                 max_score = round(rewards.max().item(), 2)
@@ -725,13 +725,13 @@ def run():
     config.genome.weight_init_std       = 1
     config.genome.weight_min_value      = -np.inf
     config.genome.weight_max_value      = np.inf
-    config.genome.weight_mutate_power   = 1
+    config.genome.weight_mutate_power   = 0.1
     config.genome.weight_mutate_rate    = 0.8
     config.reproduction.min_species_size = 100
     config.reproduction.purge           = 1
     config.reproduction.survival_threshold = 0.10
     config.reproduction.elitism         = 10
-    config.species.compatibility_threshold = 3.0
+    config.species.compatibility_threshold = 1.5
     config.stagnation.max_stagnation    = 1
     config.stagnation.species_elitism   = 3
     config.save()
@@ -741,20 +741,20 @@ def run():
     print(f"creating population")
     population = neat.Population(GENOMES, MODEL, config, init_reporter=True)
     print(MODEL.pol_proj)
-    # population.load_dict(name='flappy_bird', file_no=None)
+    population.load_dict(name='flappy_bird', file_no=None)
 
-    trainer = neat.rl.PPO(
-        MODEL, population, DEVICE, DTYPE, gamma=GAMMA, alpha=ALPHA,
+    trainer = neat.rl.NEAT(
+        MODEL, population,
         schedulers=[
             neat.optim.scheduler.CosineAnnealing(config, 10, 0.01, 'weight_mutate_power', True, True),
             neat.optim.scheduler.CosineAnnealing(config, 6, 0.7, 'weight_mutate_rate', True, True),
-        ],
-        loss_reg=LOSS_REG, pol_reg=0.5, val_reg=1.0, ent_reg=0e-6,
-        norm_rew=True, norm_adv=False,
+        ], device=DEVICE, dtype=DTYPE,
         log_sub_dir='flappy_bird\\',
         log_name=f"{unix_to_datetime_file(clock.time())}-"
-                                   f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
-                                   f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}"
+                 f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
+                 f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
+        gamma=GAMMA, alpha=ALPHA, reverse=False,
+        rew_reg=1.0, pol_reg=0.95, validate=True, groups=20,
     )
 
     # Run for up to 50 generations.

@@ -298,6 +298,7 @@ class Conver(NeatModule):
         self.lower_clip         = manage_params(options, 'lower_clip', -20)
         self.upper_clip         = manage_params(options, 'upper_clip', 20)
         self.feedback           = manage_params(options, 'feedback', False)
+        self.trans_kernel_size  = manage_params(options, 'trans_kernel_size', kernel_size)
 
         # ATTRIBUTES
         self.inputs = inputs if not self.feedback else inputs - self.feedback
@@ -310,7 +311,7 @@ class Conver(NeatModule):
             Transpose(),
             Convolution(self.feedback, dim_size, kernel_size, stride=1, padding=-1,
                         padding_mode=manage_params(options, 'padding_mode', 'zeros'),
-                        device=device, dtype=dtype),
+                        bias=bias, device=device, dtype=dtype),
             ResidualBlock(dim_size, self.feedback, kernel_size, norm_groups, bias, device, dtype, **options),
             Transpose(),
         ) if self.feedback and manage_params(options, 'feedback_norm', True) else None
@@ -326,8 +327,8 @@ class Conver(NeatModule):
             ]
         )
         self.transformer = ConverBase(
-            (max_seq_len,), dim_size, kernel_size, norm_groups, layers, heads, kv_heads, differential, self.causal_mask,
-            bias, device, dtype, **options
+            (max_seq_len,), dim_size, self.trans_kernel_size, norm_groups, layers, heads, kv_heads, differential,
+            self.causal_mask, bias, device, dtype, **options
         )
         decoder = []
         for layer_idx in range(self.dec_layers):

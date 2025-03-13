@@ -17,15 +17,15 @@ def load_requirements(filename='requirements.txt'):
 
 setup(
     name='ModifiedNEAT',
-    version='0.1.5',
+    version='0.2.0',
     author='Bradley Odimmasi',
     author_email='bodimmasi@students.uonbi.ac.ke',
     description='Modified version of python NEAT algorithm that uses PyTorch modules',
     long_description=open('README.md').read() if os.path.exists('README.md') else '',
     long_description_content_type='text/markdown',
-    url='https://github.com/KshRaven/DiffusionTesting.git',
+    url='https://github.com/KshRaven/Modified-NEAT.git',
     packages=find_packages(),
-    install_requires=load_requirements(),  # Loads dependencies from requirements.txt
+    install_requires=load_requirements(),
     classifiers=[
         'Programming Language :: Python :: 3',
         'Operating System :: OS Independent',
