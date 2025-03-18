@@ -304,13 +304,20 @@ class Model(NeatModule):
         super().__init__()
         self.distribution: str = 'normal'
 
-    def dist(self, mean: Tensor, std: Tensor, latent: Tensor = None, verbose: int = None):
+    def dist(self, mean: Tensor, std: Union[Tensor, None], latent: Tensor = None, verbose: int = None):
+        def fill_std(std_dev: Tensor):
+            if std_dev is not None:
+                return std_dev
+            else:
+                return torch.full_like(mean, 1e-12)
+
         extra = {}
         if self.distribution == 'discrete':
             distribution = torch.distributions.Categorical(torch.softmax(mean, -1))
         elif self.distribution == 'normal':
-            distribution = torch.distributions.Normal(mean, std)
+            distribution = torch.distributions.Normal(mean, fill_std(std))
         elif self.distribution == 'mult_var_normal':
+            std = fill_std(std)
             if latent is not None:
                 try:
                     # Create and cache the correlation layer and its lower-triangular indices, if needed.

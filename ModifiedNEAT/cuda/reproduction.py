@@ -260,18 +260,19 @@ def update_children(
 
     for param in module.neat_parameters():
         # with cuda.defer_cleanup():
-        array_source = param.data.cpu().numpy()
-        array_update = np.zeros((len(new_population), *param.original_shape))
+        array_source = param.data.clone()
+        array_update = torch.zeros(len(new_population), *param.original_shape,
+                                   device=array_source.device, dtype=array_source.dtype)
         as_shape, au_shape = array_source.shape, array_update.shape
         if array_source.ndim > 3:
             array_source = array_source.reshape((*array_source.shape[:2], -1))
             array_update = array_update.reshape((*array_update.shape[:2], -1))
         elif array_source.ndim < 3:
             for _ in range(3-array_source.ndim):
-                array_source = np.expand_dims(array_source, -1)
-                array_update = np.expand_dims(array_update, -1)
+                array_source = array_source.unsqueeze(-1)
+                array_update = array_update.unsqueeze(-1)
         # mutate_debug = cuda.to_device(np.zeros_like(array_update))
-        array_source, array_update = cuda.to_device(array_source), cuda.to_device(array_update)
+        array_source, array_update = cuda.to_device(array_source.cpu().numpy()), cuda.to_device(array_update.cpu().numpy())
         kernel_shape = calc_grid(max_pop_size, *array_update.shape[1:3], tpb=tpb)
         rng_states, threads_total = get_rng_states(kernel_shape, seed)
         # if verbose and verbose >= 3:

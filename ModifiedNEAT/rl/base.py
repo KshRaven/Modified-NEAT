@@ -7,7 +7,7 @@ from ModifiedNEAT.util.datetime import eta, clock
 # from ModifiedNEAT.util.storage import save, load
 from ModifiedNEAT.util.qol import manage_params
 from ModifiedNEAT.util.datetime import unix_to_datetime_file
-# from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.fancy_text import CM, Fore
 
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
@@ -19,6 +19,7 @@ from itertools import count
 import torch
 import random
 import numpy as np
+import math
 
 TensorDict = dict[int, Tensor]
 
@@ -262,7 +263,7 @@ class Algorithm(object):
                     else:
                         factor += 1
                 reward = reward * (alpha ** factor)
-                # ((alpha if (reward > 0 and alpha > 1) or (reward < 0 and alpha < 1) else 1) ** factor)
+                # reward = reward * ((alpha if (reward > 0 and alpha > 1) or (reward < 0 and alpha < 1) else 1) ** factor)
                 discounted_reward = reward + (discounted_reward * gamma)
                 rewards_to_go.insert(0, discounted_reward)
                 idx = ep_idx
@@ -294,14 +295,18 @@ class Algorithm(object):
                         # Get action accuracy
                         action      = actions[key][batch].to(self.device)
                         action_pred: Tensor = self.model.get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
-                        if type == 'continuous':
-                            action_res = ((action_pred <= action * (1+error)) & (action_pred >= action * (1-error))).float()
-                        elif type == 'binary':
-                            action_res = ((action_pred >= (1 - error)) == (action >= (1 - error))).float()
-                        elif type == 'discrete':
-                            action_res = (action_pred == action).float()
-                        else:
-                            raise ValueError(f"Unsupported accuracy type '{type}'")
+                        try:
+                            if type == 'continuous':
+                                action_res = ((action_pred <= action * (1+error)) & (action_pred >= action * (1-error))).float()
+                            elif type == 'binary':
+                                action_res = ((action_pred >= (1 - error)) == (action >= (1 - error))).float()
+                            elif type == 'discrete':
+                                action_res = (action_pred == action).float()
+                            else:
+                                raise ValueError(f"Unsupported accuracy type '{type}'")
+                        except Exception as e:
+                            print(CM(f'Action Prediction = {action_pred.shape}, Target = {action.shape}\n', Fore.LIGHTRED_EX))
+                            raise e
                         action_sum.append(action_res)
 
                         # Get reward accuracy
@@ -342,17 +347,18 @@ class Algorithm(object):
         return values
 
     @staticmethod
-    def segregate(ranking: dict[int, float], groups: int):
-        size = len(ranking) // groups
+    def segregate(ranking: dict[int, float], size: int):
+        groups = math.ceil(len(ranking) / size)
+        if groups < 1:
+            raise ValueError(f"Invalid segregation size '{size}' with '{groups}' groups and '{len(ranking)}' keys")
         keys = list(ranking.keys())
         index = 0
-        clusters: list[dict[int, float]] = []
-        while index < len(ranking):
-            clusters.append({key: ranking[key] for key in keys[index:index + size]})
-            index += size
+        clusters: list[dict[int, float]] = [
+            {key: ranking[key] for key in keys[index+size*x:index+size*(x+1)]} for x in range(groups)
+        ]
         return clusters
 
-    def normalize(self, array: dict[int, Any], index: int = None, groups: int = None, ranking: dict[int, float] = None):
+    def normalize(self, array: dict[int, Any], index: int = None, segr_size: int = None, ranking: dict[int, float] = None):
         keys, source = list(array.keys()), list(array.values())
 
         # Handle errors
@@ -388,7 +394,7 @@ class Algorithm(object):
         norm_array = dict(zip(keys, norm_source))
 
         # Segregate normalization when enabled
-        if groups is not None:
+        if segr_size is not None:
             # Sort if ranking is not given
             if ranking is None:
                 norm_array = dict(sorted(norm_array.items(), key=lambda item: (item[1], -item[0]), reverse=True))
@@ -396,9 +402,11 @@ class Algorithm(object):
                 norm_array = {key: norm_array[key] for key in ranking.keys()}
 
             segr_norm_array: dict[int, float] = {}
-            for cluster in self.segregate(norm_array, groups):
+            clusters = self.segregate(norm_array, segr_size)
+            segr_range = max(list(norm_array.values())) / len(clusters)
+            for c_idx, cluster in enumerate(clusters):
                 for key, norm_value in self.normalize(cluster).items():
-                    segr_norm_array[key] = norm_value
+                    segr_norm_array[key] = (norm_value*segr_range) + ((len(clusters)-1-c_idx)*segr_range)
             norm_array = segr_norm_array
 
         return norm_array

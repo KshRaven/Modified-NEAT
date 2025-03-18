@@ -309,10 +309,14 @@ class Conver(NeatModule):
         Convolution = get_conv((max_seq_len,))
         self.feedback_gain = Sequential(
             Transpose(),
-            Convolution(self.feedback, dim_size, kernel_size, stride=1, padding=-1,
+            Convolution(self.feedback, dim_size, 1, stride=1, padding=-1,
                         padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                         bias=bias, device=device, dtype=dtype),
-            ResidualBlock(dim_size, self.feedback, kernel_size, norm_groups, bias, device, dtype, **options),
+            GroupNorm(dim_size, dim_size, self.epsilon, True, bias, device, dtype),
+            Convolution(dim_size, self.feedback, 1, stride=1, padding=-1,
+                        padding_mode=manage_params(options, 'padding_mode', 'zeros'),
+                        bias=bias, device=device, dtype=dtype),
+            nn.Tanh(),
             Transpose(),
         ) if self.feedback and manage_params(options, 'feedback_norm', True) else None
         self.feedback_dropout = Ignore(manage_params(options, ['feedback_drop', 'feedback_dropout'], 0))
@@ -345,7 +349,7 @@ class Conver(NeatModule):
                 )
             else:
                 decoder.append(
-                    Conv1d(dim_size, outputs if not self.probabilistic else outputs*2, 1, 1,
+                    Conv1d(dim_size, outputs, 1, 1,
                            padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                            bias=bias, device=device, dtype=dtype)
                 )
@@ -442,7 +446,7 @@ class Reformer(Model):
         self.dim_size       = dim_size
         self.distribution   = manage_params(options, ['distribution', 'dist'], 'normal')
         self.epsilon        = manage_params(options, 'epsilon', 1e-8)
-        self.probabilistic  = manage_params(options, ['probabilistic', 'prob'], False)
+        self.probabilistic  = manage_params(options, ['probabilistic', 'prob'], True)
         self.clip_std_min   = manage_params(options, ['clip_min'], None)
         self.clip_std_max   = manage_params(options, ['clip_max'], None)
         self.clip_std       = self.clip_std_min is not None or self.clip_std_max is not None
@@ -458,7 +462,7 @@ class Reformer(Model):
             inputs, dim_size, max_seq_len, dim_size, kernel_size, layers, norm_groups, channels,
             heads, kv_heads, differential, bias, device, dtype, **options
         )
-        self.mean_log_std = Linear(dim_size, pol_out, bias, device, dtype)
+        self.mean_log_std = Linear(dim_size, pol_out*(2 if self.probabilistic else 1), bias, device, dtype)
         self.val_proj = Conver(
             inputs, dim_size, max_seq_len, dim_size, kernel_size, layers, norm_groups, channels,
             heads, kv_heads, differential, bias, device, dtype, **options
@@ -504,13 +508,16 @@ class Reformer(Model):
         return self.reduce(mean)
 
     def get_std(self, latent: Tensor, keys: Union[int, Iterable[int]] = None) -> Union[Tensor, None]:
-        if self.distribution != 'discrete':
+        if self.probabilistic and self.distribution != 'discrete':
             log_std = latent[..., -self.pol_size:]
-            if self.clip_std:
-                log_std = F.hardtanh(log_std, self.clip_std_min, self.clip_std_max)
-            std = torch.exp(log_std)
             if self.std_actv is not None:
-                std = self.std_actv(std)
+                log_std = self.std_actv(log_std)
+            if self.clip_std:
+                if not isinstance(self.std_actv, nn.Sigmoid):
+                    log_std = torch.clamp(log_std, self.clip_std_min, self.clip_std_max)
+                else:
+                    log_std = log_std * (self.clip_std_max-self.clip_std_min) + self.clip_std_min
+            std = torch.pow(10.0, log_std)
             return self.reduce(std)
         else:
             return None
@@ -542,6 +549,7 @@ class Reformer(Model):
         verbose = manage_params(options, 'verbose', None)
         get     = manage_params(options, 'get', False)
         single  = manage_params(options, 'single', self.single_pass)
+
         latent  = self.get_latent(self.pol_proj, state, keys, pos_idx, verbose, get, single)
         source  = self.mean_log_std(latent, keys=keys)
         mean    = self.get_mean(source, keys)

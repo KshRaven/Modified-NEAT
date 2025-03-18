@@ -499,8 +499,8 @@ class RModel(Model):
     def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
         mean_std        = self.mean_log_std(latent, keys=keys)
         mean, log_std   = torch.chunk(mean_std, 2, -1)
-        mean            = F.tanh(mean)
-        std             = torch.exp(F.hardtanh(log_std, -10, 0))
+        mean            = F.sigmoid(mean)
+        std             = torch.pow(10, F.sigmoid(log_std) * 3 + -4)
         return mean, std
 
     def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
@@ -537,19 +537,19 @@ class RModel(Model):
 
 
 # Network
+GENOMES     = 100
 INPUTS      = 5
 OUTPUTS     = 1
-GENOMES     = 200
-EMBED_SIZE  = 16
-KERNEL_SIZE = 1
-NORM_GROUPS = 1
+EMBED_SIZE  = 64
+KERNEL_SIZE = 3
+NORM_GROUPS = 4
 SEQ_LEN     = 16
-LAYERS      = 1
-HEADS       = 1
-KV_HEADS    = 1
+LAYERS      = 2
+HEADS       = 4
+KV_HEADS    = None
 ENABLE_BIAS = True
-DIFFERENTIAL = True
-GAMMA       = np.exp(np.log(0.10) / (16 - 1))
+DIFFERENTIAL = False
+GAMMA       = np.exp(np.log(0.10) / 3)
 ALPHA       = np.exp(np.log(1.5) / (2 - 1))
 LOSS_REG    = 0.
 
@@ -726,12 +726,13 @@ def run():
     config.genome.weight_min_value      = -np.inf
     config.genome.weight_max_value      = np.inf
     config.genome.weight_mutate_power   = 0.1
-    config.genome.weight_mutate_rate    = 0.8
-    config.reproduction.min_species_size = 100
+    config.genome.weight_mutate_rate    = 0.70
+    config.genome.weight_replace_rate   = 0.01
+    config.reproduction.min_species_size = GENOMES
     config.reproduction.purge           = 1
-    config.reproduction.survival_threshold = 0.10
-    config.reproduction.elitism         = 10
-    config.species.compatibility_threshold = 1.5
+    config.reproduction.survival_threshold = 0.05
+    config.reproduction.elitism         = 20
+    config.species.compatibility_threshold = np.inf
     config.stagnation.max_stagnation    = 1
     config.stagnation.species_elitism   = 3
     config.save()
@@ -741,20 +742,20 @@ def run():
     print(f"creating population")
     population = neat.Population(GENOMES, MODEL, config, init_reporter=True)
     print(MODEL.pol_proj)
-    population.load_dict(name='flappy_bird', file_no=None)
+    # population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.NEAT(
         MODEL, population,
         schedulers=[
-            neat.optim.scheduler.CosineAnnealing(config, 10, 0.01, 'weight_mutate_power', True, True),
-            neat.optim.scheduler.CosineAnnealing(config, 6, 0.7, 'weight_mutate_rate', True, True),
+            neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_mutate_power', True, True),
+            neat.optim.scheduler.CosineAnnealing(config, 6, 0.86, 'weight_mutate_rate', False, False),
         ], device=DEVICE, dtype=DTYPE,
         log_sub_dir='flappy_bird\\',
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
         gamma=GAMMA, alpha=ALPHA, reverse=False,
-        rew_reg=1.0, pol_reg=0.95, validate=True, groups=20,
+        rew_reg=1.0, pol_reg=0.5, validate=True, groups=40,
     )
 
     # Run for up to 50 generations.

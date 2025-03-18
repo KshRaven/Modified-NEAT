@@ -55,7 +55,7 @@ class NEAT(Algorithm):
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
         self.pol_reg: float     = manage_params(options, 'pol_reg', 0.0)
         self.validate: bool     = manage_params(options, 'validate', False)
-        self.groups: Union[float, None] = manage_params(options, 'groups', None)
+        self.segr_size: Union[float, None] = manage_params(options, 'segr_size', None)
         self.target_kl: Union[float, None] = manage_params(options, 'target_kl', None)
 
         self.logging.add_buffers(
@@ -137,7 +137,7 @@ class NEAT(Algorithm):
         assert all([key in policy for key in scores.keys()])
         if self.pol_reg != 0:
             scores = dict(sorted(self.normalize(scores).items(), key=lambda item: (item[1], -item[0]), reverse=True))
-            policy = self.normalize(policy, None, self.groups, scores)
+            policy = self.normalize(policy, None, self.segr_size, scores)
             true_scores = {key: self.rew_reg*scores[key] + self.pol_reg*policy[key] for key in scores.keys()}
             true_scores = dict(sorted(true_scores.items(), key=lambda item: (item[1], -item[0]), reverse=True))
         else:
@@ -275,7 +275,7 @@ class NEAT(Algorithm):
                 buffer_sizes = self.replay.buffer_sizes()
 
                 # noinspection PyBroadException
-                def get_range(key: int):
+                def get_range(key: Union[int, None]):
                     try:
                         params = []
                         for param in self.model.neat_parameters():
@@ -331,6 +331,8 @@ class NEAT(Algorithm):
                 self.writer.add_scalar(extra+'param_std', std, self.updates_done)
                 self.writer.add_scalar(extra+'param_min', minimum, self.updates_done)
                 self.writer.add_scalar(extra+'param_max', maximum, self.updates_done)
+                for param, label in zip(get_range(None), ['mean', 'std', 'max', 'min']):
+                    self.writer.add_scalar(extra+f'global_{label}', param, self.updates_done)
 
                 # Population
                 survival_rate = len(valid_keys) / len(self.population.genomes)
@@ -411,17 +413,6 @@ class NEAT(Algorithm):
                 ex_var[key] = torch.clamp(torch.mean(torch.stack(ev)), None, 1).cpu().item()
 
             return ex_var
-
-    @staticmethod
-    def plotter(name: str, title: str = None, **buffers: list[float]):
-        for label, buffer in buffers.items():
-            plt.plot(buffer, label=label)
-        if len(buffers) > 1:
-            plt.legend()
-        if title is not None:
-            plt.title(title)
-        plt.savefig(STORAGE_DIR+f"plots\\{name}-{unix_to_datetime_file(clock.time())}")
-        plt.close()
 
 
 if __name__ == '__main__':
