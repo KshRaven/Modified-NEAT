@@ -16,7 +16,9 @@ from torch import Tensor
 
 import torch
 import numpy as np
+import cupy as cp
 import time as clock
+import gc
 
 NP_FLOAT = types.float64
 GENOME   = Genome.class_type.instance_type
@@ -170,7 +172,7 @@ def _crossover(value1: float, value2: float, states: GPUArray, index: int):
 
 
 @cuda.jit
-def crossover(source: GPUArray, updates: GPUArray, ModifiedNEAT: GPUArray, rng_states: GPUArray):
+def crossover(source: GPUArray, updates: GPUArray, sources: GPUArray, rng_states: GPUArray):
     genome_idx, x, y = cuda.grid(3)
     # Parameter shape (genomes, *spatial_dims)
     g_lim = updates.shape[0]
@@ -182,7 +184,7 @@ def crossover(source: GPUArray, updates: GPUArray, ModifiedNEAT: GPUArray, rng_s
     rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
     if genome_idx < g_lim and x < x_lim and y < y_lim:
-        parent1, parent2 = ModifiedNEAT[genome_idx]
+        parent1, parent2 = sources[genome_idx]
         if parent1 == parent2:
             value = get_value(source, parent1, x, y)
         else:
@@ -196,19 +198,20 @@ def crossover(source: GPUArray, updates: GPUArray, ModifiedNEAT: GPUArray, rng_s
 @cuda.jit(device=True)
 def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: float, mutate_power: float,
                   replace_rate: float, init_type: str, mean: float, std: float, minimum: float, maximum: float,
-                  rng_states: GPUArray, rng_index: int):
-    r = prob(rng_states, rng_index)
+                  probabilities: GPUArray, normals: GPUArray, rng_index: int):
+    r = prob(probabilities, rng_index)
     if r < mutate_rate:
-        value = clamp(get_value(parameter, g, x, y) + normal(rng_states, rng_index, 0., mutate_power), minimum, maximum)
+        value = clamp(get_value(parameter, g, x, y) + normal(normals, rng_index, 0., mutate_power), minimum, maximum)
         set_value(parameter, g, x, y, value)
     elif r < replace_rate + mutate_rate:
-        initialize_genome(parameter, g, x, y, init_type, mean, std, minimum, maximum, rng_states, rng_index)
+        initialize_genome(parameter, g, x, y, init_type, mean, std, minimum, maximum, normals, rng_index)
 
 
 @cuda.jit
 def mutate(
         updates: GPUArray, children: GPUArray, mutate_rate: float, mutate_power: float, replace_rate: float,
-        init_type: str, mean: float, std: float, minimum: float, maximum: float, rng_states: GPUArray,
+        init_type: str, mean: float, std: float, minimum: float, maximum: float,
+        probabilities: GPUArray, normals: GPUArray,
         # debugging: GPUArray
 ):
     genome_idx, x, y = cuda.grid(3)
@@ -224,12 +227,12 @@ def mutate(
     if genome_idx < g_lim and x < x_lim and y < y_lim:
         if children[genome_idx] is True:
             mutate_genome(updates, genome_idx, x, y, mutate_rate, mutate_power, replace_rate, init_type,
-                          mean, std, minimum, maximum, rng_states, rng_index)
+                          mean, std, minimum, maximum, probabilities, normals, rng_index)
 
 
 def update_children(
         config: Config, module: NeatModule, old_population: dict[int, Genome], new_population: dict[int, Genome],
-        ancestors: dict[int, tuple[Genome, Genome]], tpb=10, seed: int = None, verbose: int = None
+        ancestors: dict[int, tuple[Genome, Genome]], tpb=1, seed: int = None, verbose: int = None
 ):
     for m in module.neat_modules():
         m.updated = False
@@ -252,10 +255,10 @@ def update_children(
                 parent1, parent2 = parent2, parent1
             sources[index] = (old_mapping[parent1.key], old_mapping[parent2.key])
     updates: dict[int, Tensor] = {}
-    sources = cuda.to_device(np.array([list(g) for g in sources.values()]))
-    child_filter = cuda.to_device(np.array([
+    sources = cp.array([list(g) for g in sources.values()])
+    child_filter = cp.array([
         True if gid not in old_population else False for gid in new_population.keys()
-    ]))
+    ])
     max_pop_size = max(len(old_population), len(new_population))
 
     for param in module.neat_parameters():
@@ -265,47 +268,48 @@ def update_children(
                                    device=array_source.device, dtype=array_source.dtype)
         as_shape, au_shape = array_source.shape, array_update.shape
         if array_source.ndim > 3:
-            array_source = array_source.reshape((*array_source.shape[:2], -1))
-            array_update = array_update.reshape((*array_update.shape[:2], -1))
+            array_source = array_source.reshape(*array_source.shape[:2], -1)
+            array_update = array_update.reshape(*array_update.shape[:2], -1)
         elif array_source.ndim < 3:
             for _ in range(3-array_source.ndim):
                 array_source = array_source.unsqueeze(-1)
                 array_update = array_update.unsqueeze(-1)
         # mutate_debug = cuda.to_device(np.zeros_like(array_update))
-        array_source, array_update = cuda.to_device(array_source.cpu().numpy()), cuda.to_device(array_update.cpu().numpy())
+        array_source, array_update = cp.asarray(array_source), cp.asarray(array_update)
         kernel_shape = calc_grid(max_pop_size, *array_update.shape[1:3], tpb=tpb)
-        rng_states, threads_total = get_rng_states(kernel_shape, seed)
         # if verbose and verbose >= 3:
         #     print(param.dtype, param.device, kernel_shape, as_shape, au_shape, array_source.shape, array_update.shape)
 
+        rng_states, threads_total = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)
         crossover[*kernel_shape](
             array_source, array_update, sources, rng_states
         )
         if verbose and verbose >= 4:
-            param.cd = array_update.copy_to_host()
+            param.cd = array_update.copy().get()
 
-        rng_states = rng_states.copy_to_host()
-        rng_states = get_rng_states(kernel_shape, seed)[0]
+        del rng_states
+
+        rng_states0 = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)[0]
+        rng_states1 = get_rng_states(kernel_shape, seed, get_normal=True, use_cuda=True)[0]
         mutate[*kernel_shape](
             array_update, child_filter, config.genome.weight_mutate_rate, config.genome.weight_mutate_power,
             config.genome.weight_replace_rate, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,
-            config.genome.weight_min_value, config.genome.weight_max_value, rng_states, # mutate_debug
+            config.genome.weight_min_value, config.genome.weight_max_value, rng_states0, rng_states1, # mutate_debug
         )
         if verbose and verbose >= 4:
-            param.md = array_update.copy_to_host() - param.cd
+            param.md = array_update.copy().get() - param.cd
 
-        # remove data from GPU
-        rng_states = rng_states.copy_to_host()
-        array_source = array_source.copy_to_host()
         # Add update to update list
-        # array_update = array_update.copy_to_host()
-        update = torch.tensor(array_update, device=param.device, dtype=param.dtype).view(au_shape)
-
+        update = array_update.reshape(*au_shape)
         updates[param.param_index] = update
 
-    # remove GPU data
-    sources = sources.copy_to_host()
-    child_filter = child_filter.copy_to_host()
+        # Remove data from GPU
+        del rng_states0, rng_states1, array_source, array_update
+
+    # Remove GPU data
+    del sources, child_filter
+    cp.get_default_memory_pool().free_all_blocks()
+    gc.collect()
 
     # Limit init values according the module specifications
     module.update(new_population, updates, True)
@@ -318,7 +322,7 @@ def reproduce(
         config: Config, module: NeatModule, population: dict[int, Genome], ancestors: dict[int, tuple[Genome, Genome]],
         generation: int, to_delete: list[int], genome_indexer: int,
         stagnation: Stagnation, species_set: SpeciesSet, reporters: ReporterSet,
-        tpb=10, verbose: int = None):
+        tpb=1, verbose: int = None):
     # Filter out stagnated species, collect the set of non-stagnated
     # species members, and compute their average adjusted fitness.
     all_fitnesses: list[float]       = List.empty_list(FLOAT)
@@ -327,7 +331,7 @@ def reproduce(
         if stagnant and verbose:
             reporters.species_stagnant(sid, specie)
         else:
-            all_fitnesses.extend([m.fitness for m in specie.members.values()])
+            all_fitnesses.extend([FLOAT(m.fitness) for m in specie.members.values()])
             remaining_species.append(specie)
 
     # No species left.

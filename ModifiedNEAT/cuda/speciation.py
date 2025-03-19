@@ -1,19 +1,20 @@
 
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.base import NeatModule
-from ModifiedNEAT.nn.genome import Genome, FLOAT, INT
+from ModifiedNEAT.nn.genome import Genome, INT
 from ModifiedNEAT.species import Species, SpeciesSet, GenomeDistanceCache, get_ct
 from ModifiedNEAT.cuda.functional import get_value, calc_grid
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
-from numba import types, njit, optional, prange, cuda
-from numba.experimental import jitclass
+from numba import types, njit, prange, cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 from numba.typed import List, Dict
 from numpy import ndarray as CPUArray
 
 import numpy as np
+import cupy as cp
 import time as clock
+import gc
 
 
 DISTANCE_TUPLE = types.Tuple([INT, INT])
@@ -82,38 +83,43 @@ def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArra
 
 
 def update_distances_cache(config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,
-                           tpb=10, verbose: int = None) -> float:
-    total_distance = cuda.to_device(np.zeros((module.genome_num, module.genome_num), np.float64))
+                           tpb=1, verbose: int = None) -> float:
+    total_distance = cp.zeros((module.genome_num, module.genome_num), genome_cache.total_distance.dtype)
 
     ts = clock.perf_counter()
     for param in module.neat_parameters():
-        with cuda.defer_cleanup():
-            array = param.data.cpu().numpy()
-            genome_num = len(module.mapping)
-            array = array.reshape((genome_num, -1, 1))
-            elements = array.shape[1]
-            array = cuda.to_device(array)
-            kernel_shape = calc_grid(genome_num, genome_num, elements, tpb=tpb)
-            # if verbose:
-            #     print(param.dtype, param.device, kernel_shape, array.shape, param.data.shape)
+        # with cuda.defer_cleanup():
+        array = param.data.clone()
+        genome_num = len(module.mapping)
+        array = array.reshape((genome_num, -1, 1))
+        elements = array.shape[1]
+        array = cp.asarray(array)
+        kernel_shape = calc_grid(genome_num, genome_num, elements, tpb=tpb)
+        # if verbose:
+        #     print(param.dtype, param.device, kernel_shape, array.shape, param.data.shape)
 
-            get_distance[*kernel_shape](
-                array, total_distance,
-                config.genome.compatibility_weight_coefficient,
-                config.genome.compatibility_disjoint_coefficient
-            )
+        get_distance[*kernel_shape](
+            array, total_distance,
+            config.genome.compatibility_weight_coefficient,
+            config.genome.compatibility_disjoint_coefficient
+        )
 
-        # remove data from GPU
-        array = array.copy_to_host()
+        # Remove data from GPU
+        del array
 
-    total_distance = total_distance.copy_to_host()
+    # Remove GPU data
+    total_distance = total_distance.get()
+    cp.get_default_memory_pool().free_all_blocks()
+
     if verbose and verbose >= 2:
-        print(f"\n{CM('Ran distance kernel', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
+        print(f"{CM('Ran distance kernel', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
 
     h, m = update_dict(genome_cache.distances, total_distance, Dict(module.mapping.items()))
     genome_cache.total_distance = total_distance
     genome_cache.hits += h
     genome_cache.misses += m
+
+    gc.collect()
 
 
 @njit(nogil=True)
@@ -228,7 +234,7 @@ def _update_collection(species_dict: dict[int, Species], population: dict[int, G
 
 
 def speciate(config: Config, module: NeatModule, species_set: SpeciesSet, population: dict[int, Genome],
-             generation: int, tpb=10, verbose: int = None):
+             generation: int, tpb=1, verbose: int = None):
     """
     Place genomes into species by genetic similarity.
 
@@ -251,7 +257,7 @@ def speciate(config: Config, module: NeatModule, species_set: SpeciesSet, popula
     gts = clock.perf_counter()
     update_distances_cache(config, module, distances_cache, tpb=tpb, verbose=verbose)
     if verbose and verbose >= 2:
-        print(f"\n{CM('Created distances cache', Fore.CYAN)} in {round(clock.perf_counter() - gts, 2)} s")
+        print(f"{CM('Created distances cache', Fore.CYAN)} in {round(clock.perf_counter() - gts, 2)} s")
 
     # Find the best representatives for each existing species.
     ts = clock.perf_counter()

@@ -540,12 +540,12 @@ class RModel(Model):
 GENOMES     = 100
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 64
-KERNEL_SIZE = 3
-NORM_GROUPS = 4
-SEQ_LEN     = 16
-LAYERS      = 2
-HEADS       = 4
+EMBED_SIZE  = 16
+KERNEL_SIZE = 1
+NORM_GROUPS = 1
+SEQ_LEN     = 8
+LAYERS      = 4
+HEADS       = 1
 KV_HEADS    = None
 ENABLE_BIAS = True
 DIFFERENTIAL = False
@@ -722,16 +722,16 @@ def run():
     config = neat.Config()
     config.genome.init_type             = 'normal'
     config.genome.weight_init_mean      = 0
-    config.genome.weight_init_std       = 1
+    config.genome.weight_init_std       = 0.5
     config.genome.weight_min_value      = -np.inf
     config.genome.weight_max_value      = np.inf
-    config.genome.weight_mutate_power   = 0.1
+    config.genome.weight_mutate_power   = 0.2
     config.genome.weight_mutate_rate    = 0.70
     config.genome.weight_replace_rate   = 0.01
     config.reproduction.min_species_size = GENOMES
     config.reproduction.purge           = 1
     config.reproduction.survival_threshold = 0.05
-    config.reproduction.elitism         = 20
+    config.reproduction.elitism         = 3
     config.species.compatibility_threshold = np.inf
     config.stagnation.max_stagnation    = 1
     config.stagnation.species_elitism   = 3
@@ -754,8 +754,8 @@ def run():
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
-        gamma=GAMMA, alpha=ALPHA, reverse=False,
-        rew_reg=1.0, pol_reg=0.5, validate=True, groups=40,
+        gamma=GAMMA, alpha=ALPHA, reverse=True,
+        rew_reg=1.0, pol_reg=0.0, validate=True, groups=5,
     )
 
     # Run for up to 50 generations.

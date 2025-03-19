@@ -1,6 +1,6 @@
 
 from ModifiedNEAT.config import Config
-from ModifiedNEAT.nn.genome import Genome, FLOAT, INT, BOOL
+from ModifiedNEAT.nn.genome import Genome, INT, FLOAT, BOOL
 from ModifiedNEAT.species import SpeciesSet, Species, SPECIES
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.util.fancy_text import CM, Fore

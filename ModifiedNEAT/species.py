@@ -1,6 +1,6 @@
 
 from ModifiedNEAT.config import Config
-from ModifiedNEAT.nn.genome import Genome, FLOAT, INT
+from ModifiedNEAT.nn.genome import Genome, INT # , FLOAT
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
@@ -13,6 +13,8 @@ from numpy import ndarray as CPUArray
 import numpy as np
 import time as clock
 
+FLOAT = types.float32
+NP_FLOAT = np.float32
 GENOME  = Genome.class_type.instance_type
 
 
@@ -50,14 +52,14 @@ DISTANCE_TUPLE = types.Tuple([INT, INT])
 
 @jitclass([
     ('distances', types.DictType(DISTANCE_TUPLE, FLOAT)),
-    ('total_distance', optional(types.Array(types.float64, 2, 'C'))),
+    ('total_distance', optional(types.Array(FLOAT, 2, 'C'))),
     ('hits', INT),
     ('misses', INT),
 ])
 class GenomeDistanceCache(object):
     def __init__(self):
         self.distances: dict[tuple[int, int], float] = Dict.empty(DISTANCE_TUPLE, FLOAT)
-        self.total_distance: CPUArray = None
+        self.total_distance: CPUArray = np.zeros((1, 1), dtype=NP_FLOAT)
         self.hits = 0
         self.misses = 0
 

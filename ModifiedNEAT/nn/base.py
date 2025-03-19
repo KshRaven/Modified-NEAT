@@ -4,7 +4,9 @@ from ModifiedNEAT.nn.genome import Genome, INT
 from torch import Tensor
 from itertools import count
 from numba import njit, prange, types
+from numba.cuda.cudadrv.devicearray import DeviceNDArray
 from numpy import ndarray as CPUArray
+from cupy import ndarray as GPUArray
 from typing import Union, Iterable, Any
 
 import torch
@@ -86,10 +88,15 @@ class NeatParameter(nn.Module):
         if remove_rg:
             self.data.requires_grad_(True)
 
-    def update(self, genomes: dict[int, Genome], params: Union[Tensor, CPUArray] = None, verify=False):
-        params = params[self.param_index] if params is not None else None
+    def update(self, genomes: dict[int, Genome], params: Union[Tensor, GPUArray] = None, verify=False):
+        if isinstance(params, dict):
+            params = params[self.param_index]
+        if isinstance(params, DeviceNDArray):
+            params = params.copy_to_host()
         if isinstance(params, CPUArray):
             params = torch.tensor(params, self.device, self.dtype)
+        elif isinstance(params, GPUArray):
+            params = torch.from_dlpack(params).to(self.device, self.dtype)
 
         self.genome_num = len(genomes)
 
@@ -99,9 +106,9 @@ class NeatParameter(nn.Module):
                 # size = self.data[0].numel()
                 # self.data[:] = (torch.arange(size).view(self.data.shape[1:]) / size)
             else:
-                p_shape = torch.tensor(params.shape)
                 d_shape = torch.tensor(self.original_shape)
-                if not torch.all(d_shape[1:] == p_shape[1:]):
+                p_shape = torch.tensor(params.shape[-len(d_shape):])
+                if not torch.all(d_shape == p_shape):
                     raise ValueError(f"Cannot initialize params of shape {p_shape.numpy()} "
                                      f"to data of shape {d_shape.numpy()}.")
                 self.data = nn.Parameter(params.clone().to(self.device, self.dtype), self.data.requires_grad)
@@ -111,11 +118,11 @@ class NeatParameter(nn.Module):
                 new_indices = [index for index, genome in enumerate(genomes.values()) if genome.key in self.mapping]
                 old_indices = [self.mapping[genome.key] for genome in genomes.values() if genome.key in self.mapping]
                 if verify and len(old_indices) > 0:
-                    if not torch.all(self.data[old_indices] == params[new_indices]):
+                    if not torch.all(self.data[old_indices] == (params[new_indices])):
                         raise ValueError(f"Some values from new params are not in old params after update.")
 
                 # Set population
-                self.data = nn.Parameter(params.clone().to(self.device, self.dtype), self.data.requires_grad)
+                self.data = nn.Parameter(params.clone(), self.data.requires_grad)
 
         # TODO: Rearrange genomes according to fitness and gid
 

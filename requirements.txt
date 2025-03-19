@@ -1,6 +1,7 @@
 
 numba
 numpy
+cupy
 torch
 matplotlib
 colorama
