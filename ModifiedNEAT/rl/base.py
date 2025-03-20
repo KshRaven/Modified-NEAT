@@ -1,5 +1,5 @@
 
-from ModifiedNEAT.nn.base import Model
+from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.population import Population
 from ModifiedNEAT.optim.scheduler import Scheduler
 from ModifiedNEAT.util.replay import ReplayBuffer
@@ -27,13 +27,16 @@ TensorDict = dict[int, Tensor]
 class Algorithm(object):
     mapping_indexer = count(0)
 
-    def __init__(self, model: Model, population: Population, schedulers: list[Scheduler] = None,
+    def __init__(self, population: Population, schedulers: list[Scheduler] = None,
                  device=torch.device('cpu'), dtype: torch.dtype = torch.float32, **options):
         # ------------------------------ Handle input ------------------------------ #
+        models = list(population.modules.values())
+        if isinstance(models, NeatModule):
+            models = [models]
         if isinstance(schedulers, Scheduler):
             schedulers = [schedulers]
         # ------------------------------ Build ------------------------------ #
-        self.model                      = model
+        self.models                     = models
         self.population: Population     = population
         self.schedulers: list[Scheduler] = schedulers
         self.replay                     = ReplayBuffer()
@@ -58,6 +61,12 @@ class Algorithm(object):
         self.log_sub_dir: str = manage_params(options, 'log_sub_dir', "")
         self.log_name: str = manage_params(options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
         self.writer = SummaryWriter(self.log_dir+self.log_sub_dir+self.log_name)
+
+    def get_module(self, key: int):
+        for module in self.models:
+            if key in module.mapping:
+                return module
+        raise ValueError(f"Cannot find module")
 
     def update_mapping(self, mapping: dict[int, int]):
         self.replay.update_mapping(mapping)
@@ -189,7 +198,7 @@ class Algorithm(object):
             for key, observation in observations.items():
                 stack = []
                 for batch in self.get_batches([key], self.batch_size, False)[key]:
-                    value = self.model.get_value(observation[batch].to(self.device), keys=key)
+                    value = self.get_module(key).get_value(observation[batch].to(self.device), keys=key)
                     stack.append(value)
                 values[key] = torch.cat(stack).cpu()
 
@@ -294,7 +303,7 @@ class Algorithm(object):
 
                         # Get action accuracy
                         action      = actions[key][batch].to(self.device)
-                        action_pred: Tensor = self.model.get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
+                        action_pred: Tensor = self.get_module(key).get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
                         try:
                             if type == 'continuous':
                                 action_res = ((action_pred <= action * (1+error)) & (action_pred >= action * (1-error))).float()
@@ -312,7 +321,7 @@ class Algorithm(object):
                         # Get reward accuracy
                         if rewards is not None:
                             reward = rewards[key][batch].to(self.device)
-                            reward_pred: Tensor = self.model.get_value(observation.unsqueeze(0), keys=key).squeeze(0)
+                            reward_pred: Tensor = self.get_module(key).get_value(observation.unsqueeze(0), keys=key).squeeze(0)
                             reward_sum.append(
                                 ((reward_pred <= reward * (1+error)) & (reward_pred >= reward * (1-error))).float()
                             )

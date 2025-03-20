@@ -18,7 +18,7 @@ import matplotlib.pyplot as plt
 
 # TODO: Update this Trainer
 class PPO(Algorithm):
-    def __init__(self, model: Model, population: Population, schedulers: Union[Scheduler, Iterable[Scheduler]],
+    def __init__(self, population: Population, schedulers: Union[Scheduler, Iterable[Scheduler]],
                  device=torch.device('cpu'), dtype=torch.float32, **options):
         """
         Proximal Policy Optimization (PPO) algorithm initialization.
@@ -43,7 +43,7 @@ class PPO(Algorithm):
         for var in ['schedulers', 'device', 'dtype']:
             if var in options:
                 del options[var]
-        super().__init__(model, population, schedulers, device, dtype, **options)
+        super().__init__(population, schedulers, device, dtype, **options)
 
         # Buffers
         self.replay.add_buffers('state', 'action', 'prob', 'reward', 'ep_map')
@@ -192,7 +192,6 @@ class PPO(Algorithm):
             # Running environment to collect rollout data
             ts = clock.perf_counter()
             self.init_limit(steps)
-            self.update_mapping(self.population.get_mapping())
             self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
             run_time = clock.perf_counter() - ts
             if verbose and verbose >= 2:
@@ -282,11 +281,16 @@ class PPO(Algorithm):
                 buffer_sizes = self.replay.buffer_sizes()
 
                 # noinspection PyBroadException
-                def get_range(key: int):
+                def get_range(key: Union[int, None]):
                     try:
                         params = []
-                        for param in self.model.neat_parameters():
-                            params.append(param[key].flatten())
+                        if key is not None:
+                            for param in self.get_module(key).neat_parameters():
+                                params.append(param[key].flatten())
+                        else:
+                            for module in self.models:
+                                for param in module.neat_parameters():
+                                    params.append(param[key].flatten())
                         params = torch.cat(params)
                         return torch.mean(params).cpu().item(), torch.std(params).cpu().item(), \
                                torch.max(params).cpu().item(), torch.min(params).cpu().item()
@@ -435,7 +439,7 @@ class PPO(Algorithm):
                 for batch in batches[key]:
                     # Calculate
                     state = states[key][batch].to(self.device)
-                    value: Tensor = self.model.get_value(state.unsqueeze(0), keys=key).squeeze(0)
+                    value: Tensor = self.get_module(key).get_value(state.unsqueeze(0), keys=key).squeeze(0)
                     reward = rewards[key][batch].to(self.device)
                     value = ((torch.std(reward - value) ** 2) / (torch.std(reward) ** 2)) - 1
                     ev.append(value)

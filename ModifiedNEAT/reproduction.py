@@ -6,6 +6,7 @@ from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.species import SpeciesSet, Species, SPECIES
 from ModifiedNEAT.stagnation import Stagnation
 from ModifiedNEAT.util.datetime import eta, clock
+from ModifiedNEAT.util.qol import Indexer
 from ModifiedNEAT.cuda import initialize
 
 from numba import types, typeof, njit, optional, prange, cuda
@@ -13,8 +14,6 @@ from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 from numba.experimental import jitclass
 from numba.typed import List, Dict
 from numpy import ndarray as CPUArray
-
-from itertools import count
 
 import numpy as np
 
@@ -41,21 +40,21 @@ def _zip_spre(spawn_amounts: list[int], remaining_species: list[Species]):
 
 
 class Reproduction:
+    genome_indexer = Indexer(0)
+
     def __init__(self, reporters: ReporterSet, configuration: Config):
-        self.genome_indexer = 0
         self._reporters = reporters
-        self._stagnation = Stagnation(configuration, reporters)
+        self.stagnation = Stagnation(configuration, reporters)
         self._config = configuration
         self.ancestors: dict[int, tuple[Genome, Genome]] = Dict.empty(INT, GENOME_TUPLE)
 
-    def create_new(self, pop_size: int, module: NeatModule, tpb=4, verbose: int = None) -> dict[int, Genome]:
-        # Create keys
-        genome_ids = {self.genome_indexer + idx: idx for idx in range(pop_size)}
-        self.genome_indexer += pop_size
+    def create_new(self, genus: int, pop_size: int, module: NeatModule, tpb=4, verbose: int = None) -> dict[int, Genome]:
+        assert module.genus == genus
         # Set genomes
         genomes = Dict.empty(INT, GENOME)
-        for gid, idx in genome_ids.items():
-            genome = Genome(gid)
+        for _ in range(pop_size):
+            gid = next(self.genome_indexer)
+            genome = Genome(gid, genus)
             genomes[gid] = genome
         # Initialize each parameter
         for m in module.neat_modules():
@@ -212,7 +211,7 @@ class Reproduction:
         # species members, and compute their average adjusted fitness.
         all_fitnesses: list[float] = List.empty_list(FLOAT)
         remaining_species: list[Species] = List.empty_list(SPECIES)
-        for sid, specie, stagnant in self._stagnation.update(species_set, generation):
+        for sid, specie, stagnant in self.stagnation.update(species_set, generation):
             if stagnant:
                 self._reporters.species_stagnant(sid, specie)
             else:
@@ -273,12 +272,12 @@ class Reproduction:
         new_population = Dict.empty(INT, GENOME)
         species_set.species = Dict.empty(INT, SPECIES)
         ts = clock.perf_counter()
-        self.genome_indexer = self.spawn(
-            new_population, species_set.species, self.genome_indexer, spawn_amounts, remaining_species, to_delete,
-            self._config.reproduction.elitism, self._config.reproduction.survival_threshold,
-            self._config.reproduction.darwin_multiplier, self._config.general.fitness_criterion,
-            structure_, weight_, bias_, self.ancestors
-        )
+        # self.genome_indexer = self.spawn(
+        #     new_population, species_set.species, self.genome_indexer, spawn_amounts, remaining_species, to_delete,
+        #     self._config.reproduction.elitism, self._config.reproduction.survival_threshold,
+        #     self._config.reproduction.darwin_multiplier, self._config.general.fitness_criterion,
+        #     structure_, weight_, bias_, self.ancestors
+        # )
         if verbose:
             print(f"spawned genomes in {round(clock.perf_counter() - ts, 2)}s")
 

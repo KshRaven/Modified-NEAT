@@ -3,6 +3,7 @@ from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.genome import Genome, INT # , FLOAT
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.qol import Indexer
 
 from numba import types, njit, optional, prange
 from numba.experimental import jitclass
@@ -27,9 +28,10 @@ GENOME  = Genome.class_type.instance_type
     ('fitness', optional(FLOAT)),
     ('adjusted_fitness', optional(FLOAT)),
     ('fitness_history', types.ListType(FLOAT)),
+    ('genus', INT),
 ])
 class Species(object):
-    def __init__(self, key: int, generation: int):
+    def __init__(self, key: int, generation: int, genus: int):
         self.key = key
         self.created = generation
         self.last_improved = generation
@@ -38,6 +40,7 @@ class Species(object):
         self.fitness: float = None
         self.adjusted_fitness: float = None
         self.fitness_history: list[float] = List.empty_list(FLOAT)
+        self.genus = genus
 
     def update(self, representative: Genome, members: dict[int, Genome]):
         self.representative = representative
@@ -77,14 +80,18 @@ SPECIES = Species.class_type.instance_type
 
 
 class SpeciesSet:
+    species_indexer = Indexer(0)
+
     def __init__(self, configuration: Config, reporters: ReporterSet):
         self.config = configuration
         self.reporters = reporters
         self.species: dict[int, Species] = Dict.empty(INT, SPECIES)
         self.genome_to_species: dict[int, int] = Dict.empty(INT, INT)
         self.distances_cache = GenomeDistanceCache()
-        self.species_indexer = 1
         self.last_ct: int = None
+
+    def reset_genome_mapping(self):
+        self.genome_to_species = Dict.empty(INT, INT)
 
     @staticmethod
     @njit(nogil=True)
@@ -228,10 +235,10 @@ class SpeciesSet:
 
         # Partition population into species based on genetic similarity.
         ts = clock.perf_counter()
-        self.species_indexer = self._get_species(
-            self.species_indexer, population, unspeciated, new_representatives, new_members,
+        self.species_indexer.set(self._get_species(
+            self.species_indexer.get(), population, unspeciated, new_representatives, new_members,
             distances_cache, cwc, cdc, compatibility_threshold
-        )
+        ))
         if verbose:
             print(f"{CM('Filled species', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
 
@@ -262,7 +269,8 @@ class SpeciesSet:
 
 def load_species(genomes: dict[int, Genome], struct: Dict):
     key                     = struct['key']
-    specie                  = Species(key, 0)
+    genus                   = struct['genus']
+    specie                  = Species(key, 0, genus)
     specie.created          = struct['created']
     specie.last_improved    = struct['last_improved']
     specie.representative   = genomes[struct['representative']]

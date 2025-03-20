@@ -134,11 +134,12 @@ class Base:
         win.blit(self.image, (self.x2, self.y))
 
 
-def blitRotateCenter(surf, image, topleft, angle):
-    rotated_image = pygame.transform.rotate(image, angle)
+def blitRotateCenter(surf: pygame.Surface, image: pygame.Surface, topleft: tuple[int, int], tilt: float):
+    rotated_image = pygame.transform.rotate(image, tilt)
     new_rect      = rotated_image.get_rect(center=image.get_rect(topleft=topleft).center)
 
     surf.blit(rotated_image, new_rect.topleft)
+    return rotated_image
 
 
 class Window(object):
@@ -190,29 +191,34 @@ class Pipes(object):
 
 
 class Birds(object):
-    def __init__(self, num: int, x: int = 200, y: int = 200,
+    def __init__(self, num: int, x: int = 200, y: int = 200, type2count: int = None, offset=0,
                  device: torch.device = 'cpu', dtype: torch.dtype = torch.float32):
         self.x          = torch.full((num,), x, device=device, dtype=dtype)
         self.y          = torch.full((num,), y, device=device, dtype=dtype)
         self.tilt       = torch.full((num,), 0, device=device, dtype=dtype)
-        self.tick_count = torch.full((num,), 0, device=device, dtype=torch.int64)
+        self.tick_count = torch.full((num,), 0, device=device, dtype=torch.int32)
         self.vel        = torch.full((num,), 0, device=device, dtype=dtype)
         self.height     = self.y.clone()
-        self.img_count  = torch.full((num,), 0, device=device, dtype=torch.int64)
-        self.img_ref    = torch.full((num,), 0, device=device, dtype=torch.int64)
+        self.img_count  = torch.full((num,), 0, device=device, dtype=torch.int32)
+        self.img_ref    = torch.full((num,), 0, device=device, dtype=torch.int32)
         self.score      = torch.full((num,), 0, device=device, dtype=dtype)
         self.dead       = torch.full((num,), False, device=device, dtype=torch.bool)
         # use mapping to reduce calculation on dead birds
         self.mapping: dict[int, int] = Dict([(idx, idx) for idx in range(num)])
 
-        self.images: list = [pygame.transform.scale2x(pygame.image.load(
-            os.path.join("imgs", "bird" + str(x) + ".png"))) for x in range(1, 4)]
-        self.max_rot = 25
-        self.ang_vel = 20
+        self.images: list = [pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", f"bird{x}.png"))) for x in range(1, 4)]
+        self.images_anti: list = [pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", f"anti{x}.png"))) for x in range(1, 4)]
+        self.is_anti = torch.zeros(num, dtype=torch.bool)
+        if type2count:
+            self.is_anti[-type2count:] = True
+        self.x[self.is_anti] -= offset
+        self.MAX_ROTATION = 25
+        self.ANG_VEL = 20
         image_num = len(self.images)
-        self.animations = [i for i in range(image_num-1)] + [image_num-1] + [i for i in reversed(range(image_num-1))]
-        self.animation_mult_max = len(self.animations)
-        self.animation_time = 5
+        assert image_num == 3
+        self.ANIMATIONS: list[int] = list(range(image_num)) + list(reversed(list(range(image_num-1))))
+        self.ANIME_MULT_MAX = len(self.ANIMATIONS)
+        self.ANIME_TIME = 5
 
         self.bird_num = num
         self.active_num = num
@@ -239,59 +245,70 @@ class Birds(object):
         self.tick_count += 1
         mask = ~self.dead
 
-        # for downward acceleration
-        displacement = self.vel[mask] * self.tick_count[mask] + 0.5 * 3 * self.tick_count[mask] ** 2
+        # For downward acceleration +y direction is downwards in PyGame
+        FALL_COEFF = 1.5
+        displacement = (self.vel * self.tick_count) + (FALL_COEFF * self.tick_count ** 2)
 
-        # terminal velocity
-        tv = displacement >= 16
-        displacement[tv] = ((displacement / torch.abs(displacement)) * 16)[tv]
+        # Terminal velocity clip
+        TERMINAL_VEL = 16
+        tv_mask = displacement >= TERMINAL_VEL
+        displacement[tv_mask] = ((displacement / torch.abs(displacement)) * TERMINAL_VEL)[tv_mask]
 
-        nd = displacement < 0
-        displacement[nd] -= 2
+        # No displacement clip
+        JUMP_VEL = 2
+        nd_mask = displacement < 0
+        displacement[nd_mask] -= JUMP_VEL
 
-        # print(displacement.shape)
-        self.y[mask] += displacement
-        # print(self.y.shape)
+        # Add displacement
+        self.y[mask] += displacement[mask]
 
         # tilt up
-        temp = (displacement < 0) | (self.y[mask] < (self.height[mask] + 50))
-        tu = temp & (self.tilt[mask] < self.max_rot)
-        # print(temp.shape, tu.shape)
-        self.tilt[mask][tu] = self.max_rot
+        fall_hold = (displacement < 0) | (self.y < (self.height + 50))
+        tu = fall_hold & (self.tilt < self.MAX_ROTATION)
+        self.tilt[mask & tu] = self.MAX_ROTATION
+
         # tilt down
-        td = ~temp & (self.tilt[mask] > -90)
-        self.tilt[mask][td] -= self.ang_vel
+        td = ~fall_hold & (self.tilt > -90)
+        self.tilt[mask & td] -= self.ANG_VEL
+        pass
 
     def draw(self, win):
-        self.img_count += 1
-        mask = ~self.dead
+        alive = ~self.dead
+
+        self.img_count[alive] += 1
 
         # For animation of bird, loop through three images
-
-        mult = 0
-        prev_level = torch.zeros_like(self.img_count[mask], dtype=torch.bool)
-        while True:
-            mult += 1
-            if mult != self.animation_mult_max:
-                level = (self.img_count[mask] <= self.animation_time * mult) & ~prev_level
-                prev_level = prev_level | level
-                # print(level)
-                self.img_ref[mask][level] = self.animations[mult-1]
+        prev_mask = torch.zeros_like(self.img_count, dtype=torch.bool)
+        for idx, anime_idx in enumerate(self.ANIMATIONS):
+            if idx != len(self.ANIMATIONS)-1:
+                multiplier = idx + 1
+                ref_mask = alive & (self.img_count < self.ANIME_TIME * multiplier) & ~prev_mask
             else:
-                level = self.img_count[mask] > self.animation_time * (mult - 1)
-                self.img_ref[mask][level] = 0
-                self.img_count[mask][level] = 0
-                break
+                multiplier = idx
+                ref_mask = alive & (self.img_count >= self.ANIME_TIME * multiplier) & ~prev_mask
+            self.img_ref[ref_mask] = anime_idx
+            if idx == len(self.ANIMATIONS)-1:
+                self.img_count[ref_mask] = 0
+            prev_mask = ref_mask
 
         # so when bird is nose diving it isn't flapping
-        nd = self.tilt[mask] <= -80
-        self.img_ref[mask][nd]   = 1
-        self.img_count[mask][nd] = self.animation_time*2
+        nd_mask = alive & (self.tilt <= -80)
+        self.img_ref[nd_mask] = 1
+        self.img_count[nd_mask] = self.ANIME_TIME * 2
 
         # tilt the bird
-        for ref, x, y, tilt, dead in zip(self.img_ref[mask], self.x[mask], self.y[mask], self.tilt[mask], self.dead[mask]):
+        for anti, ref, x, y, tilt, dead in zip(self.is_anti[alive], self.img_ref[alive], self.x[alive], self.y[alive], self.tilt[alive], self.dead[alive]):
             if not dead:
-                blitRotateCenter(win, self.images[ref], (x.item(), y.item()), tilt.item())
+                rot_image = blitRotateCenter(
+                    surf=win,
+                    image=(self.images if not anti.item() else self.images_anti)[ref],
+                    topleft=(x.item(), y.item()),
+                    tilt=tilt.item()
+                )
+
+                if anti.item():
+                    pass
+                pass
 
     def get_mask(self):
         return [pygame.mask.from_surface(self.images[ref]) for ref in self.img_ref]
@@ -357,7 +374,7 @@ class Birds(object):
         return self.score
 
     def get_image(self, index: int):
-        return self.images[self.img_ref[index]]
+        return (self.images if not self.is_anti[index] else self.images_anti)[self.img_ref[index]]
 
     def active(self):
         self.active_num = torch.sum(self.dead == 0).item()
@@ -365,7 +382,8 @@ class Birds(object):
 
 
 class Game(object):
-    def __init__(self, birds: int,  device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, render=False):
+    def __init__(self, birds: int, type2count: int = None, offset: int = 0,
+                 device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, render=False):
         if render:
             pygame.display.set_caption("Flappy Bird")
         self.window: Window = Window()
@@ -374,7 +392,7 @@ class Game(object):
         def_height = round(self.window.height * 2 / 5)
         def_width = round(self.window.width * 2 / 5)
         self.pipes: Pipes = Pipes(round(self.window.width * 0.75))
-        self.birds: Birds = Birds(birds, def_width, def_height, device, dtype)
+        self.birds: Birds = Birds(birds, def_width, def_height, type2count, offset, device, dtype)
         self.base: Base = Base(self.window.floor)
         self.clock = pygame.time.Clock()
 
@@ -540,7 +558,7 @@ class RModel(Model):
 GENOMES     = 100
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 4
+EMBED_SIZE  = 8
 KERNEL_SIZE = 1
 NORM_GROUPS = 1
 SEQ_LEN     = 4
@@ -560,7 +578,7 @@ LOSS_REG    = 0.
 
 MODEL = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
                ENABLE_BIAS, DEVICE, DTYPE)
-MODEL1 = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
+MODEL1 = RModel(INPUTS, OUTPUTS*2, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
                 ENABLE_BIAS, DEVICE, DTYPE)
 
 INIT_GEN: int = None
@@ -598,7 +616,8 @@ def evaluate(population: neat.Population, **options):
     DEBUG_STEP = 0
     MODEL.train()
     while not terminate:
-        game = Game(population.size, DEVICE, DTYPE)
+        game = Game(population.size, len(mapping1), 0, DEVICE, DTYPE)
+        # print(f"Anti Count = {game.birds.}")
         action_buffer = torch.zeros(population.size, SEQ_LEN, INPUTS).to(DEVICE, DTYPE)
         reward_buffer = torch.zeros(population.size, SEQ_LEN, 1).to(DEVICE, DTYPE)
         ph, mh, pw = FLOOR, FLOOR-70, WIN_WIDTH
@@ -678,7 +697,7 @@ def evaluate(population: neat.Population, **options):
                             return tensor
                         actions0 = fill_up(actions0, indices0, len(reverse_mapping0))
                         actions1 = fill_up(actions1, indices1, len(reverse_mapping1))
-                    actions = torch.cat([actions0, actions1], dim=0)
+                    actions = torch.cat([actions0, actions1[..., :OUTPUTS]], dim=0)
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"filled actions =>\n{actions}\n\tshape = {actions.shape}")
                 calc_time = clock.perf_counter() - ts
@@ -748,7 +767,7 @@ def run():
     config = neat.Config()
     config.genome.init_type             = 'normal'
     config.genome.weight_init_mean      = 0
-    config.genome.weight_init_std       = 0.5
+    config.genome.weight_init_std       = 1
     config.genome.weight_min_value      = -np.inf
     config.genome.weight_max_value      = np.inf
     config.genome.weight_mutate_power   = 0.2
@@ -757,7 +776,8 @@ def run():
     config.reproduction.min_species_size = GENOMES
     config.reproduction.purge           = 1
     config.reproduction.survival_threshold = 0.05
-    config.reproduction.elitism         = 5
+    config.reproduction.cross_threshold = 0.15
+    config.reproduction.elitism         = 1
     config.species.compatibility_threshold = np.inf
     config.stagnation.max_stagnation    = 1
     config.stagnation.species_elitism   = 3
@@ -770,7 +790,7 @@ def run():
     population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
     population.absorb_population(population1)
     print(MODEL.pol_proj)
-    # population.load_dict(name='flappy_bird', file_no=None)
+    population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.NEAT(
         population,

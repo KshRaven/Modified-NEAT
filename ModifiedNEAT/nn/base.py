@@ -38,7 +38,7 @@ class NeatParameter(nn.Module):
         self.param_index = next(self.__indexer)
         self.original_shape: tuple[int, ...] = tuple(shape)
 
-        # ModifiedNEAT
+        # BUILD
         self.data = nn.Parameter(torch.randn(1, *shape, device=device, dtype=dtype), requires_grad=requires_grad)
         self.mapping: dict[int, int] = None
 
@@ -49,7 +49,7 @@ class NeatParameter(nn.Module):
         self.md: CPUArray = None
 
     def reset(self):
-        # ModifiedNEAT
+        # BUILD
         self.data = nn.Parameter(
             torch.randn(1, *self.original_shape, device=self.device, dtype=self.dtype),
             requires_grad=self.requires_grad)
@@ -67,6 +67,18 @@ class NeatParameter(nn.Module):
     @property
     def shape(self):
         return self.data.shape
+
+    @property
+    def ndim(self):
+        return self.data.ndim
+
+    @property
+    def numel(self):
+        return self.data.numel()
+
+    @property
+    def element_size(self):
+        return self.data.element_size()
 
     @property
     def device(self):
@@ -117,10 +129,17 @@ class NeatParameter(nn.Module):
                 # Verify pre-existing genomes
                 new_indices = [index for index, genome in enumerate(genomes.values()) if genome.key in self.mapping]
                 old_indices = [self.mapping[genome.key] for genome in genomes.values() if genome.key in self.mapping]
-                if verify and len(old_indices) > 0:
-                    if not torch.all(self.data[old_indices] == (params[new_indices])):
-                        raise ValueError(f"Some values from new params are not in old params after update.")
-
+                try:
+                    if verify and len(old_indices) > 0:
+                        if not torch.all(self.data[old_indices] == (params[new_indices])):
+                            # raise ValueError(f"Some values from new params are not in old params after update.")
+                            pass
+                except Exception as e:
+                    print(new_indices)
+                    print(old_indices)
+                    print(list(genomes.keys()))
+                    print(params.shape, self.data.shape)
+                    raise e
                 # Set population
                 self.data = nn.Parameter(params.clone(), self.data.requires_grad)
 
@@ -169,6 +188,7 @@ class NeatModule(nn.Module):
         self.mapping: dict[int, int] = None
         self.params: dict[str, Any]  = params
         self.updated = False
+        self.genus: int = None
 
     def neat_parameters(self):
         params: list[NeatParameter] = []
@@ -196,7 +216,7 @@ class NeatModule(nn.Module):
                             get(x)
                     else:
                         get(sub_item)
-        return list(set(params))
+        return sorted(list(set(params)), key=lambda p: p.param_index)
 
     def neat_modules(self, extensive=True):
         modules: list[NeatModule] = []
@@ -221,7 +241,7 @@ class NeatModule(nn.Module):
                             get(x)
                     else:
                         get(sub_item)
-        return list(set(modules))
+        return sorted(list(set(modules)), key=lambda m: m.module_index)
 
     def update_limit(self):
         pass

@@ -200,10 +200,10 @@ def _feed_forward_layers(input_keys: list[int], output_keys: list[int], connecti
 
 
 @njit
-def zip_lb(layers: list[list[int]], ModifiedNEAT: list[tuple[int, int]]):
+def zip_lb(layers: list[list[int]], build: list[tuple[int, int]]):
     unrolling = []
     for idx in range(len(layers)):
-        unrolling.append((layers[idx], ModifiedNEAT[idx]))
+        unrolling.append((layers[idx], build[idx]))
     return unrolling
 
 
@@ -211,7 +211,7 @@ NODE = Node.class_type.instance_type
 CONN = Connection.class_type.instance_type
 CONN_TUPLE = types.Tuple((INT, INT))
 LAYER = types.ListType(INT)
-ModifiedNEAT = types.Tuple([INT, INT])
+BUILD = types.Tuple([INT, INT])
 
 
 @jitclass([
@@ -224,7 +224,7 @@ ModifiedNEAT = types.Tuple([INT, INT])
     ('inp_num', INT),
     ('out_num', INT),
     ('hidden_layers_num', types.ListType(INT)),
-    ('ModifiedNEAT', types.ListType(ModifiedNEAT)),
+    ('build', types.ListType(BUILD)),
     ('node_indexer', INT),
 ])
 class Network(object):
@@ -261,7 +261,7 @@ class Network(object):
                     self.connections[key] = Connection(key)
 
         self.layers: list[list[int]]      = List.empty_list(LAYER)
-        self.ModifiedNEAT: list[tuple[int, int]] = List.empty_list(ModifiedNEAT)
+        self.build: list[tuple[int, int]] = List.empty_list(BUILD)
 
         # Run initial update
         if setup:
@@ -271,19 +271,19 @@ class Network(object):
         # Get layers
         self.layers: list = _feed_forward_layers(self.input_keys, self.output_keys, List(self.connections.keys()))
 
-        # Get ModifiedNEAT
-        ModifiedNEAT = List.empty_list(ModifiedNEAT)
+        # Get build
+        build = List.empty_list(BUILD)
         inputs = self.inp_num
         for layer in self.layers:
             outputs = len(layer)
-            ModifiedNEAT.append((inputs, outputs))
+            build.append((inputs, outputs))
             inputs = outputs
-        self.ModifiedNEAT = ModifiedNEAT
+        self.build = build
 
     @property
     def weights(self):
         array = []
-        for layer, shape in zip_lb(self.layers, self.ModifiedNEAT):
+        for layer, shape in zip_lb(self.layers, self.build):
             weight = np.ones(shape, np.float32)
             for x, node_key in enumerate(layer):
                 for y, value in enumerate([conn.weight for (_, ok), conn in self.connections.items()
@@ -310,7 +310,7 @@ class Network(object):
         new_network.output_keys = self.output_keys.copy()
         new_network.node_indexer = self.node_indexer
         new_network.layers      = self.layers.copy()
-        new_network.ModifiedNEAT       = self.ModifiedNEAT.copy()
+        new_network.build       = self.build.copy()
         return new_network
 
     def __str__(self):
@@ -367,12 +367,14 @@ NETWORK = Network.class_type.instance_type
     ('key', INT),
     # ('networks', types.DictType(INT, NETWORK)),
     ('fitness', optional(FLOAT)),
+    ('genus', INT)
 ])
 class Genome(object):
-    def __init__(self, key: int):
+    def __init__(self, key: int, genus: int):
         self.key = key
         # self.networks: dict[int, Network] = Dict.empty(INT, NETWORK)
         self.fitness: float = None
+        self.genus = genus
 
     def add_network(self, network_key: int, inputs: int, outputs: int, hidden_layers: list[int] = None):
         if network_key not in self.networks:
@@ -383,7 +385,7 @@ class Genome(object):
         return network
 
     def get_ModifiedNEAT(self, network_idx: int):
-        return self.networks[network_idx].ModifiedNEAT
+        return self.networks[network_idx].build
 
     def update_from_ModifiedNEAT(self):
         mapping = List(self.networks.keys())
@@ -689,12 +691,13 @@ def load_network(network: Network, struct: Dict):
     network.nodes              = nodes
     network.connections        = connections
     network.layers             = List([List(i) for i in struct['layers']])
-    network.ModifiedNEAT              = List(struct['ModifiedNEAT'])
+    network.build              = List(struct['build'])
 
 
 def load_genome(struct: Dict):
     key             = struct['key']
-    genome          = Genome(key)
+    genus           = struct['genus']
+    genome          = Genome(key, genus)
     genome.fitness  = struct['fitness']
     # networks        = Dict.empty(INT, NETWORK)
     # for i, ns in enumerate(struct['networks']):

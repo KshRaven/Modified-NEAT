@@ -59,12 +59,21 @@ class StdOutReporter(BaseReporter):
         fitness  = [genome.fitness for genome in population.values()]
         fit_mean = np.mean(fitness)
         fit_std  = np.std(fitness)
-        best_species_id = species.get_species_id(best_genome.key)
+        best_genomes = best_genome
+        if isinstance(best_genomes, Genome):
+            best_genome = best_genomes
+            best_key = best_genome.key
+            best_fitness = best_genome.fitness
+            best_species_id = species.get_species_id(best_key)
+        else:
+            best_key = tuple([genome.key for genome in best_genomes])
+            best_fitness = tuple([round(genome.fitness, 4) for genome in best_genomes])
+            best_species_id = tuple([species.get_species_id(key) for key in best_key])
         print(f"\nPopulation's average fitness: {fit_mean:3.5f} std_dev: {fit_std:3.5f}")
-        print(f"Best fitness: {CM(f'{best_genome.fitness:3.5f}', Fore.LIGHTGREEN_EX)}"
+        print(f"Best fitness: {CM(f'{best_fitness}', Fore.LIGHTGREEN_EX)}"
               # TODO: Enable Genome complexity calculation, or scrap it
               # f" - size: { best_genome.size()!r}"
-              f" - species {best_species_id} - id {best_genome.key}")
+              f" - species {best_species_id} - id {best_key}")
 
     def complete_extinction(self):
         self.num_extinctions += 1

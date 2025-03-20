@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 
 class NEAT(Algorithm):
-    def __init__(self, model: Model, population: Population, schedulers: Union[Scheduler, Iterable[Scheduler]],
+    def __init__(self, population: Population, schedulers: Union[Scheduler, Iterable[Scheduler]],
                  device=torch.device('cpu'), dtype=torch.float32, **options):
         """
         Neuro-Evolution of Augmenting Topologies (NEAT) algorithm initialization.
@@ -42,7 +42,7 @@ class NEAT(Algorithm):
         for var in ['schedulers', 'device', 'dtype']:
             if var in options:
                 del options[var]
-        super().__init__(model, population, schedulers, device, dtype, **options)
+        super().__init__(population, schedulers, device, dtype, **options)
 
         # Buffers
         self.replay.add_buffers('state', 'action', 'reward', 'ep_map')
@@ -185,7 +185,6 @@ class NEAT(Algorithm):
             # Running environment to collect rollout data
             ts = clock.perf_counter()
             self.init_limit(steps)
-            self.update_mapping(self.population.get_mapping())
             self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
             run_time = clock.perf_counter() - ts
             if verbose and verbose >= 2:
@@ -278,8 +277,13 @@ class NEAT(Algorithm):
                 def get_range(key: Union[int, None]):
                     try:
                         params = []
-                        for param in self.model.neat_parameters():
-                            params.append(param[key].flatten())
+                        if key is not None:
+                            for param in self.get_module(key).neat_parameters():
+                                params.append(param[key].flatten())
+                        else:
+                            for module in self.models:
+                                for param in module.neat_parameters():
+                                    params.append(param[key].flatten())
                         params = torch.cat(params)
                         return torch.mean(params).cpu().item(), torch.std(params).cpu().item(), \
                                torch.max(params).cpu().item(), torch.min(params).cpu().item()
@@ -405,7 +409,7 @@ class NEAT(Algorithm):
                 for batch in batches[key]:
                     # Calculate
                     state = states[key][batch].to(self.device)
-                    value: Tensor = self.model.get_value(state.unsqueeze(0), keys=key).squeeze(0)
+                    value: Tensor = self.get_module(key).get_value(state.unsqueeze(0), keys=key).squeeze(0)
                     reward = rewards[key][batch].to(self.device)
                     value = ((torch.std(reward - value) ** 2) / (torch.std(reward) ** 2)) - 1
                     ev.append(value)
@@ -482,7 +486,7 @@ if __name__ == '__main__':
     CONFIG.reproduction.min_species_size = 100
     GENOMES     = 100
     POPULATION  = neat.Population(GENOMES, MODEL, CONFIG, init_reporter=True)
-    TRAINER     = NEAT(MODEL, POPULATION, DEVICE, DTYPE, loss_reg=0.1, gamma=0.0,
+    TRAINER     = NEAT(POPULATION, DEVICE, DTYPE, loss_reg=0.1, gamma=0.0,
                        scheduler=neat.optim.scheduler.CosineAnnealing(CONFIG, 100, 50, 0.001, True, True))
     STEPS       = 100
 

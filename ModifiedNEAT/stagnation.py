@@ -75,7 +75,7 @@ class Stagnation(object):
             result.append((sid, specie, is_stagnant))
             species_fitnesses.append(specie.fitness)
 
-    def update(self, species_set: SpeciesSet, generation: int):
+    def update(self, genus: int, species_set: SpeciesSet, generation: int):
         """
         Required interface method. Updates species fitness history information,
         checking for ones that have not improved in max_stagnation generations,
@@ -86,7 +86,8 @@ class Stagnation(object):
         """
 
         species_data: list[tuple[int, Species]] = List.empty_list(types.Tuple([INT, SPECIES]))
-        self.get_species_data(species_data, species_set.species, generation, self.fitness_criterion)
+        self.get_species_data(species_data, Dict([(s.key, s) for s in species_set.species.values() if s.genus == genus]),
+                              generation, self.fitness_criterion)
 
         # Sort in ascending fitness order.
         species_data = sorted(species_data, key=lambda s: s[1].fitness)

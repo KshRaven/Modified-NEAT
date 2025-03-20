@@ -79,6 +79,8 @@ class ReproductionConfig(Configuration):
         self.elitism            = 50
         self.clone_threshold    = 0.00
         self.survival_threshold = 0.10
+        self.cross_threshold    = 0.0
+        self.cross_balance      = True
         self.darwin_multiplier  = 1
         self.min_species_size   = 100
         self.purge              = 0
