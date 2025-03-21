@@ -11,7 +11,7 @@ from ModifiedNEAT.cuda.reproduction import reproduce
 from ModifiedNEAT.cuda.speciation import speciate
 from ModifiedNEAT.util.qol import manage_params, Indexer
 from ModifiedNEAT.util.storage import save, load
-from ModifiedNEAT.util.fancy_text import CM, Fore
+# from ModifiedNEAT.util.fancy_text import CM, Fore
 from ModifiedNEAT.util.datetime import eta, clock
 from ModifiedNEAT.util.replay import ReplayBuffer
 
@@ -21,7 +21,6 @@ from numba.typed import List, Dict
 from itertools import count
 
 import numpy as np
-import torch.nn as nn
 
 
 class CompleteExtinctionException(Exception):
@@ -39,7 +38,7 @@ class Population(object):
     """
 
     genus_indexer = count(0)
-    threads_per_block = 1
+    threads_per_block = 8
     group_indexer = Indexer(0)
 
     def __init__(self, genomes: int, module: NeatModule, config: Config = None,
@@ -180,7 +179,7 @@ class Population(object):
                 mapping = consolidated_mapping
             elif grouped:
                 grouped_mapping = {}
-                for group in zip([list(genus_mapping.keys()) for genus_mapping in mapping]):
+                for group in zip(*[list(genus_mapping.keys()) for genus_mapping in mapping]):
                     grouped_mapping[group] = index
                     index += 1
                 mapping = grouped_mapping

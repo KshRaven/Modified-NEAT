@@ -285,11 +285,15 @@ class Reformer(Model):
             heads, kv_heads, differential, bias, device, dtype, **options
         )
         self.mean_log_std = Linear(dim_size, pol_out*(2 if self.probabilistic else 1), bias, device, dtype)
-        self.val_proj = Conver(
-            inputs, dim_size, max_seq_len, dim_size, kernel_size, layers, norm_groups, channels,
-            heads, kv_heads, differential, bias, device, dtype, **options
-        )
-        self.decode = Linear(dim_size, val_out, bias, device, dtype)
+        if manage_params(options, 'get_values', False):
+            self.val_proj = Conver(
+                inputs, dim_size, max_seq_len, dim_size, kernel_size, layers, norm_groups, channels,
+                heads, kv_heads, differential, bias, device, dtype, **options
+            )
+            self.decode = Linear(dim_size, val_out, bias, device, dtype)
+        else:
+            self.val_proj = None
+            self.decode = None
         self.mean_actv = manage_params(options, 'mean_actv', None)
         self.std_actv = manage_params(options, 'std_actv', None)
 
@@ -389,13 +393,16 @@ class Reformer(Model):
         return action
 
     def get_value(self, state: Tensor, keys: Union[int, Iterable[int]] = None, **options) -> Tensor:
-        pos_idx = manage_params(options, ['pos_idx', 'idx'], None)
-        verbose = manage_params(options, 'verbose', None)
-        get     = manage_params(options, 'get', False)
-        single  = manage_params(options, 'single', self.single_pass)
-        latent  = self.get_latent(self.val_proj, state, keys, pos_idx, verbose, get, single)
-        value   = self.decode(latent, keys=keys)
-        return self.reduce(value)
+        if self.val_proj is not None:
+            pos_idx = manage_params(options, ['pos_idx', 'idx'], None)
+            verbose = manage_params(options, 'verbose', None)
+            get     = manage_params(options, 'get', False)
+            single  = manage_params(options, 'single', self.single_pass)
+            latent  = self.get_latent(self.val_proj, state, keys, pos_idx, verbose, get, single)
+            value   = self.decode(latent, keys=keys)
+            return self.reduce(value)
+        else:
+            raise NotImplementedError(f"Value modules were not initialized")
 
     @staticmethod
     def randomize(tensor: Tensor, noise: Tensor = None):

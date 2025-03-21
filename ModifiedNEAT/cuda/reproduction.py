@@ -156,7 +156,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
                 extra_members = sort({g.key: g for g in extra_members}, criteria)
                 cross_cutoff = math.ceil(cross_threshold * len(extra_members))
                 old_members.extend(extra_members[:cross_cutoff])
-                old_members = sort({g.key: g for g in old_members}, criteria)
+                # old_members = sort({g.key: g for g in old_members}, criteria)
 
         # TODO: Enable probabilities when numba supports prob in numpy.random.choice()
 
@@ -211,22 +211,24 @@ def crossover(genus: int, source: GPUArray, updates: GPUArray, parents: GPUArray
             # For child crossover
             else:
                 value = get_value(updates, genome_idx, x, y)
-                if value == 0 and not (filled0 or filled1):
-                    if genus == genus0 and not filled0:
+                already_filled = filled0 or filled1
+
+                if not already_filled:
+                    if genus == genus0:
                         value = get_value(source, parent0, x, y)
-                        filled[genome_idx, 0] = True
-                    elif genus == genus1 and not filled1:
+                        filled[genome_idx, 0] = filled0 = True
+                    elif genus == genus1:
                         value = get_value(source, parent1, x, y)
-                        filled[genome_idx, 1] = True
-                if value != 0 and not (filled0 and filled1):
-                    if genus == genus0 and not filled0:
-                        value_c = get_value(source, parent0, x, y)
-                        value = _crossover(value, value_c, probabilities, rng_index)
-                        filled[genome_idx, 0] = True
-                    elif genus == genus1 and not filled1:
-                        value_c = get_value(source, parent1, x, y)
-                        value = _crossover(value, value_c, probabilities, rng_index)
-                        filled[genome_idx, 1] = True
+                        filled[genome_idx, 1] = filled1 = True
+
+                if genus == genus0 and not filled0 and filled1:
+                    value_c = get_value(source, parent0, x, y)
+                    value = _crossover(value, value_c, probabilities, rng_index)
+                    filled[genome_idx, 0] = True
+                if genus == genus1 and not filled1 and filled0:
+                    value_c = get_value(source, parent1, x, y)
+                    value = _crossover(value, value_c, probabilities, rng_index)
+                    filled[genome_idx, 1] = True
         else:
             # Emergency fill on unmatched param groups
             if not filled_ and genus == genus_:
@@ -362,7 +364,7 @@ def update_children(
 
     valid_perc = np.count_nonzero([check_param_compatibility(pg) for pg in pgs])
     if verbose and verbose >= 2:
-        print(f"Valid Count = {valid_perc} / {len(pgs)}")
+        print(f"{CM('Valid Count', Fore.CYAN)} = {valid_perc} / {len(pgs)}")
     if equal_param_num:
         step = 0
         for genus_param, param_group in zip(modules[genus].neat_parameters(), pgs):
@@ -373,7 +375,8 @@ def update_children(
             array_update, original_shape = reshape(cp.zeros((len(new_population), *genus_param.original_shape),)) # ctype))
             array_sources = tuple([cp.asarray(reshape(p.data)[0]) for p in param_group])
             # ------------------------------ Define crossover kernel and randomizer values ------------------------------ #
-            kernel_shape = calc_grid(max_pop_size, *array_update.shape[1:3], tpb=tpb)
+            genome_num = len(new_population)
+            kernel_shape = calc_grid(genome_num, *array_update.shape[1:3], tpb=tpb)
             # if verbose and verbose >= 3:
             #     print(param.dtype, param.device, kernel_shape, as_shape, au_shape, array_source.shape, array_update.shape)
             probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)
@@ -526,7 +529,7 @@ def reproduce(
             if specie.genus == genus:
                 del species_set.species[key]
         ts = clock.perf_counter()
-        print(f"Current genome index = {genome_indexer}")
+        # print(f"Current genome index = {genome_indexer}")
         genome_indexer = create_children(
             genus, genus_population, population, species_set.species, genome_indexer, spawn_amounts, remaining_species, to_delete,
             int(config.reproduction.elitism), config.reproduction.survival_threshold, config.reproduction.cross_threshold,

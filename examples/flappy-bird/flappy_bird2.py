@@ -26,7 +26,7 @@ torch.set_printoptions(threshold=10)
 pygame.font.init()  # init font
 
 DEVICE = 'cpu' if torch.cuda.is_available() else 'cpu'
-DTYPE = torch.float64
+DTYPE = torch.float32
 
 # Define window
 THRESHOLD = 0.9
@@ -558,12 +558,12 @@ class RModel(Model):
 GENOMES     = 100
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 8
+EMBED_SIZE  = 64
 KERNEL_SIZE = 1
 NORM_GROUPS = 1
 SEQ_LEN     = 4
-LAYERS      = 1
-HEADS       = 1
+LAYERS      = 3
+HEADS       = 4
 KV_HEADS    = None
 ENABLE_BIAS = True
 DIFFERENTIAL = False
@@ -775,9 +775,9 @@ def run():
     config.genome.weight_replace_rate   = 0.01
     config.reproduction.min_species_size = GENOMES
     config.reproduction.purge           = 1
-    config.reproduction.survival_threshold = 0.05
-    config.reproduction.cross_threshold = 0.15
-    config.reproduction.elitism         = 1
+    config.reproduction.survival_threshold = 0.10
+    config.reproduction.cross_threshold = 0.03
+    config.reproduction.elitism         = 10
     config.species.compatibility_threshold = np.inf
     config.stagnation.max_stagnation    = 1
     config.stagnation.species_elitism   = 3
@@ -790,7 +790,7 @@ def run():
     population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
     population.absorb_population(population1)
     print(MODEL.pol_proj)
-    population.load_dict(name='flappy_bird', file_no=None)
+    # population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.NEAT(
         population,

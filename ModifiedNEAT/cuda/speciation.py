@@ -10,6 +10,8 @@ from numba import types, njit, prange, cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 from numba.typed import List, Dict
 from numpy import ndarray as CPUArray
+from typing import Union
+from torch import Tensor
 
 import numpy as np
 import cupy as cp
@@ -20,45 +22,82 @@ import gc
 DISTANCE_TUPLE = types.Tuple([INT, INT])
 
 
+_Index  = Union[int, tuple[int]]
+_Number = Union[float, int]
+
+
+# @jitclass([])
+# class atomic:
+#     def __init__(self):
+#         pass
+#
+#     @staticmethod
+#     def add(array: gpu_array, index: _Index, value: _Number) -> None:
+#         atomic_add(array, index, value)
+#
+#     @staticmethod
+#     def sub(array: gpu_array, index: _Index, value: _Number) -> None:
+#         atomic_sub(array, index, value)
+
+
+@cuda.jit(device=True) # , cache=True)
+def atomic_add(array: GPUArray, index: _Index, value: _Number) -> None:
+    cuda.atomic.add(array, index, value)
+    # array[index] += value
+
+
+@cuda.jit(device=True) # , cache=True)
+def atomic_sub(array: GPUArray, index: _Index, value: _Number) -> None:
+    cuda.atomic.sub(array, index, value)
+    # array[index] -= value
+
+
 @cuda.jit(device=True)
-def calc_distance(parameter: GPUArray, total_distance: GPUArray, genome1: int, genome2: int, x,
+def calc_distance(parameter: GPUArray, total_distance: GPUArray,
+                  genome0: int, genome1: int, x: int, y: int,
                   compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     """
     Returns the genetic distance between this genome and the other. This distance value
     is used to compute genome compatibility for speciation.
     """
 
-    v1 = get_value(parameter, genome1, x, 0)
-    v2 = get_value(parameter, genome2, x, 0)
-    distance = 0.0
-    disjoint_values = 0
+    value0 = parameter[genome0, x, y]
+    value1 = parameter[genome1, x, y]
 
-    if v2 == 0:
-        disjoint_values += 1
-    if v1 == 0:
-        disjoint_values += 1
-    else:
-        distance = distance + abs(v1 - v2) * compatibility_weight_coefficient
-    distance = distance + disjoint_values * compatibility_disjoint_coefficient
-    size = parameter.shape[-1]
-    if size != 0:
-        distance = distance / size
+    current_distance = 0 # total_distance[genome0, genome1]
+    disjoint_value = 0
+    if value0 == 0:
+        disjoint_value = disjoint_value + 1
+    if value1 == 0:
+        disjoint_value = disjoint_value + 1
+    if value0 != 0 and value1 != 0:
+        current_distance = current_distance + (abs(value0 - value1) * compatibility_weight_coefficient)
+    current_distance = current_distance + disjoint_value * compatibility_disjoint_coefficient
 
-    total_distance[genome1, genome2] = distance
+    # Parameter shape = (genomes, x, y | 1)
+    x_s, y_s = parameter.shape[1:]
+    size = x_s * y_s
+    # if size != 0:
+    current_distance = current_distance / size
+
+    atomic_add(total_distance, (genome0, genome1), current_distance)
 
 
 @cuda.jit
 def get_distance(parameter: GPUArray, total_distance: GPUArray,
                  compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     # select one genome
-    genome1_idx, genome2_idx, x = cuda.grid(3)
+    genome1, x, y = cuda.grid(3)
     g_lim = total_distance.shape[0]
     x_lim = parameter.shape[1]
-    if genome1_idx < g_lim and genome2_idx < g_lim and x < x_lim:
+    y_lim = 1 if parameter.ndim == 2 else parameter.shape[2]
+    if genome1 < g_lim and x < x_lim and y < y_lim:
+        genome_num = total_distance.shape[1]
         # Compare it with all other genomes
-        calc_distance(parameter, total_distance, genome1_idx, genome2_idx, x,
-                      compatibility_weight_coefficient, compatibility_disjoint_coefficient)
-        pass
+        for genome2 in range(genome_num):
+            calc_distance(parameter, total_distance, genome1, genome2, x, y,
+                          compatibility_weight_coefficient, compatibility_disjoint_coefficient)
+            cuda.syncthreads()
 
 
 @njit(nogil=True)
@@ -86,15 +125,27 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
                            tpb=1, verbose: int = None) -> float:
     total_distance = cp.zeros((module.genome_num, module.genome_num), genome_cache.total_distance.dtype)
 
+    def reshape(tensor: Union[Tensor, cp.ndarray], required_ndim: int):
+        original_shape: tuple[int, ...] = tensor.shape
+        if tensor.ndim > required_ndim:
+            tensor = tensor.reshape(*tensor.shape[:required_ndim-1], -1)
+        elif tensor.ndim < required_ndim:
+            for _ in range(required_ndim-tensor.ndim):
+                if isinstance(tensor, Tensor):
+                    tensor = tensor.unsqueeze(-1)
+                elif isinstance(tensor, cp.ndarray):
+                    tensor = cp.expand_dims(tensor, -1)
+                else:
+                    raise ValueError(f"Unsupported dtype = {type(tensor)}")
+        return tensor, original_shape
+
     ts = clock.perf_counter()
     for param in module.neat_parameters():
         # with cuda.defer_cleanup():
-        array = param.data.clone()
         genome_num = len(module.mapping)
-        array = array.reshape((genome_num, -1, 1))
-        elements = array.shape[1]
-        array = cp.asarray(array)
-        kernel_shape = calc_grid(genome_num, genome_num, elements, tpb=tpb)
+        array = cp.asarray(reshape(param.data, 3)[0])
+        axes = array.shape[1:]
+        kernel_shape = calc_grid(genome_num, *axes, tpb=tpb)
         # if verbose:
         #     print(param.dtype, param.device, kernel_shape, array.shape, param.data.shape)
 
@@ -104,8 +155,8 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
             config.genome.compatibility_disjoint_coefficient
         )
 
-        # Remove data from GPU
-        del array
+        # # Remove data from GPU
+        # del array
 
     if verbose and verbose >= 2:
         print(f"{CM('Ran distance kernel', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
@@ -115,8 +166,10 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
     genome_cache.total_distance = total_distance
     genome_cache.hits += h
     genome_cache.misses += m
+
     # Remove GPU data
     cp.get_default_memory_pool().free_all_blocks()
+    gc.collect()
 
 
 @njit(nogil=True)
