@@ -135,13 +135,18 @@ class NEAT(Algorithm):
 
     def set_scores(self, scores: dict[int, float], policy: dict[int, float]):
         assert all([key in policy for key in scores.keys()])
+
+        def sort_key(item: tuple[int, float]):
+            key, score = item
+            return score, -key
+
+        scores = dict(sorted(self.normalize(scores).items(), key=sort_key, reverse=True))
         if self.pol_reg != 0:
-            scores = dict(sorted(self.normalize(scores).items(), key=lambda item: (item[1], -item[0]), reverse=True))
             policy = self.normalize(policy, None, self.segr_size, scores)
             true_scores = {key: self.rew_reg*scores[key] + self.pol_reg*policy[key] for key in scores.keys()}
-            true_scores = dict(sorted(true_scores.items(), key=lambda item: (item[1], -item[0]), reverse=True))
+            true_scores = dict(sorted(true_scores.items(), key=sort_key, reverse=True))
         else:
-            true_scores = dict(sorted(scores.items(), key=lambda item: (item[1], -item[0]), reverse=True))
+            true_scores = dict(sorted(scores.items(), key=sort_key, reverse=True))
 
         available_keys = list(true_scores.keys())
         available_scores = list(true_scores.values())
@@ -241,7 +246,12 @@ class NEAT(Algorithm):
                 policy_accuracy = self.get_accuracy(batch_indices, states, actions, None,
                                                     accuracy_error, accuracy_type, verbose, keys=valid_keys)[0]
                 ts = clock.perf_counter()
-                best_genome_key = self.set_scores(scores, policy_accuracy)
+                balanced_scores = {}
+                for genus in self.population.genera:
+                    genus_scores = {key: score for key, score in scores.items() if self.population.genomes[key].genus == genus}
+                    for key, score in self.normalize(genus_scores).items():
+                        balanced_scores[key] = score
+                best_genome_key = self.set_scores(balanced_scores, policy_accuracy)
                 set_time = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"set scores in {CM(f'{round(set_time, 2)}s', Fore.LIGHTCYAN_EX)}")

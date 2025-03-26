@@ -17,12 +17,18 @@ class ReplayBuffer(object):
         self.reverse: dict[int, int] = {}
 
     def max_size(self):
-        maximum = np.max([np.mean([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
-        return maximum
+        if len(self.data) > 0:
+            maximum = np.max([np.mean([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
+            return maximum
+        else:
+            return 0
 
     def min_size(self):
-        maximum = np.min([np.mean([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
-        return maximum
+        if len(self.data) > 0:
+            maximum = np.min([np.mean([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
+            return maximum
+        else:
+            return 0
 
     def episodes(self):
         listing = []
@@ -179,6 +185,46 @@ class ReplayBuffer(object):
         for key in self.data.keys():
             if keys is None or (keys is not None and key in keys):
                 self._deque_buffers(key, to_del[key])
+
+    def deque_episodes(self, episodes: int, keys: list[int] = None):
+        """
+        Deletes the episodes before the last n episodes.
+        Used to compensate for the long data collection times of the NEAT evaluation functions.
+        :param episodes: (int) Number of recent episodes to keep.
+        :param keys: (list[int])
+        :return: (none)
+        """
+        assert episodes >= 0
+        if 'ep_map' in self.buffer_names and self.max_size() > 0:
+            filters = {}
+            episode_mapping: dict[int, list[int]] = self.rollout(buffers='ep_map', as_list=True)[0]
+            for key in self.mapping.keys():
+                episodes_done = max(episode_mapping[key] + [0])
+                episodes_to_del = torch.tensor([ep for ep in range(episodes_done) if ep < (episodes_done-episodes)])
+                mapping = torch.tensor(episode_mapping[key])
+                episode_filter  = torch.isin(mapping, episodes_to_del)
+                record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
+                # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
+                filters[key] = record_filter
+            self.deque(filters, keys)
+
+    def deque_steps(self, steps: int, keys: list[int] = None):
+        """
+        Deletes the last n steps.
+        Used to compensate for the large data sizes of the NEAT evaluation functions.
+        :param steps: (int) Number of steps to keep.
+        :param keys: (list[int])
+        :return: (none)
+        """
+        assert steps >= 0
+        if 'ep_map' in self.buffer_names and self.max_size() > 0:
+            filters = {}
+            episode_mapping: dict[int, list[int]] = self.rollout(buffers='ep_map', as_list=True)[0]
+            for key in self.mapping.keys():
+                records = len(episode_mapping[key])
+                limit = max(0, records - steps)
+                filters[key] = [i for i in range(records) if i < limit]
+            self.deque(filters, keys)
 
     def sort(self):
         self.data = dict(sorted(self.data.items(), key=lambda item: len(item[1])))

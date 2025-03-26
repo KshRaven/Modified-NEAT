@@ -101,6 +101,8 @@ class NeatParameter(nn.Module):
             self.data.requires_grad_(True)
 
     def update(self, genomes: dict[int, Genome], params: Union[Tensor, GPUArray] = None, verify=False):
+        if params is None and self.mapping is not None and not all([key in self.mapping for key in genomes.keys()]):
+            raise ValueError(f"Updating genomes of a module without parameters!")
         if isinstance(params, dict):
             params = params[self.param_index]
         if isinstance(params, DeviceNDArray):
@@ -131,7 +133,7 @@ class NeatParameter(nn.Module):
                 old_indices = [self.mapping[genome.key] for genome in genomes.values() if genome.key in self.mapping]
                 try:
                     if verify and len(old_indices) > 0:
-                        if not torch.all(self.data[old_indices] == (params[new_indices])):
+                        if not torch.all(self.data[old_indices] == (params[new_indices].to(self.data.device))):
                             # raise ValueError(f"Some values from new params are not in old params after update.")
                             pass
                 except Exception as e:
@@ -251,7 +253,7 @@ class NeatModule(nn.Module):
         self.mapping = {genome.key: index for index, genome in enumerate(genomes.values())}
         self.genome_num = len(self.mapping)
 
-        for var in (self.neat_modules()+self.neat_parameters()):
+        for var in (self.neat_parameters()+self.neat_modules()):
             res = var.update(genomes, params, verify)
             if res is not None:
                 self.updated = True

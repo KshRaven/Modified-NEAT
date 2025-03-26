@@ -15,12 +15,13 @@ from ModifiedNEAT.util.storage import save, load
 from ModifiedNEAT.util.datetime import eta, clock
 from ModifiedNEAT.util.replay import ReplayBuffer
 
-from typing import Union
+from typing import Union, Iterable
 from numba import njit
 from numba.typed import List, Dict
 from itertools import count
 
 import numpy as np
+import torch
 
 
 class CompleteExtinctionException(Exception):
@@ -37,12 +38,11 @@ class Population(object):
         5. Go to 1.
     """
 
-    genus_indexer = count(0)
+    genus_indexer = Indexer(0)
     threads_per_block = 8
     group_indexer = Indexer(0)
 
-    def __init__(self, genomes: int, module: NeatModule, config: Config = None,
-                 state_state: dict = None, **options):
+    def __init__(self, genomes: int, module: NeatModule, config: Config = None, save_state: dict = None, **options):
         # ------------------------------ Globals ------------------------------ #
         self.genus: int = next(self.genus_indexer)
         self.genera = [self.genus]
@@ -72,7 +72,8 @@ class Population(object):
         # ------------------------------ Data Loading ------------------------------ #
         self._initialized = False
         verbose = manage_params(options, 'verbose', 2)
-        if state_state is None:
+        # TODO: Fix this variable name
+        if save_state is None:
             # TODO: Implement initialization for CPU functions
             # Create a population from scratch, then partition into species.
             self.genomes = self.reproduction.create_new(
@@ -86,7 +87,7 @@ class Population(object):
                 tpb=self.threads_per_block, verbose=verbose
             )
         else:
-            self.load_dict(state_state, verbose=verbose)
+            self.load_dict(save_state, verbose=verbose)
         self._initialized = True
 
         # ------------------------------ Post Evaluation ------------------------------ #
@@ -487,6 +488,7 @@ class Population(object):
         gts = clock.perf_counter()
         # ------------------------------ General ------------------------------ #
         self.genera = save_state['genera']
+        self.genus_indexer.set(max(self.genera)+1)
         self.generation = save_state['generation']
         # ------------------------------ Genomes ------------------------------ #
         genomes_data = save_state['genomes']
@@ -541,3 +543,58 @@ class Population(object):
             self.config, self.genera, self.modules, self.species_set, self.genomes, self.generation,
             tpb=self.threads_per_block, verbose=verbose
         )
+
+    def crop(self, keys: Union[int, Iterable[int]], device: torch.device = None):
+        if not isinstance(keys, Iterable):
+            keys = [keys]
+        if device is None:
+            device = list(self.modules.values())[0].dev
+
+        def remove(dictionary: dict, key):
+            if key in dictionary:
+                del dictionary[key]
+
+        genera_to_remove = [genus for genus in self.genera if not np.any([self.genomes[key].genus == genus for key in keys])]
+        for genus in genera_to_remove:
+            remove(self.modules, genus)
+            remove(self.best_genomes, genus)
+            remove(self.rankings, genus)
+            remove(self.legends, genus)
+
+        gm = self.get_mapping(consolidated=False, grouped=False)
+        if not isinstance(gm, tuple):
+            gm = (gm,)
+        for genus, genus_mapping in zip(self.genera, gm):
+            new_genomes = {key: self.genomes[key] for key in keys if key in genus_mapping}
+            new_updates = {}
+            module = self.modules[genus]
+
+            for parameter in module.neat_parameters():
+                indices_to_keep = torch.tensor([parameter.mapping[key] for key in keys if key in parameter.mapping],
+                                               device=parameter.device if not device else device, dtype=torch.int64)
+                update = torch.index_select(parameter.data.to(parameter.device if not device else device),
+                                            dim=0, index=indices_to_keep)
+                new_updates[parameter.param_index] = update
+
+            module.update(new_genomes, new_updates, True)
+
+        if device:
+            for module in self.modules.values():
+                module.to(device)
+                for label, attr in vars(module).items():
+                    if isinstance(attr, torch.Tensor):
+                        setattr(module, label, attr.to(device))
+                if hasattr(module, 'device'):
+                    module.device = device
+                for sub_module in module.neat_modules():
+                    for label, attr in vars(sub_module).items():
+                        if isinstance(attr, torch.Tensor):
+                            setattr(sub_module, label, attr.to(device))
+                    if hasattr(sub_module, 'device'):
+                        sub_module.device = device
+
+        genomes_to_remove = [key for key in self.genomes.keys() if key not in keys]
+        for key in genomes_to_remove:
+            remove(self.genomes, key)
+
+        torch.cuda.empty_cache()

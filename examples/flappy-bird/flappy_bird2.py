@@ -558,16 +558,16 @@ class RModel(Model):
 GENOMES     = 100
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 64
+EMBED_SIZE  = 8
 KERNEL_SIZE = 1
 NORM_GROUPS = 1
 SEQ_LEN     = 4
-LAYERS      = 3
-HEADS       = 4
+LAYERS      = 1
+HEADS       = 1
 KV_HEADS    = None
 ENABLE_BIAS = True
 DIFFERENTIAL = False
-GAMMA       = np.exp(np.log(0.10) / 3)
+GAMMA       = np.exp(np.log(0.10) / 16)
 ALPHA       = np.exp(np.log(1.5) / (2 - 1))
 LOSS_REG    = 0.
 
@@ -776,7 +776,7 @@ def run():
     config.reproduction.min_species_size = GENOMES
     config.reproduction.purge           = 1
     config.reproduction.survival_threshold = 0.10
-    config.reproduction.cross_threshold = 0.03
+    config.reproduction.cross_threshold = 0.10
     config.reproduction.elitism         = 10
     config.species.compatibility_threshold = np.inf
     config.stagnation.max_stagnation    = 1

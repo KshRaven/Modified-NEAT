@@ -26,6 +26,7 @@ GPUArray = Union[DeviceNDArray, cp.ndarray]
 
 NP_FLOAT = types.float64
 GENOME   = Genome.class_type.instance_type
+GENOME_LIST = types.ListType(GENOME)
 
 
 @njit(nogil=True)
@@ -74,8 +75,9 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
 @njit(nogil=True)
 def create_children(genus: int, genus_population: dict[int, Genome], population: dict[int, Genome], species: dict[int, Species],
                     available_gid: int, spawn_amounts: list[int], remaining_species: list[Species], to_delete: list[int],
-                    elitism: int, survival_threshold: float, cross_threshold: float, cross_balance: bool,
-                    darwin_multiplier: float, criteria: str, ancestors: dict[int, tuple[Genome, Genome]]):
+                    elitism: int, survival_threshold: float, cross_threshold: float, cross_multiplier: float,
+                    darwin_multiplier: float, criteria: str, ancestors: dict[int, tuple[Genome, Genome]],
+                    equal_params: bool):
     if len(spawn_amounts) != len(remaining_species):
         raise ValueError(f"Mismatch in reproduction data")
 
@@ -101,16 +103,26 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
                         genomes[j], genomes[j + 1] = genomes[j + 1], genomes[j]
         return genomes
 
-    def choice(genomes: list[Genome], multiplier: float):
-        if multiplier is None:
-            multiplier = 1
-        factors = np.array([g.fitness for g in genomes])
+    def choice(main_genus: int, genomes: list[Genome], multiplier_cross: float, multiplier_fitness: float):
+        if multiplier_cross is None:
+            multiplier_cross = 1
+        if multiplier_fitness is None:
+            multiplier_fitness = 1
+        factors = np.array([(g.fitness if g.genus == main_genus else g.fitness * multiplier_cross) * multiplier_fitness
+                            for g in genomes])
         maximum = np.max(factors)
         minimum = np.min(factors) + 1e-8
         probabilities = np.full(len(genomes), 0.0)
         for i, p in enumerate(factors):
-            probabilities[i] = (p - minimum) / (maximum - minimum) * np.random.rand() * multiplier
+            probabilities[i] = (p - minimum) / (maximum - minimum) * np.random.rand()
         return genomes[np.argmax(probabilities)]
+
+    # Populate global genera members
+    genera: dict[int, list[Genome]] = Dict.empty(INT, GENOME_LIST)
+    for genome in population.values():
+        if genome.genus not in genera:
+            genera[genome.genus] = List.empty_list(GENOME)
+        genera[genome.genus].append(genome)
 
     for idx in range(len(remaining_species)):
         spawn  = spawn_amounts[idx]
@@ -147,31 +159,27 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         # Use at least two parents no matter what the threshold fraction result is.
         old_members = old_members[:repro_cutoff]
 
+        extra_members: list[Genome] = List.empty_list(GENOME)
         if cross_threshold > 0:
-            extra_members = []
-            for genome in population.values():
-                if genome.genus != genus:
-                    extra_members.append(genome)
-            if len(extra_members) > 0:
-                extra_members = sort({g.key: g for g in extra_members}, criteria)
-                cross_cutoff = math.ceil(cross_threshold * len(extra_members))
-                old_members.extend(extra_members[:cross_cutoff])
-                # old_members = sort({g.key: g for g in old_members}, criteria)
+            for gn, genus_members in genera.items():
+                if gn != genus and len(genus_members) > 0:
+                    cross_cutoff = math.ceil(cross_threshold * len(genus_members))
+                    extra_members.extend(genus_members[:cross_cutoff])
+        if len(extra_members) > 1:
+            extra_members = sort({g.key: g for g in extra_members}, criteria)
 
         # TODO: Enable probabilities when numba supports prob in numpy.random.choice()
 
         # Randomly choose parents and produce the number of offspring allotted to the species.
         for _ in prange(spawn):
-            parent1: Genome = choice(old_members, darwin_multiplier)
-            parent2: Genome = choice(old_members, darwin_multiplier)
+            parent1: Genome = choice(genus, old_members, cross_multiplier, darwin_multiplier)
+            parent2: Genome = choice(genus, List(list(old_members)+list(extra_members)), cross_multiplier, darwin_multiplier)
 
-            # Note that if the parents are not distinct, crossover will produce a
-            # genetically identical clone of the parent (but with a different ID).
+            # Note that if the parents are not distinct, crossover will produce a genetically identical clone of the parent (but with a different ID).
             gid = available_gid
             available_gid += 1
-            # print(gid)
             child = Genome(gid, genus)
-            # child.update_from_ModifiedNEAT()
+            # child.update_from_build()
             genus_population[gid] = child
             ancestors[gid] = (parent1, parent2)
             spawn -= 1
@@ -357,7 +365,6 @@ def update_children(
                     raise ValueError(f"Unsupported dtype = {type(tensor)}")
         return tensor, original_shape
 
-    updates: dict[int, Tensor] = {}
     genera_parameters = [m.neat_parameters() for m in modules.values()]
     pgs: list[tuple[NeatParameter, ...]] = list(zip(*genera_parameters))
     equal_param_num = all([len(c) == len(genera_parameters[0]) for c in genera_parameters])
@@ -371,6 +378,7 @@ def update_children(
             step += 1
             # with cuda.defer_cleanup():
             # ------------------------------ Sending data to GPU ------------------------------ #
+            # TODO: Re-enable this if necessary after testing if it raises error in crosssover
             # ctype = cp.float32 if genus_param.dtype == torch.float32 else cp.float64
             array_update, original_shape = reshape(cp.zeros((len(new_population), *genus_param.original_shape),)) # ctype))
             array_sources = tuple([cp.asarray(reshape(p.data)[0]) for p in param_group])
@@ -402,59 +410,19 @@ def update_children(
             )
             if verbose and verbose >= 4:
                 genus_param.md = array_update.copy().get() - genus_param.cd
-            # ------------------------------ Add update to update list ------------------------------ #
+            # ------------------------------ Update parameters ------------------------------ #
             update = array_update.reshape(*original_shape)
-            updates[genus_param.param_index] = update
+            genus_param.update(new_population, update, True)
             # ------------------------------ Remove data from GPU ------------------------------ #
-            del probabilities, normals, array_update
+            del probabilities, normals, array_update, update
 
         # Remove GPU data
         del sources, child_filter
         cp.get_default_memory_pool().free_all_blocks()
         gc.collect()
     else:
-        for genus_param in modules[genus].neat_parameters():
-            # with cuda.defer_cleanup():
-            # ------------------------------ Sending data to GPU ------------------------------ #
-            ctype = cp.float32 if genus_param.dtype == torch.float32 else cp.float64
-            array_update, original_shape = reshape(cp.zeros((len(new_population), *genus_param.original_shape), ctype))
-            array_sources = (array_update,)
-            # ------------------------------ Define crossover kernel and randomizer values ------------------------------ #
-            kernel_shape = calc_grid(max_pop_size, *array_update.shape[1:3], tpb=tpb)
-            # if verbose and verbose >= 3:
-            #     print(param.dtype, param.device, kernel_shape, as_shape, au_shape, array_source.shape, array_update.shape)
-            probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)
-            # ------------------------------ Run crossover using sources ------------------------------ #
-            crossover[*kernel_shape](
-                array_sources, array_update, sources, genera, probabilities, False
-            )
-            if verbose and verbose >= 4:
-                genus_param.cd = array_update.copy().get()
-            # ------------------------------ Remove data from GPU ------------------------------ #
-            del array_sources
-            # ------------------------------ Define mutation kernel and randomizer values ------------------------------ #
-            probabilities = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)[0]
-            normals = get_rng_states(kernel_shape, seed, get_normal=True, use_cuda=True)[0]
-            # ------------------------------ Run mutation using configuration ------------------------------ #
-            mutate[*kernel_shape](
-                array_update, child_filter, config.genome.weight_mutate_rate, config.genome.weight_mutate_power,
-                config.genome.weight_replace_rate, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,
-                config.genome.weight_min_value, config.genome.weight_max_value, probabilities, normals,
-            )
-            if verbose and verbose >= 4:
-                genus_param.md = array_update.copy().get() - genus_param.cd
-            # ------------------------------ Add update to update list ------------------------------ #
-            update = array_update.reshape(*original_shape)
-            updates[genus_param.param_index] = update
-            # ------------------------------ Remove data from GPU ------------------------------ #
-            del probabilities, normals, array_update
-
-        # Remove GPU data
-        del sources, child_filter
-        cp.get_default_memory_pool().free_all_blocks()
-        gc.collect()
-
-    return updates
+        # TODO: Work on this section
+        raise NotImplementedError()
 
 
 def reproduce(
@@ -471,8 +439,7 @@ def reproduce(
     ]
     modules_genera: list[NeatModule] = [modules[genus] for genus in genera]
     new_population: dict[int, Genome] = Dict.empty(INT, GENOME)
-    updates = {}
-    new_genomes = {}
+    new_genomes: dict[int, dict[int, Genome]] = {}
     for genomes, module, genus in zip(population_genera, modules_genera, genera):
         assert module.genus == genus
 
@@ -523,7 +490,6 @@ def reproduce(
                                       config.reproduction.purge, generation)
 
         genus_population: dict[int, Genome] = Dict.empty(INT, GENOME)
-        new_genomes[genus] = genus_population
 
         for key, specie in list(species_set.species.items()):
             if specie.genus == genus:
@@ -533,10 +499,10 @@ def reproduce(
         genome_indexer = create_children(
             genus, genus_population, population, species_set.species, genome_indexer, spawn_amounts, remaining_species, to_delete,
             int(config.reproduction.elitism), config.reproduction.survival_threshold, config.reproduction.cross_threshold,
-            config.reproduction.cross_balance, config.reproduction.darwin_multiplier,
-            config.general.fitness_criterion, ancestors,
+            config.reproduction.cross_multiplier, config.reproduction.darwin_multiplier,
+            config.general.fitness_criterion, ancestors, False
         )
-        updates[genus] = update_children(
+        update_children(
             config, genus, modules, population, genus_population, ancestors, tpb, config.general.seed, verbose
         )
         if verbose and verbose >= 2:
@@ -545,13 +511,13 @@ def reproduce(
         # Update genus
         for genome in genus_population.values():
             new_population[genome.key] = genome
+        new_genomes[genus] = genus_population
 
         pass
 
     # Update modules
-    for genus, update in updates.items():
-        module = modules[genus]
-        module.update(new_genomes[genus], update, True)
+    for genus, module in modules.items():
+        module.update(new_genomes[genus], None, True)
         module.update_limit()
         for m in module.neat_modules():
             m.update_limit()

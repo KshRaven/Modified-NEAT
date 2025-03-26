@@ -40,6 +40,9 @@ class PPO(Algorithm):
         :keyword log_dir:
         :keyword log_name:
         """
+
+        raise NotImplementedError(f"Needs revamping")
+
         for var in ['schedulers', 'device', 'dtype']:
             if var in options:
                 del options[var]
