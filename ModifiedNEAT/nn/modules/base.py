@@ -429,6 +429,8 @@ class Convolution(NeatModule):
         try:
             tensor = torch.einsum(f"h...gi{w}{k},h...goi{k}->h...go{w}", windows_grouped, kernel_grouped)
         except Exception as e:
+            if not verbose:
+                self.forward(tensor, keys, verbose=2)
             print(f"windows = {windows_grouped.shape}")
             print(f"kernels = {kernel_grouped.shape}")
             raise e

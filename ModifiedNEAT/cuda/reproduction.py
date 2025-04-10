@@ -133,7 +133,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
 
         # Delete unwanted members
         executions = [gid for gid in specie.members.keys() if gid in to_delete]
-        if len(specie.members.keys()) - len(executions) > 1:
+        if len(specie.members) - len(executions) > 1:
             for gid in executions:
                 if gid in to_delete and len(specie.members) > 1:
                     del specie.members[gid]

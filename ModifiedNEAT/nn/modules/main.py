@@ -23,81 +23,82 @@ class Transformer(NeatModule):
             heads: int = None, kv_heads: int = None, differential=True, dropout: int = None,
             bias=False, device = torch.device('cpu'), dtype: torch.dtype = torch.float32, **options):
         super(Transformer, self).__init__()
-        self.distribution       = manage_params(options, 'distribution', 'normal')
-        self.fwd_exp            = manage_params(options, 'fwd_exp', None)
-        self.epsilon            = manage_params(options, 'epsilon', 1e-8)
-        self.constant           = manage_params(options, 'constant', 10000)
-        self.affine             = manage_params(options, 'affine', True)
-        self.causal_mask        = manage_params(options, 'causal_mask', True)
-        self.primary_activation = manage_params(options, 'pri_actv', nn.SiLU())
-        self.secondary_activation = manage_params(options, 'sec_actv', None)
+        # self.distribution       = manage_params(options, 'distribution', 'normal')
+        # self.fwd_exp            = manage_params(options, 'fwd_exp', None)
+        # self.epsilon            = manage_params(options, 'epsilon', 1e-8)
+        # self.constant           = manage_params(options, 'constant', 10000)
+        # self.affine             = manage_params(options, 'affine', True)
+        # self.causal_mask        = manage_params(options, 'causal_mask', True)
+        # self.primary_activation = manage_params(options, 'pri_actv', nn.SiLU())
+        # self.secondary_activation = manage_params(options, 'sec_actv', None)
+        #
+        # # ModifiedNEAT
+        # self.embedder    = BufferEmbedding(inputs, embed_size, bias, device, dtype)
+        # self.encoder     = BufferEncoding(max_seq_len, embed_size, bias, device, dtype)
+        # self.transformer = TransformerBase(
+        #     max_seq_len, embed_size, layers, heads, kv_heads, self.fwd_exp, differential,
+        #     self.constant, self.epsilon, self.affine, self.causal_mask, dropout, bias, device, dtype
+        # )
+        # self.dec_norm   = RMSNorm(embed_size, self.epsilon, self.affine, device, dtype)
+        # output_dim      = outputs if self.distribution != 'discrete' else 2 ** outputs
+        # self.decode     = Linear(embed_size, output_dim, bias, device, dtype)
+        # if dropout is None:
+        #     dropout = 0
+        # self.dropout    = nn.Dropout(dropout)
+        #
+        # # STATE
+        # self.device = device
+        # self.dtype  = dtype
+        # self.eval()
+        #
+        # # ATTRIBUTES
+        # self.max_seq_len = max_seq_len
+        pass
 
-        # ModifiedNEAT
-        self.embedder    = BufferEmbedding(inputs, embed_size, bias, device, dtype)
-        self.encoder     = BufferEncoding(max_seq_len, embed_size, bias, device, dtype)
-        self.transformer = TransformerBase(
-            max_seq_len, embed_size, layers, heads, kv_heads, self.fwd_exp, differential,
-            self.constant, self.epsilon, self.affine, self.causal_mask, dropout, bias, device, dtype
-        )
-        self.dec_norm   = RMSNorm(embed_size, self.epsilon, self.affine, device, dtype)
-        output_dim      = outputs if self.distribution != 'discrete' else 2 ** outputs
-        self.decode     = Linear(embed_size, output_dim, bias, device, dtype)
-        if dropout is None:
-            dropout = 0
-        self.dropout    = nn.Dropout(dropout)
-
-        # STATE
-        self.device = device
-        self.dtype  = dtype
-        self.eval()
-
-        # ATTRIBUTES
-        self.max_seq_len = max_seq_len
-
-    @property
-    def genomes_total(self):
-        return self.decode.genome_num
-
-    def forward(self, tensor: Tensor, pos_idx: int = None, keys: Union[int, Iterable[int]] = None,
-                verbose: int = None, get=False, single=False):
-        if pos_idx is not None:
-            tensor = tensor[:, :pos_idx+1]
-        if verbose:
-            print(f"\nTransformer Input =>\n{tensor}\n\tdim = {tensor.shape}")
-
-        tensor = self.embedder(tensor, keys=keys, verbose=verbose)
-        if self.primary_activation is not None:
-            tensor = self.primary_activation(tensor)
-        tensor = self.dropout(self.encoder(tensor, keys=keys))
-        tensor = self.transformer(tensor, keys=keys, verbose=verbose, get=get, single=single)
-        tensor = self.decode(self.dec_norm(tensor, keys=keys), keys=keys)
-        if self.secondary_activation is not None:
-            tensor = self.secondary_activation(tensor)
-        if verbose:
-            print(f"\nTransformer Output =>\n{tensor}\n\tdim = {tensor.shape}")
-        if self.distribution == 'discrete':
-            tensor = torch.argmax(tensor, -1)
-        return tensor
-
-    def get_attention(self):
-        a, v = [], []
-        for ai, vi in self.transformer.get_attention():
-            a.append(ai)
-            v.append(vi)
-        return a, v
-
-    def infer(self, tensor: Tensor, pos_idx: int = None, keys: Union[int, Iterable[int]] = None, verbose=False):
-        pos_idx = self.max_seq_len + pos_idx if pos_idx is not None and pos_idx < 0 else pos_idx
-        if pos_idx is None:
-            pos_idx = self.max_seq_len-1
-        sequence_dim = -2 if self.distribution == 'discrete' else -1
-        tokens_current = min(tensor.shape[sequence_dim], pos_idx+1)
-        tensor = tensor[..., :tokens_current+1, :]
-        for idx in range(tokens_current):
-            current_idx = tokens_current+idx
-            token = self.forward(tensor, current_idx, keys, verbose)
-            tensor = torch.cat((tensor, token), dim=sequence_dim)
-        return tensor
+    # @property
+    # def genomes_total(self):
+    #     return self.decode.genome_num
+    #
+    # def forward(self, tensor: Tensor, pos_idx: int = None, keys: Union[int, Iterable[int]] = None,
+    #             verbose: int = None, get=False, single=False):
+    #     if pos_idx is not None:
+    #         tensor = tensor[:, :pos_idx+1]
+    #     if verbose:
+    #         print(f"\nTransformer Input =>\n{tensor}\n\tdim = {tensor.shape}")
+    #
+    #     tensor = self.embedder(tensor, keys=keys, verbose=verbose)
+    #     if self.primary_activation is not None:
+    #         tensor = self.primary_activation(tensor)
+    #     tensor = self.dropout(self.encoder(tensor, keys=keys))
+    #     tensor = self.transformer(tensor, keys=keys, verbose=verbose, get=get, single=single)
+    #     tensor = self.decode(self.dec_norm(tensor, keys=keys), keys=keys)
+    #     if self.secondary_activation is not None:
+    #         tensor = self.secondary_activation(tensor)
+    #     if verbose:
+    #         print(f"\nTransformer Output =>\n{tensor}\n\tdim = {tensor.shape}")
+    #     if self.distribution == 'discrete':
+    #         tensor = torch.argmax(tensor, -1)
+    #     return tensor
+    #
+    # def get_attention(self):
+    #     a, v = [], []
+    #     for ai, vi in self.transformer.get_attention():
+    #         a.append(ai)
+    #         v.append(vi)
+    #     return a, v
+    #
+    # def infer(self, tensor: Tensor, pos_idx: int = None, keys: Union[int, Iterable[int]] = None, verbose=False):
+    #     pos_idx = self.max_seq_len + pos_idx if pos_idx is not None and pos_idx < 0 else pos_idx
+    #     if pos_idx is None:
+    #         pos_idx = self.max_seq_len-1
+    #     sequence_dim = -2 if self.distribution == 'discrete' else -1
+    #     tokens_current = min(tensor.shape[sequence_dim], pos_idx+1)
+    #     tensor = tensor[..., :tokens_current+1, :]
+    #     for idx in range(tokens_current):
+    #         current_idx = tokens_current+idx
+    #         token = self.forward(tensor, current_idx, keys, verbose)
+    #         tensor = torch.cat((tensor, token), dim=sequence_dim)
+    #     return tensor
 
 
 class Conver(NeatModule):
@@ -116,7 +117,6 @@ class Conver(NeatModule):
         self.epsilon            = manage_params(options, 'epsilon', 1e-6)
         self.affine             = manage_params(options, 'affine', True)
         self.probabilistic      = manage_params(options, ['prob', 'probabilistic'], False) and self.distribution != 'discrete'
-        self.dec_actv           = manage_params(options, ['dec_actv', 'decoder_activation'], nn.SiLU())
         self.lower_clip         = manage_params(options, 'lower_clip', -20)
         self.upper_clip         = manage_params(options, 'upper_clip', 20)
         self.feedback           = manage_params(options, 'feedback', False)
@@ -127,6 +127,8 @@ class Conver(NeatModule):
         self.outputs = outputs
 
         # BUILD
+        self.pri_actv = self.activation = manage_params(options, ['activation', 'actv', 'pri_actv'], nn.SiLU())
+        self.sec_actv = manage_params(options, 'sec_actv', None)
         options['image_ndim'] = 1
         Convolution = get_conv((max_seq_len,))
         self.feedback_gain = Sequential(
@@ -158,27 +160,24 @@ class Conver(NeatModule):
         )
         decoder = []
         for layer_idx in range(self.dec_layers):
-            decoder.append(
-                GroupNorm(norm_groups, dim_size, self.epsilon, self.affine, bias, device, dtype)
-            )
-            if self.dec_actv is not None:
-                decoder.append(self.dec_actv)
             if layer_idx != self.dec_layers - 1:
                 decoder.append(
-                    Conv1d(dim_size, dim_size, kernel_size, padding=-1,
-                           padding_mode=manage_params(options, 'padding_mode', 'zeros'),
-                           bias=bias, device=device, dtype=dtype)
+                    ResidualBlock(dim_size, dim_size, kernel_size, norm_groups, bias, device, dtype, **options)
                 )
             else:
+                decoder.append(
+                    GroupNorm(norm_groups, dim_size, self.epsilon, self.affine, bias, device, dtype)
+                )
+                decoder.append(self.activation)
                 decoder.append(
                     Conv1d(dim_size, outputs, 1, 1,
                            padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                            bias=bias, device=device, dtype=dtype)
                 )
+                if self.sec_actv is not None:
+                    decoder.append(self.sec_actv)
                 decoder.append(Transpose(-1, -2))
         self.decoder = Sequential(*decoder)
-        self.primary_activation = manage_params(options, 'pri_actv', None)
-        self.secondary_activation = manage_params(options, 'sec_actv', None)
         self.selector = torch.arange(max_seq_len, device=device, dtype=torch.int)
 
         # STATE
@@ -189,8 +188,12 @@ class Conver(NeatModule):
 
     def handle_feedback(self, tensor: Tensor, keys: Union[int, list[int]] = None):
         if self.feedback:
-            tensor, feedback = torch.split(tensor, self.inputs, -1)
-            assert feedback.shape[-1] == self.feedback
+            try:
+                tensor, feedback = torch.split(tensor, self.inputs, -1)
+                assert feedback.shape[-1] == self.feedback
+            except Exception as e:
+                print(f"feedback = {feedback.shape}, feedback_dims = {self.feedback}")
+                raise e
             feedback = self.feedback_dropout(feedback)
             if self.feedback_gain is not None:
                 feedback = feedback * self.feedback_gain(feedback, keys=keys)
@@ -227,8 +230,8 @@ class Conver(NeatModule):
         if self.distribution == 'discrete' and not logits:
             tensor = torch.argmax(tensor, -1)
         else:
-            if self.secondary_activation is not None:
-                tensor = self.secondary_activation(tensor)
+            if self.sec_actv is not None:
+                tensor = self.sec_actv(tensor)
         if verbose:
             print(get_tensor_info(tensor, f'{self.__class__.__name__} Output', verbose))
 
@@ -268,6 +271,7 @@ class Reformer(Model):
         self.dim_size       = dim_size
         self.distribution   = manage_params(options, ['distribution', 'dist'], 'normal')
         self.epsilon        = manage_params(options, 'epsilon', 1e-8)
+        self.affine         = manage_params(options, 'affine', True)
         self.probabilistic  = manage_params(options, ['probabilistic', 'prob'], True)
         self.clip_std_min   = manage_params(options, ['clip_min'], None)
         self.clip_std_max   = manage_params(options, ['clip_max'], None)
@@ -275,7 +279,7 @@ class Reformer(Model):
         self.bias_enabled   = bias
 
         # BUILD
-        self.pri_actv = manage_params(options, 'pri_actv', nn.SiLU())
+        self.pri_actv = self.activation = manage_params(options, ['activation', 'actv', 'pri_actv'], nn.SiLU())
         self.sec_actv = manage_params(options, 'sec_actv', None)
         options['distribution'] = options['dist'] = 'normal'
         options['sec_actv'] = None
@@ -284,7 +288,11 @@ class Reformer(Model):
             inputs, dim_size, max_seq_len, dim_size, kernel_size, layers, norm_groups, channels,
             heads, kv_heads, differential, bias, device, dtype, **options
         )
-        self.mean_log_std = Linear(dim_size, pol_out*(2 if self.probabilistic else 1), bias, device, dtype)
+        self.mean_log_std = Sequential(
+            RMSNorm(dim_size, self.epsilon, self.affine, device, dtype),
+            self.pri_actv,
+            Linear(dim_size, pol_out*(2 if self.probabilistic else 1), bias, device, dtype),
+        )
         if manage_params(options, 'get_values', False):
             self.val_proj = Conver(
                 inputs, dim_size, max_seq_len, dim_size, kernel_size, layers, norm_groups, channels,

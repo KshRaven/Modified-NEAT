@@ -578,7 +578,7 @@ LOSS_REG    = 0.
 
 MODEL = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
                ENABLE_BIAS, DEVICE, DTYPE)
-MODEL1 = RModel(INPUTS, OUTPUTS*2, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
+MODEL1 = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
                 ENABLE_BIAS, DEVICE, DTYPE)
 
 INIT_GEN: int = None
@@ -704,7 +704,8 @@ def evaluate(population: neat.Population, **options):
                 # game.update(actions[:, 0])
                 game.update(actions)
                 game.draw(False)
-                rewards = game.birds.score.unsqueeze(-1)
+                rewards = torch.softmax(game.birds.score.unsqueeze(-1), 0)
+                # rewards += (rewards - rewards.min(dim=0, keepdim=True)[0])
                 # extend(reward_buffer, game.birds.score.unsqueeze(-1))
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"rewards =>\n{rewards}\n\tshape = {rewards.shape}")

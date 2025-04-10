@@ -290,7 +290,7 @@ class Algorithm(object):
         all_keys = list(self.replay.mapping.keys())
         keys = all_keys if keys is None else keys
         with torch.no_grad():
-            ts, ud, ut = clock.perf_counter(), 0, len(batches)
+            ts, ud, ut = clock.perf_counter(), 0, len(keys)
             actions_acc, rewards_acc = {}, {}
 
             # Calculate accuracy for each key
@@ -327,10 +327,6 @@ class Algorithm(object):
                             )
                         else:
                             reward_sum.append(torch.zeros(1).float())
-
-                        if verbose:
-                            ud += 1
-                            eta(ts, ud, ut, 'getting accuracy')
                     r = torch.concat(reward_sum)
                     a = torch.concat(action_sum)
 
@@ -372,7 +368,7 @@ class Algorithm(object):
 
         # Handle errors
         if len(source) == 0:
-            raise ValueError("No keys in dict")
+            return array
         if isinstance(source[0], (list, tuple)):
             for i, (key, item) in enumerate(zip(keys, source)):
                 if len(item) == 0:

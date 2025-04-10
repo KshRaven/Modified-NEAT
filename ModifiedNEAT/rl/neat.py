@@ -59,7 +59,7 @@ class NEAT(Algorithm):
         self.target_kl: Union[float, None] = manage_params(options, 'target_kl', None)
 
         self.logging.add_buffers(
-            'kl_divergence', 'explained_variance', 'std',
+            'kl_divergence', 'std', # 'explained_variance'
             'ep_len_mean', 'ep_len_std', 'ep_rew_mean', 'ep_rew_std', 'policy_acc', 'reward_acc'
         )
 
@@ -276,8 +276,8 @@ class NEAT(Algorithm):
                 try:
                     policy_acc = policy_accuracy[best_genome_key] * 100
                 except RuntimeError:
-                    policy_acc = np.nan, np.nan
-                explained_variance = self._explained_variance(batch_indices, states, rewards, best_genome_key)[best_genome_key]
+                    policy_acc = np.nan
+                # explained_variance = self._explained_variance(batch_indices, states, rewards, best_genome_key)[best_genome_key]
                 policy_reduction = 1 if len(policy_accuracy) <= 1 else sorted(
                     list(policy_accuracy.keys()), key=lambda k: policy_accuracy[k]
                 ).index(best_genome_key) / (len(policy_accuracy)-1)
@@ -310,7 +310,7 @@ class NEAT(Algorithm):
             with torch.no_grad():
                 self.logging.update(
                     ep_len_mean=ep_len_mean, ep_len_std=ep_len_std, ep_rew_mean=ep_rew_mean, ep_rew_std=ep_rew_std,
-                    policy_acc=policy_acc, explained_variance=explained_variance, std=std,
+                    std=std, policy_acc=policy_acc, # explained_variance=explained_variance,
                 )
 
                 # Rollout
@@ -334,7 +334,7 @@ class NEAT(Algorithm):
 
                 # Training
                 extra = 'policy/'
-                self.writer.add_scalar(extra+'explained_variance', explained_variance, self.updates_done)
+                # self.writer.add_scalar(extra+'explained_variance', explained_variance, self.updates_done)
                 self.writer.add_scalar(extra+'policy_accuracy', policy_acc, self.updates_done)
                 self.writer.add_scalar(extra+'policy_reduction', policy_reduction, self.updates_done)
                 # self.writer.add_scalar(extra+'kl_divergence', kl_divergence, self.updates_done)
@@ -388,7 +388,7 @@ class NEAT(Algorithm):
                     f"\n|\t{'updates_done': <25}| {self.updates_done: <21} |"
                     # f"\n|\t{'weight_mutate_power': <25}| {self.population.config.genome.weight_mutate_power: <21} |"
                     # f"\n|\t{'bias_mutate_power': <25}| {self.population.config.genome.bias_mutate_power: <21} |"
-                    f"\n|\t{'explained_variance': <25}| {explained_variance: <21} |"
+                    # f"\n|\t{'explained_variance': <25}| {explained_variance: <21} |"
                     f"\n|\t{'std': <25}| {std: <21} |"
                     f"\n|\t{'policy_accuracy': <25}| {policy_acc: <21} |"
                     # f"\n|\t{'reward_accuracy': <25}| {reward_acc: <21} |"

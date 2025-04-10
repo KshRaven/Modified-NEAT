@@ -554,13 +554,6 @@ class Population(object):
             if key in dictionary:
                 del dictionary[key]
 
-        genera_to_remove = [genus for genus in self.genera if not np.any([self.genomes[key].genus == genus for key in keys])]
-        for genus in genera_to_remove:
-            remove(self.modules, genus)
-            remove(self.best_genomes, genus)
-            remove(self.rankings, genus)
-            remove(self.legends, genus)
-
         gm = self.get_mapping(consolidated=False, grouped=False)
         if not isinstance(gm, tuple):
             gm = (gm,)
@@ -570,8 +563,10 @@ class Population(object):
             module = self.modules[genus]
 
             for parameter in module.neat_parameters():
-                indices_to_keep = torch.tensor([parameter.mapping[key] for key in keys if key in parameter.mapping],
-                                               device=parameter.device if not device else device, dtype=torch.int64)
+                indices_to_keep = torch.unique(
+                    torch.tensor([parameter.mapping[key] for key in new_genomes.keys() if key in parameter.mapping],
+                                 device=parameter.device if not device else device, dtype=torch.int64)
+                )
                 update = torch.index_select(parameter.data.to(parameter.device if not device else device),
                                             dim=0, index=indices_to_keep)
                 new_updates[parameter.param_index] = update
@@ -592,6 +587,13 @@ class Population(object):
                             setattr(sub_module, label, attr.to(device))
                     if hasattr(sub_module, 'device'):
                         sub_module.device = device
+
+        genera_to_remove = [genus for genus in self.genera if not np.any([self.genomes[key].genus == genus for key in keys])]
+        for genus in genera_to_remove:
+            remove(self.modules, genus)
+            remove(self.best_genomes, genus)
+            remove(self.rankings, genus)
+            remove(self.legends, genus)
 
         genomes_to_remove = [key for key in self.genomes.keys() if key not in keys]
         for key in genomes_to_remove:
