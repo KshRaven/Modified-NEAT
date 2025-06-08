@@ -264,6 +264,8 @@ class BatchNorm(NeatModule):
         return tensor
 
 
+# ---------- Convolution ----------
+
 class Convolution(NeatModule):
     def __init__(self, channels_in: int, channels_out: int, kernel_size: Union[int, Iterable[int]], stride=1,
                  dilation=1, padding: Union[int, Iterable[int]] = 0, padding_mode='zeros', groups=1,
@@ -482,6 +484,15 @@ class Conv3d(Convolution):
                  device=torch.device('cpu'), dtype=torch.float32):
         super(Conv3d, self).__init__(channels_in, channels_out, kernel_size, stride, dilation, padding, padding_mode,
                                      groups, 3, bias, device, dtype)
+
+
+# ---------- Pooling ----------
+
+# TODO: Implement Max Pooling
+class MaxPooling(NeatModule):
+    def __init__(self):
+        super(MaxPooling, self).__init__()
+        self.output_size = ...
 
 
 class Identity(nn.Module):

@@ -15,7 +15,7 @@ from ModifiedNEAT.util.storage import save, load
 from ModifiedNEAT.util.datetime import eta, clock
 from ModifiedNEAT.util.replay import ReplayBuffer
 
-from typing import Union, Iterable
+from typing import Union, Iterable, Any
 from numba import njit
 from numba.typed import List, Dict
 from itertools import count
@@ -454,7 +454,7 @@ class Population(object):
             }
             species.append(specie_dict)
         # ------------------------------ State ------------------------------ #
-        state = {
+        state: dict[str, Any] = {
             'genera': genera,
             'generation': self.generation,
             'module_state': module_state,
@@ -474,16 +474,17 @@ class Population(object):
         return state, file_no
 
     def load_dict(self, save_state: dict = None, name: str = None, directory: str = None, file_no: int = None, verbose: int = None):
-        if save_state is None and name is not None:
-            if directory is None:
-                directory = 'neat_save'
-            file = load(name, directory, file_no, items_name='NEAT Population')
-            if file is not None:
-                save_state: dict = file
+        if save_state is None:
+            if name is not None:
+                if directory is None:
+                    directory = 'neat_save'
+                file = load(name, directory, file_no, items_name='NEAT Population')
+                if file is not None:
+                    save_state: dict = file
+                else:
+                    return
             else:
-                return
-        else:
-            raise ValueError(f"Cannot load save state with no save_dict nor filename")
+                raise ValueError(f"Cannot load save state with no save_dict nor filename")
 
         gts = clock.perf_counter()
         # ------------------------------ General ------------------------------ #
@@ -502,7 +503,8 @@ class Population(object):
             ud += 1
             eta(ts, ud, ut, f'loading {len(genomes_data)}')
         self.reproduction.genome_indexer.set(save_state['genome_indexer'])
-        print(f"\rloaded genomes in {round(clock.perf_counter() - ts, 2)}s")
+        if verbose:
+            print(f"\rloaded genomes in {round(clock.perf_counter() - ts, 2)}s")
         # ------------------------------ Modules' Params ------------------------------ #
         modules_params = save_state['module_state']
         for (genus_depr, module), (genus, params) in zip(list(self.modules.items()), list(modules_params.items())):
@@ -535,13 +537,13 @@ class Population(object):
             ud += 1
             eta(ts, ud, ut, 'loading species')
         self.species_set.species_indexer.set(save_state['species_indexer'])
-        print(f"\rloaded species in {round(clock.perf_counter() - ts, 2)}s")
-
-        print(f"Loaded NEAT Population species in {round(clock.perf_counter() - gts, 2)}s")
+        if verbose:
+            print(f"\rloaded species in {round(clock.perf_counter() - ts, 2)}s")
+            print(f"Loaded NEAT Population species in {round(clock.perf_counter() - gts, 2)}s")
 
         speciate(
             self.config, self.genera, self.modules, self.species_set, self.genomes, self.generation,
-            tpb=self.threads_per_block, verbose=verbose
+            tpb=self.threads_per_block, verbose=verbose if verbose and verbose >= 2 else False
         )
 
     def crop(self, keys: Union[int, Iterable[int]], device: torch.device = None):

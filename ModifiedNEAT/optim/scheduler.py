@@ -65,7 +65,8 @@ class CosineAnnealing(Scheduler):
         value = self.get(param)
         if self.log_scaling:
             if value == 0:
-                raise ValueError(f"0 value encountered during Cosine Log scheduling")
+                # raise ValueError(f"0 value encountered during Cosine Log scheduling")
+                self.log_scaling = False
         max = value
         min = value * self.factor
         if min > max:
@@ -90,28 +91,53 @@ class CosineAnnealing(Scheduler):
             self.reset()
 
 
+class RandomAnnealing(Scheduler):
+    def __init__(self, config: Config, min: float, max: float, params: Union[str, list[str]] = None, log=False):
+        assert max > min
+        super(RandomAnnealing, self).__init__(config, params)
+        for param in self.params:
+            assert min <= self.get(param, config) <= max
+
+        self.log_scaling = log
+        self.min = min
+        self.max = max
+
+    def modify(self, param: str):
+        min, max = self.min, self.max
+        if self.log_scaling:
+            min, max = np.log10(min), np.log10(max)
+        diff = max - min
+        scale = np.random.rand() * diff
+        new_value = min + scale
+        if self.log_scaling:
+            new_value = 10 ** new_value
+        self.set(param, new_value)
+
+
+
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import matplotlib
+    import torch.optim as optim
 
     matplotlib.use('tkagg')
 
-    config = Config('scheduler_test')
-    config.genome.weight_mutate_power = 1.0
-    config.reproduction.elitism = 40
-    config.save()
-    config.load(2)
+    CONFIG = Config('scheduler_test')
+    CONFIG.genome.weight_mutate_power = 1.0
+    CONFIG.reproduction.elitism = 40
+    CONFIG.save()
+    CONFIG.load(2)
 
     schedulers = [
-        CosineAnnealing(config, 10, 0.001, warm=True, log=True),
-        CosineAnnealing(config, 20, 1.5, 'elitism', log=True)
+        CosineAnnealing(CONFIG, 10, 0.001, warm=True, log=True),
+        CosineAnnealing(CONFIG, 20, 1.5, 'elitism', log=True)
     ]
 
     plot0 = []
     plot1 = []
     for _ in range(52):
-        plot0.append(config.genome.weight_mutate_power)
-        plot1.append(config.reproduction.elitism)
+        plot0.append(CONFIG.genome.weight_mutate_power)
+        plot1.append(CONFIG.reproduction.elitism)
 
         for s in schedulers:
             s.step()

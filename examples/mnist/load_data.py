@@ -20,7 +20,8 @@ class MnistDataloader(object):
 
     @staticmethod
     def read_images_labels(genomes: int, images_filepath: str, labels_filepath: str, max_records: int = None,
-                           resize: tuple[int, int] = None, rand_rot=False, rand_flip=False, batch_size=64,
+                           resize: tuple[int, int] = None, rand_rot=False, rand_flip=False,
+                           batch_size=64, normalize=True,
                            device=torch.device('cpu'), dtype=torch.float32):
         # Load images
         with open(images_filepath, 'rb') as file:
@@ -103,24 +104,27 @@ class MnistDataloader(object):
             # for batch in get_batches(get_indices([2, 4, 5, 6, 7, 9]), batch_size, True):
             #     images[batch] = transforms.RandomRotation(random.choice(rotations180))(images[batch])
 
+        if normalize:
+            images = images / 255
+
         def genome_expansion(tensor: torch.Tensor):
             shape = tensor.shape
             return tensor.unsqueeze(0).expand(genomes, *shape)
 
         print(f"Loaded {len(images)} records.")
-        return genome_expansion(images).to(device, dtype) / 255, genome_expansion(labels).to(device)
+        return genome_expansion(images).to(device, dtype), genome_expansion(labels).to(device)
 
     def load_data(self, genomes: int, train_records: int = None, eval_records: int = None,
-                  resize: tuple[int, int] = None, rand_rot=False, rand_flip=False, batch_size=64,
+                  resize: tuple[int, int] = None, rand_rot=False, rand_flip=False, batch_size=64, normalize=True,
                   device=torch.device('cpu'), dtype=torch.float32):
         train_inp, train_out = self.read_images_labels(
             genomes, self.train_images_filepath, self.train_labels_filepath,
-            train_records, resize, rand_rot, rand_flip, batch_size,
+            train_records, resize, rand_rot, rand_flip, batch_size, normalize,
             device, dtype
         )
         eval_inp, eval_out = self.read_images_labels(
             genomes, self.eval_images_filepath, self.eval_labels_filepath,
-            eval_records, resize, False, False, None,
+            eval_records, resize, False, False, None, normalize,
             device, dtype
         )
         return (train_inp, train_out), (eval_inp, eval_out)

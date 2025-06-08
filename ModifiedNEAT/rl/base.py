@@ -53,7 +53,7 @@ class Algorithm(object):
         self.device: torch.device       = device
         self.dtype: torch.dtype         = dtype
         self.episode_mapping: dict[int, int] = {}
-        self.episode_lengths: dict[int, int] = None
+        self.episode_lengths: dict[int, int] = {}
         # ------------------------------ Tensorboard logging ------------------------------ #
         from ModifiedNEAT.util.storage import STORAGE_DIR
 
@@ -111,6 +111,55 @@ class Algorithm(object):
 
     def reset_buffers(self):
         self.replay.reset()
+
+    # TODO: Might have to remove envs parameter because of redundancy
+    def handle_episode_mapping(
+            self, terminated: Union[bool, list[bool]], envs: Union[Any, list[Any]] = None,
+            force_reset: bool | list[bool] = False
+    ):
+        # Type handling and error catching
+        if isinstance(terminated, bool):
+            terminated = [terminated]
+        if envs is not None and not isinstance(envs, (list, tuple)):
+            envs = [envs]
+            assert len(terminated) == len(envs)
+        if isinstance(force_reset, bool):
+            force_reset = [force_reset for _ in range(len(terminated))]
+        assert len(terminated) == len(force_reset)
+
+        # Handle episode mapping
+        completions: list[bool] = terminated \
+            if envs is None or any([not hasattr(env, 'done') for env in envs]) \
+            else [env.done for env in envs]
+        if any(completions) or any(force_reset) or len(self.episode_mapping) == 0:
+            # Give env new mapping if it is done
+            self.episode_mapping: dict[int, int] = {
+                # Assign new mapping for each env if has been terminated
+                env_idx: next(self.mapping_indexer)
+                if any([self.episode_mapping.get(env_idx) is None, done, force_reset[env_idx]])
+                # Else assign old mapping if not done
+                else self.episode_mapping[env_idx]
+                for env_idx, done in enumerate(completions)
+            }
+            # Delete invalid ep mapping; NOTE: For the case where num of envs change
+            for env_idx in list(self.episode_mapping.keys()):
+                if 0 > env_idx > len(terminated) - 1:
+                    del self.episode_mapping[env_idx]
+            # Delete invalid episode maps
+            mapping_list = list(self.episode_mapping.values())
+            for ep_map in list(self.episode_lengths.keys()):
+                if ep_map not in mapping_list:
+                    del self.episode_lengths[ep_map]
+            # Initialize the episode lengths mapping for new episodes
+            assert len(self.episode_mapping) == len(force_reset)
+            for env_idx, env_map in enumerate(mapping_list):
+                # Init for episodes that are not in dict, been completed or forcefully reset
+                if self.episode_lengths.get(env_map) is None or completions[env_idx] or force_reset[env_idx]:
+                    self.episode_lengths[env_map] = 0
+        # TODO: Check if still necessary. Reset episode lengths after training run regardless if env was not done.
+        if self.steps_done == self.prev_steps_done:
+            for ep_map in self.episode_lengths.keys():
+                self.episode_lengths[ep_map] = 0
 
     def init_limit(self, steps: int):
         """
@@ -237,10 +286,23 @@ class Algorithm(object):
         return returns, advantages
 
     @staticmethod
-    def compute_returns(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False,
-                        episodes: dict[int, list[int]] = None, device: torch.device = None):
+    def compute_returns_static(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False,
+                        episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None):
         keys = list(rewards.keys())
-        max_records = int(np.max([tensor.shape for tensor in rewards.values()]))
+        try:
+            max_records = int(np.max([tensor.shape for tensor in rewards.values()]))
+        except Exception as e:
+            zero_rew_num = np.count_nonzero([len(tensor) for tensor in rewards.values()])
+            print(CM(
+                f"\nThe number of genomes with 0 rewards are {zero_rew_num}/{len(rewards)}:\n" + (
+                    f"\tgenomes = {len(self.replay.data)}"
+                    f"\tmin_size = {self.replay.min_size()}"
+                    f"\tmax_size = {self.replay.max_size()}"
+                    f"\n"
+                ) if self is not None else '',
+                Fore.MAGENTA
+            ))
+            raise e
         if episodes is None:
             episodes = {key: [0 for _ in range(max_records)] for key in keys}
 
@@ -282,6 +344,10 @@ class Algorithm(object):
             returns[key] = cm
         return returns
 
+    def compute_returns(self, rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False,
+                        episodes: dict[int, list[int]] = None, device: torch.device = None):
+        return self.compute_returns_static(rewards, gamma, alpha, reverse, episodes, device, self)
+
     def get_accuracy(self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
                      rewards: TensorDict = None, error=0.10, type='continuous', verbose: int = None,
                      keys: Union[int, list[int]] = None) -> tuple[dict[int, float], dict[int, float]]:
@@ -302,7 +368,7 @@ class Algorithm(object):
                         observation = observations[key][batch].to(self.device)
 
                         # Get action accuracy
-                        action      = actions[key][batch].to(self.device)
+                        action = actions[key][batch].to(self.device)
                         action_pred: Tensor = self.get_module(key).get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
                         try:
                             if type == 'continuous':
