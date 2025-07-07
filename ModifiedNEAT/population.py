@@ -521,7 +521,7 @@ class Population(object):
             self.modules[genus] = module
         # ------------------------------ Evaluations ------------------------------ #
         best_genome_keys = save_state.get('best_genomes')
-        if best_genome_keys is not None:
+        if best_genome_keys is not None and all([key is not None for key in best_genome_keys.values()]):
             self.best_genomes = {genus: self.genomes.get(key) for genus, key in best_genome_keys.items()}
         avatars = save_state.get('avatars')
         if avatars is not None:

@@ -557,21 +557,30 @@ class RModel(Model):
         return value
 
 
+def fix(value: float, default: float = 1):
+    if np.isinf(value) or np.isnan(value):
+        return default
+    else:
+        return value
+
+
 # Network
-GENOMES     = 25
+GENOMES     = 100
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 32
-KERNEL_SIZE = 3
-NORM_GROUPS = 2
-SEQ_LEN     = 4
-LAYERS      = 3
-HEADS       = 2
+EMBED_SIZE  = 64
+KERNEL_SIZE = 1
+NORM_GROUPS = 1
+SEQ_LEN     = 1
+LAYERS      = 1
+HEADS       = 1
 KV_HEADS    = None
 ENABLE_BIAS = False
 DIFFERENTIAL = False
+MEMORY_SIZE = 5
 GAMMA       = np.exp(np.log(0.10) / 16)
-ALPHA       = np.exp(np.log(1.5) / (5 - 1))
+ALPHA       = fix(np.exp(np.log(1.5) / (MEMORY_SIZE - 1)), 1.0)
+BETA        = None # fix(np.exp(np.log(1.5) / (5 - 1)), 1.0)
 LOSS_REG    = 0.
 
 # MODEL = Reformer(INPUTS, OUTPUTS, 1, EMBED_SIZE, SEQ_LEN, LAYERS, HEADS, KV_HEADS, True, 0.1, ENABLE_BIAS,
@@ -587,9 +596,8 @@ MODEL1 = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS
 INIT_GEN: int = None
 
 RUNS = 1
-LIMIT = 30
+LIMIT = 40
 STEPS = LIMIT * 100 * RUNS
-MEMORY_SIZE = 3
 
 
 def evaluate(population: neat.Population, **options):
@@ -611,7 +619,7 @@ def evaluate(population: neat.Population, **options):
     for genome in population.genomes.values():
         genome.fitness = 0
 
-    trainer.deque_episodes_secondary(MEMORY_SIZE-1)
+    trainer.deque_episodes(MEMORY_SIZE-1)
     terminate = False
     start = 0
     run_step = 0
@@ -718,7 +726,7 @@ def evaluate(population: neat.Population, **options):
                     del v
                 # print(f"\rO = {outputs.flatten().cpu().numpy()} SCORE: = {game.birds.score.cpu().numpy()}", end='')
 
-                round_end = (game.birds.active() == 0 and game_step == RUNS-1) # or game.score >= LIMIT
+                round_end = (game.birds.active() == 0 and game_step == RUNS-1) or game.score >= LIMIT
                 terminate = trainer.update(observations, actions, rewards, round_end, round_end)
 
                 alive = round((torch.sum(~game.birds.dead) / game.birds.dead.numel() * 100).item(), 2)
@@ -770,19 +778,19 @@ def run():
     # Configuration
     print(f"creating config")
     config = neat.Config()
-    config.genome.init_type             = 'normal'
+    config.genome.init_type             = 'uniform'
     config.genome.weight_init_mean      = 0
     config.genome.weight_init_std       = 0.5
     config.genome.weight_min_value      = -np.inf
     config.genome.weight_max_value      = np.inf
-    config.genome.weight_mutate_power   = 1e-3
-    config.genome.weight_mutate_rate    = 0.70
-    config.genome.weight_replace_rate   = 0.01
+    config.genome.weight_mutate_power   = 1e-2
+    config.genome.weight_mutate_rate    = 0.75
+    config.genome.weight_replace_rate   = 0.03
     config.reproduction.min_species_size = GENOMES
     config.reproduction.purge           = 1
     config.reproduction.survival_threshold = 0.10
     config.reproduction.cross_threshold = 0.05
-    config.reproduction.elitism         = 10
+    config.reproduction.elitism         = 15
     config.species.compatibility_threshold = np.inf
     config.stagnation.max_stagnation    = 1
     config.stagnation.species_elitism   = 3
@@ -795,26 +803,27 @@ def run():
     population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
     population.absorb_population(population1)
     print(MODEL.pol_proj)
-    # population.load_dict(name='flappy_bird', file_no=None)
+    population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.NEAT(
         population,
         schedulers=[
-            # neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_mutate_power', True, True),
+            neat.optim.scheduler.CosineAnnealing(config, 25, 100., 'weight_mutate_power', True, True),
             neat.optim.scheduler.CosineAnnealing(config, 10, 0.01, 'weight_mutate_rate', True, True),
-        ], device=DEVICE, dtype=DTYPE,
+        ],
+        device=DEVICE, dtype=DTYPE,
         log_sub_dir='flappy_bird\\',
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
-        gamma=GAMMA, alpha=ALPHA, reverse=True,
+        gamma=GAMMA, alpha=ALPHA, beta=BETA, reverse=True,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
     )
 
     # Run for up to 50 generations.
     print(f"starting evaluation: population={len(population.genomes)}")
     # trainer.load(name='flappy_bird', file_no=None)
-    trainer.learn(evaluate, STEPS, 50, 2048, 0.1, 'binary', 2)
+    trainer.learn(evaluate, STEPS, 100, 2048, 0.1, 'binary', 2)
 
     # while True:
     #     evaluate(population, trainer=trainer)

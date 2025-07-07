@@ -80,8 +80,8 @@ class ReproductionConfig(Configuration):
         self.clone_threshold    = 0.00
         self.survival_threshold = 0.10
         self.cross_threshold    = 0.00
-        self.cross_multiplier   = 1
-        self.darwin_multiplier  = 1
+        self.cross_multiplier   = 0.75
+        self.darwin_multiplier  = 0.00
         self.min_species_size   = 100
         self.purge              = 0
 

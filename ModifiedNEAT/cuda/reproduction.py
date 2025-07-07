@@ -108,13 +108,19 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
             multiplier_cross = 1
         if multiplier_fitness is None:
             multiplier_fitness = 1
-        factors = np.array([(g.fitness if g.genus == main_genus else g.fitness * multiplier_cross) * multiplier_fitness
-                            for g in genomes])
+        factors = np.array([
+            (g.fitness if g.genus == main_genus else g.fitness * multiplier_cross) * multiplier_fitness
+            for g in genomes
+        ])
         maximum = np.max(factors)
-        minimum = np.min(factors) + 1e-8
+        minimum = np.min(factors)
+        if maximum == minimum:
+            minimum += 1e-12
         probabilities = np.full(len(genomes), 0.0)
         for i, p in enumerate(factors):
-            probabilities[i] = (p - minimum) / (maximum - minimum) * np.random.rand()
+            probabilities[i] = np.random.rand()
+            if multiplier_fitness > 0:
+                probabilities[i] *= (p - minimum) / (maximum - minimum)
         return genomes[np.argmax(probabilities)]
 
     # Populate global genera members

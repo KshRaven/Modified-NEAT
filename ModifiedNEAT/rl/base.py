@@ -49,6 +49,7 @@ class Algorithm(object):
         self.prev_episodes_done         = self.episodes_done
         self.updates_done               = 0
         self.batch_size                 = manage_params(options, 'batch_size', 512)
+        self.terminated                 = False
         # ------------------------------ States ------------------------------ #
         self.device: torch.device       = device
         self.dtype: torch.dtype         = dtype
@@ -85,7 +86,7 @@ class Algorithm(object):
         episode_mapping: dict[int, list[int]] = self.replay.rollout(buffers='ep_map', as_list=True)[0]
         for key in self.replay.mapping.keys():
             episodes_to_del = torch.tensor([ep for ep in range(self.episodes_done) if ep < (self.episodes_done-episodes)])
-            mapping = torch.tensor(episode_mapping[key])
+            mapping         = torch.tensor(episode_mapping[key])
             episode_filter  = torch.isin(mapping, episodes_to_del)
             record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
             # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
@@ -131,12 +132,12 @@ class Algorithm(object):
         completions: list[bool] = terminated \
             if envs is None or any([not hasattr(env, 'done') for env in envs]) \
             else [env.done for env in envs]
-        if any(completions) or any(force_reset) or len(self.episode_mapping) == 0:
+        if any(completions) or any(force_reset) or len(self.episode_mapping) == 0 or self.terminated:
             # Give env new mapping if it is done
             self.episode_mapping: dict[int, int] = {
                 # Assign new mapping for each env if has been terminated
                 env_idx: next(self.mapping_indexer)
-                if any([self.episode_mapping.get(env_idx) is None, done, force_reset[env_idx]])
+                if any([self.episode_mapping.get(env_idx) is None, done and not self.terminated, force_reset[env_idx] and not self.terminated])
                 # Else assign old mapping if not done
                 else self.episode_mapping[env_idx]
                 for env_idx, done in enumerate(completions)
@@ -147,9 +148,10 @@ class Algorithm(object):
                     del self.episode_mapping[env_idx]
             # Delete invalid episode maps
             mapping_list = list(self.episode_mapping.values())
-            for ep_map in list(self.episode_lengths.keys()):
-                if ep_map not in mapping_list:
-                    del self.episode_lengths[ep_map]
+            if self.terminated:
+                for ep_map in list(self.episode_lengths.keys()):
+                    if ep_map not in mapping_list:
+                        del self.episode_lengths[ep_map]
             # Initialize the episode lengths mapping for new episodes
             assert len(self.episode_mapping) == len(force_reset)
             for env_idx, env_map in enumerate(mapping_list):
@@ -167,6 +169,7 @@ class Algorithm(object):
         :param steps:
         """
         self.steps_limit = self.steps_done + steps
+        self.terminated = False
 
     def get_batches(self, keys: list[int], batch_size: int = None, shuffle=False):
         batches = {}

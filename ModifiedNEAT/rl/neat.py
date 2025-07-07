@@ -4,18 +4,15 @@ from ModifiedNEAT.population import Population
 from ModifiedNEAT.rl.base import Algorithm, TensorDict
 from ModifiedNEAT.optim.scheduler import Scheduler
 from ModifiedNEAT.util import ReplayBuffer
-from ModifiedNEAT.util.datetime import unix_to_datetime_file, eta, clock
+from ModifiedNEAT.util.datetime import eta, clock
 from ModifiedNEAT.util.qol import manage_params
-from ModifiedNEAT.util.storage import STORAGE_DIR
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
 from torch import Tensor
-from typing import Union, Iterable, Any
-from numpy import ndarray as CPUArray
+from typing import Union, Iterable
 
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 
 
 class NEAT(Algorithm):
@@ -55,7 +52,7 @@ class NEAT(Algorithm):
         # Options
         self.gamma: float       = manage_params(options, 'gamma', 0.95)
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
-        self.beta: float        = manage_params(options, 'beta', 1.00)
+        self.beta: float | None = manage_params(options, 'beta', None)
         self.reverse: bool      = manage_params(options, 'reverse', True)
         self.epsilon: float     = manage_params(options, 'epsilon', 1e-10)
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
@@ -140,33 +137,39 @@ class NEAT(Algorithm):
 
                 if self.steps_done >= self.steps_limit or force_stop:
                     self.prev_steps_done = self.steps_done
+                    self.terminated = True
                     filled = True
                 else:
                     if ended:
                         self.episode_mapping[idx] = next(self.mapping_indexer)
                         self.episode_lengths[self.episode_mapping[idx]] = 0
         else:
-            raise RuntimeError(f"Steps have already been filled.")
+            if self.steps_done >= self.steps_limit:
+                raise RuntimeError(f"Steps have already been filled.")
 
         return filled
 
-    def calculate_scores(self, scores: TensorDict):
+    def calculate_scores(self, raw_scores: dict[int, float]) -> dict[int, float]:
         # Add the keys that have been removed by validation
-        min_score = min(list(scores.values()))
+        min_score = min(list(raw_scores.values()))
         for key in self.score_buffer.mapping.keys():
-            if key not in scores:
-                scores[key] = min_score - self.epsilon
-        # Re-arrange scores for buffer update
-        scores = {key: scores[key] for key in self.score_buffer.mapping.keys()}
-        fitnesses = np.array(list(scores.values()))
+            if key not in raw_scores:
+                raw_scores[key] = min_score - self.epsilon
+        # Re-arrange raw_scores for buffer update
+        raw_scores = {key: raw_scores[key] for key in self.score_buffer.mapping.keys()}
+        new_fitnesses = np.array(list(raw_scores.values()))
 
-        self.score_buffer.update(score=fitnesses, ep_map=self.score_idx)
         self.score_idx += 1
-        scores, episode_mapping = self.score_buffer.rollout(['score', 'ep_map'], as_list=True, stack=True)
-        self.sort_episodes(episode_mapping, scores)
-        true_scores = self.compute_returns(scores, 0, self.beta, self.reverse, episode_mapping)
+        if self.beta is not None:
+            self.score_buffer.update(score=new_fitnesses, ep_map=self.score_idx)
+            scores, episode_mapping = self.score_buffer.rollout(['score', 'ep_map'], as_list=True, stack=True)
+            self.sort_episodes(episode_mapping, scores)
+            true_scores = self.compute_returns(scores, 0, self.beta, self.reverse, episode_mapping)
+            true_scores = {k: torch.mean(t, dim=-1).item() for k, t in true_scores.items()}
+        else:
+            true_scores = raw_scores
 
-        return {k: torch.mean(t, dim=-1).item() for k, t in true_scores.items()}
+        return true_scores
 
     def set_scores(self, scores: dict[int, float], policy: dict[int, float]):
         assert all([key in policy for key in scores.keys()])
@@ -226,7 +229,9 @@ class NEAT(Algorithm):
             # Running environment to collect rollout data
             ts = clock.perf_counter()
             self.init_limit(steps)
+            self.terminated = False
             self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
+            self.handle_episode_mapping(False, None, False)
             run_time = clock.perf_counter() - ts
             if verbose and verbose >= 2:
                 print(f"collected data in {CM(f'{round(run_time, 2)}s', Fore.LIGHTCYAN_EX)}")
@@ -275,6 +280,11 @@ class NEAT(Algorithm):
                     ])
                     for key in valid_keys
                 }
+                # unique_ep_count = {key: len(np.unique(episode_mapping[key])) for key in valid_keys}
+                # if verbose and verbose >= 2:
+                #     print(f"highest episode count is {CM(max(list(unique_ep_count.values())), Fore.LIGHTMAGENTA_EX)}")
+                # scores = self.calculate_scores(raw_scores)
+                # scores = {key: scores[key] for key in valid_keys}
 
                 # Get batches wrt. steps done per key
                 batch_indices = self.get_batches(valid_keys, batch_size, True)
@@ -335,12 +345,12 @@ class NEAT(Algorithm):
                     try:
                         params = []
                         if key is not None:
-                            for param in self.get_module(key).neat_parameters():
-                                params.append(param[key].flatten())
+                            for p in self.get_module(key).neat_parameters():
+                                params.append(p[key].flatten())
                         else:
                             for module in self.models:
-                                for param in module.neat_parameters():
-                                    params.append(param[key].flatten())
+                                for p in module.neat_parameters():
+                                    params.append(p[key].flatten())
                         params = torch.cat(params)
                         return torch.mean(params).cpu().item(), torch.std(params).cpu().item(), \
                                torch.max(params).cpu().item(), torch.min(params).cpu().item()
@@ -452,7 +462,10 @@ class NEAT(Algorithm):
                                     terminate_skip=True)
 
             epoch_done += 1
-            self.deque_steps(0)
+            if self.beta is not None:
+                self.deque_steps(0)
+            else:
+                self.deque_steps_secondary(0)
 
     def _explained_variance(self, batches: dict[int, list[list[int]]], states: TensorDict, rewards: TensorDict,
                             keys: Union[int, list[int]] = None):
