@@ -347,9 +347,9 @@ class RoPE(NeatModule):
 
 
 class AttentionLambda(NeatModule):
-    def __init__(self, heads: int, head_dim: int, layer_idx: int = None, lambdas=1, init_mean=0., init_std=0.1,  epsilon=1e-8,
-                 device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
-        super(AttentionLambda, self).__init__()
+    def __init__(self, heads: int, head_dim: int, layer_idx: int = None, lambdas=1, init_mean=0., init_std=0.1,
+                 affine=True, epsilon=1e-8, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
+        super(AttentionLambda, self).__init__(heads=heads, head_dim=head_dim, lambdas=lambdas, affine=affine)
         if layer_idx is None:
             layer_idx = 0
 
@@ -358,7 +358,8 @@ class AttentionLambda(NeatModule):
         self.q2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
         self.k1 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
         self.k2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
-        self.init = 0.8 - 0.6 * np.exp(-0.3 * layer_idx)
+        self.init = 0.8 - 0.6 * np.exp(-0.3 * layer_idx) if not affine else \
+            NeatParameter((heads,), requires_grad=False, device=device, dtype=dtype)
         self.exponents = (torch.arange(lambdas, device=device, dtype=dtype) + 1).unsqueeze(0).unsqueeze(0)
         self.multipliers = torch.pow(-1, self.exponents)
         self.eps = epsilon
@@ -372,6 +373,9 @@ class AttentionLambda(NeatModule):
         self.min_val = init_mean - init_std*2
         self.max_val = init_mean + init_std*2
 
+    def biases(self, tensor, keys):
+        return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, keys=keys)
+
     def update_limit(self):
         for param in self.neat_parameters():
             with torch.no_grad():
@@ -381,14 +385,13 @@ class AttentionLambda(NeatModule):
         # query:     (batch_size, q_len, heads, head_dim)
         # key:       (batch_size, k_len, heads, head_dim)
         # attention: (batch_size, heads, q_len, k_len)
-        q1 = self.q1[keys] # F.hardtanh(self.q1, self.min_val, self.max_val)
-        k1 = self.k1[keys] # F.hardtanh(self.k1, self.min_val, self.max_val)
-        q2 = self.q2[keys] # F.hardtanh(self.q2, self.min_val, self.max_val)
-        k2 = self.k2[keys] # F.hardtanh(self.k2, self.min_val, self.max_val)
+        q1 = self.q1[keys] # F.tanh(self.q1[keys], self.min_val, self.max_val)
+        k1 = self.k1[keys] # F.tanh(self.k1[keys], self.min_val, self.max_val)
+        q2 = self.q2[keys] # F.tanh(self.q2[keys], self.min_val, self.max_val)
+        k2 = self.k2[keys] # F.tanh(self.k2[keys], self.min_val, self.max_val)
+        base = torch.exp(torch.sum(q1 * k1, -2)) - torch.exp(torch.sum(q2 * k2, -2))
         return (
-            (
-                torch.exp(torch.sum(q1 * k1, -2)) - torch.exp(torch.sum(q2 * k2, -2)) + self.init
-            ) * self.multipliers # ** self.exponents * self.multipliers
+            (base  + self.biases(base, keys)) * self.multipliers # ** self.exponents * self.multipliers
         ).unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
         # Returns shape (genomes, batch_size, heads, lambdas, query_len, key_len)
 
@@ -436,7 +439,7 @@ class Attention(NeatModule):
         self.rotary_embedding = RoPE(max_seq_len, embed_size * self.mult, heads, constant, device, dtype)
         self.softmax    = nn.Softmax(-1)
         self.norm       = nn.RMSNorm(self.head_dim, eps, affine, device, dtype)
-        self.diff_lambda = AttentionLambda(heads, self.head_dim, layer_idx, differential, 0.0, 0.1, eps, device, dtype) if differential else None
+        self.diff_lambda = AttentionLambda(heads, self.head_dim, layer_idx, differential, 0.0, 0.1, True, eps, device, dtype) if differential else None
 
         self.k_cache = torch.zeros(1, max_seq_len, kv_heads, self.head_dim * self.mult, device=device, dtype=dtype)
         self.v_cache = torch.zeros(1, max_seq_len, kv_heads, self.head_dim, device=device, dtype=dtype)
@@ -511,7 +514,7 @@ class Attention(NeatModule):
         # values shape:    (batch_size, value_len, heads, head_dim)
         # attention shape: (batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
-            attention = attention * (1 - self.diff_lambda.init)
+            attention = attention * (1 - self.diff_lambda.biases(attention, keys))
 
         return scores, attention
 
@@ -617,7 +620,7 @@ class ConvSelfAttention(NeatModule):
         self.padding = manage_params(options, 'padding', calc_padding(kernel_size, stride=1, dilation=1))
         self.padding_mode = manage_params(options, 'padding_mode', 'zeros')
         self.constant = manage_params(options, 'constant', 10000)
-        self.epsilon = manage_params(options, 'epsilon', 1e-8)
+        self.epsilon = manage_params(options, 'epsilon', 1e-9)
         self.affine = manage_params(options, 'affine', True)
         self.norm_groups = manage_params(options, 'norm_groups', None)
         self.skip_connection = manage_params(options, ['skip_connection', 'residual'], False)
@@ -637,9 +640,9 @@ class ConvSelfAttention(NeatModule):
         self.kernel_size = kernel_size
         self.bias = bias
 
-        # ModifiedNEAT
+        # MODULES
         self.pre_norm = GroupNorm(
-            self.norm_groups, dim_size, self.epsilon, self.affine, device=device, dtype=dtype
+            self.norm_groups, dim_size, self.epsilon, self.affine, bias, device=device, dtype=dtype
         ) if self.norm_groups else None
         if len(max_pixels) == 1:
             Convolution = Conv1d
@@ -666,7 +669,7 @@ class ConvSelfAttention(NeatModule):
         self.softmax    = nn.Softmax(-1)
         self.head_norm  = RMSNorm(self.head_dim, self.epsilon, self.affine, device, dtype)
         self.diff_lambda = AttentionLambda(
-            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, self.epsilon, device, dtype
+            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, True, self.epsilon, device, dtype
         ) if differential else None
 
         # STATES
@@ -740,7 +743,7 @@ class ConvSelfAttention(NeatModule):
         # values shape:    (batch_size, value_len, heads, head_dim)
         # attention shape: (batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
-            attention = attention * (1 - self.diff_lambda.init)
+            attention = attention * (1 - self.diff_lambda.biases(attention, keys))
 
         return scores, attention
 
@@ -754,6 +757,7 @@ class ConvSelfAttention(NeatModule):
         if verbose:
             print(f'\n{CM("Executing Self Attention", Fore.LIGHTBLUE_EX)}')
 
+        # Get residue and pre-normalize
         residue = tensor if pretext is None else pretext
         if self.pre_norm is not None:
             tensor = self.pre_norm(tensor, keys=keys)
@@ -794,6 +798,7 @@ class ConvSelfAttention(NeatModule):
             print(get_tensor_info(key, 'Duplicated K', verbose))
             print(get_tensor_info(value, 'Duplicated V', verbose))
 
+        # Apply attention
         attention_scores, attention = self.attention(query, key.contiguous(), value.contiguous(), keys,
                                                      self.causal_mask and pretext is None, verbose)
         attention = attention.reshape(batch_size, -1, self.dim_size)
@@ -801,6 +806,7 @@ class ConvSelfAttention(NeatModule):
         if verbose:
             print(get_tensor_info(attention, 'Attented Values', verbose))
 
+        # Apply output projection
         try:
             # Apply weights
             tensor: Tensor = self.out_proj(self.revert(attention, b, c, p), keys=keys)
@@ -808,23 +814,25 @@ class ConvSelfAttention(NeatModule):
             print(CM(f"batch_size={b}, channels={c}, pixels={p}, attention={attention.shape}"
                        f"\nquery={query.shape}, key={key.shape}, value={value.shape}\n", Fore.LIGHTRED_EX))
             raise e
+        # Add the residue
         if self.skip_connection:
             tensor = tensor + residue
         if verbose:
             print(get_tensor_info(tensor, 'Output Projection', verbose))
 
+        # Store attention for debugging
         if not get:
             return tensor
         else:
             return tensor, attention_scores
 
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self.dim_size}, pixels={self.pixels}, kernel_size={self.kernel_size}, " \
-               f"bias={self.bias}{display('hd', self._heads)}{display('kv_hd', self._kv_heads)}" \
-               f"{display('diffs', self.att_coeff_num-1 if self.att_coeff_num else None)}" \
-               f"{display('pad', self.padding)}{display('pad_mode', self.padding_mode, self.padding)}" \
-               f"{display('pre_norm_ng', self.norm_groups)}{display('residual', self.skip_connection)}" \
-               f"{display('as', self.auto_single)}"
+    # def __repr__(self):
+    #     return f"{self.__class__.__name__}({self.dim_size}, pixels={self.pixels}, kernel_size={self.kernel_size}, " \
+    #            f"bias={self.bias}{display('hd', self._heads)}{display('kv_hd', self._kv_heads)}" \
+    #            f"{display('diffs', self.att_coeff_num-1 if self.att_coeff_num else None)}" \
+    #            f"{display('pad', self.padding)}{display('pad_mode', self.padding_mode, self.padding)}" \
+    #            f"{display('pre_norm_ng', self.norm_groups)}{display('residual', self.skip_connection)}" \
+    #            f"{display('as', self.auto_single)}"
 
 
 class ConvCrossAttention(NeatModule):
@@ -897,7 +905,7 @@ class ConvCrossAttention(NeatModule):
         self.softmax    = nn.Softmax(-1)
         self.head_norm  = RMSNorm(self.head_dim, self.epsilon, self.affine, device, dtype)
         self.diff_lambda = AttentionLambda(
-            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, self.epsilon, device, dtype
+            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, True, self.epsilon, device, dtype
         ) if differential else None
 
         # STATES
@@ -971,7 +979,7 @@ class ConvCrossAttention(NeatModule):
         # values shape:    (batch_size, value_len, heads, head_dim)
         # attention shape: (batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
-            attention = attention * (1 - self.diff_lambda.init)
+            attention = attention * (1 - self.diff_lambda.biases(attention, keys))
 
         return scores, attention
 
@@ -1108,6 +1116,9 @@ class ConvSwiGLU(NeatModule):
         super(ConvSwiGLU, self).__init__()
 
         # ATTRIBUTES
+        self.auto_single = manage_params(options, 'auto_single', False)
+        if self.auto_single:
+            kernel_size = 1
         self.dim_size       = dim_size
         self.kernel_size    = kernel_size
         self.bias           = bias
@@ -1128,9 +1139,10 @@ class ConvSwiGLU(NeatModule):
         # hidden_size = mult * ((hidden_size + mult - 1) // mult)
         hidden_size = self.fwd_exp * dim_size
 
-        # ModifiedNEAT
-        self.pre_norm = GroupNorm(self.norm_groups, dim_size, self.epsilon, self.affine, device=device, dtype=dtype
-                                  ) if self.norm_groups else None
+        # BUILD
+        self.pre_norm = GroupNorm(
+            self.norm_groups, dim_size, self.epsilon, self.affine, bias, device=device, dtype=dtype
+        ) if self.norm_groups else None
         Convolution = get_conv(self.image_ndim)
         self.inp_proj = Convolution(dim_size, hidden_size, kernel_size, stride=self.stride, dilation=self.dilation,
                                     padding=self.padding, padding_mode=self.padding_mode,

@@ -174,7 +174,7 @@ class Reproduction:
                 # TODO: Enable custom reproduction functions
                 # repro_function(child, parent1, parent2)
                 # TODO: Enable mutation of offspring
-                # child.mutate(self._config.genome)
+                child.mutate(self._config.genome)
                 new_population[gid] = child
                 self.ancestors[gid] = (parent1, parent2)
                 spawn -= 1

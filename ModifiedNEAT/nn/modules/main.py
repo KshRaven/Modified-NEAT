@@ -53,7 +53,7 @@ class Transformer(NeatModule):
         #
         # # ATTRIBUTES
         # self.max_seq_len = max_seq_len
-        pass
+        raise NotImplementedError()
 
     # @property
     # def genomes_total(self):
@@ -110,17 +110,18 @@ class Conver(NeatModule):
         super(Conver, self).__init__()
         if channels is None:
             channels = dim_size
-        self.enc_layers         = manage_params(options, ['enc_layers', 'encoder_layers'], 0) + 1
+        self.enc_layers         = manage_params(options, ['enc_layers', 'encoder_layers'], 0)
         self.dec_layers         = manage_params(options, ['dec_layers', 'decoder_layers'], 0) + 1
         self.distribution       = manage_params(options, 'distribution', 'normal')
         self.causal_mask        = manage_params(options, 'causal_mask', True)
-        self.epsilon            = manage_params(options, 'epsilon', 1e-6)
+        self.epsilon            = manage_params(options, 'epsilon', 1e-9)
         self.affine             = manage_params(options, 'affine', True)
         self.probabilistic      = manage_params(options, ['prob', 'probabilistic'], False) and self.distribution != 'discrete'
         self.lower_clip         = manage_params(options, 'lower_clip', -20)
         self.upper_clip         = manage_params(options, 'upper_clip', 20)
         self.feedback           = manage_params(options, 'feedback', False)
-        self.trans_kernel_size  = manage_params(options, 'trans_kernel_size', kernel_size)
+        self.init_kernel_size   = manage_params(options, 'init_kernel_size', kernel_size)
+        self.trans_kernel_size  = manage_params(options, 'trans_kernel_size', 1)
 
         # ATTRIBUTES
         self.inputs = inputs if not self.feedback else inputs - self.feedback
@@ -146,7 +147,7 @@ class Conver(NeatModule):
         self.feedback_dropout = Ignore(manage_params(options, ['feedback_drop', 'feedback_dropout'], 0))
         self.encoder = Sequential(
             Transpose(),
-            Conv1d(inputs, dim_size, kernel_size, 1, -1,
+            Conv1d(inputs, dim_size, self.init_kernel_size, 1, -1,
                    padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                    bias=bias, device=device, dtype=dtype),
             *[
@@ -165,15 +166,16 @@ class Conver(NeatModule):
                     ResidualBlock(dim_size, dim_size, kernel_size, norm_groups, bias, device, dtype, **options)
                 )
             else:
-                decoder.append(
-                    GroupNorm(norm_groups, dim_size, self.epsilon, self.affine, bias, device, dtype)
-                )
-                decoder.append(self.activation)
-                decoder.append(
-                    Conv1d(dim_size, outputs, 1, 1,
-                           padding_mode=manage_params(options, 'padding_mode', 'zeros'),
-                           bias=bias, device=device, dtype=dtype)
-                )
+                decoder.extend([
+                    GroupNorm(norm_groups, dim_size, self.epsilon, self.affine, bias, device, dtype),
+                    self.activation,
+                    Conv1d(
+                        dim_size, outputs, 1, 1,
+                        padding_mode=manage_params(options, 'padding_mode', 'zeros'),
+                        bias=bias, device=device, dtype=dtype
+                    ),
+
+                ])
                 if self.sec_actv is not None:
                     decoder.append(self.sec_actv)
                 decoder.append(Transpose(-1, -2))
@@ -188,8 +190,8 @@ class Conver(NeatModule):
 
     def handle_feedback(self, tensor: Tensor, keys: Union[int, list[int]] = None):
         if self.feedback:
+            tensor, feedback = torch.split(tensor, self.inputs, -1)
             try:
-                tensor, feedback = torch.split(tensor, self.inputs, -1)
                 assert feedback.shape[-1] == self.feedback
             except Exception as e:
                 print(f"feedback = {feedback.shape}, feedback_dims = {self.feedback}")
@@ -362,7 +364,7 @@ class Reformer(Model):
         mean        = self.get_mean(source, keys)
         std         = self.get_std(source, keys)
         dist        = self.dist(mean, std, None, None)
-        action      = dist.sample()
+        action      = dist.sample() if self.probabilistic else mean
         if self.sec_actv is not None:
             action = self.sec_actv(action)
         log_prob    = dist.log_prob(action)
@@ -393,7 +395,7 @@ class Reformer(Model):
             if std is not None:
                 print(f"\n{CM('Std =>', Fore.LIGHTCYAN_EX)}\n{std}, \n\tdim = {std.shape}")
         dist    = self.dist(mean, std, None, None)
-        action  = dist.sample()
+        action  = dist.sample() if self.probabilistic else mean
         if self.sec_actv is not None:
             action = self.sec_actv(action)
         if single:
@@ -427,7 +429,7 @@ class Reformer(Model):
         verbose = manage_params(options, 'verbose', None)
         get     = manage_params(options, 'get', False)
         single  = manage_params(options, 'single', False)
-        randomize = manage_params(options, 'randomize', True)
+        randomize = manage_params(options, 'randomize', False)
         noise   = manage_params(options, 'noise', None)
 
         latent  = self.get_latent(self.pol_proj, inputs, keys, pos_idx, verbose, get, single)
@@ -440,7 +442,7 @@ class Reformer(Model):
         else:
             outputs = mean
         if self.sec_actv is not None:
-            action = self.sec_actv(outputs)
+            outputs = self.sec_actv(outputs)
         return outputs
 
     def infer(self, inputs: Tensor, keys: Union[int, Iterable[int]] = None, pos_idx: int = None, verbose: int = None, get=False, single=True):

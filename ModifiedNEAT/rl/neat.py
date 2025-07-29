@@ -118,7 +118,9 @@ class NEAT(Algorithm):
         if isinstance(terminated, bool):
             terminated = [terminated]
 
-        self.handle_episode_mapping(terminated, envs, reset_mapping)
+        if self.steps_done == self.prev_steps_done:
+            self.handle_episode_mapping(terminated, True)
+            self.terminated = False
 
         filled = False
         if self.steps_done < self.steps_limit:
@@ -137,15 +139,15 @@ class NEAT(Algorithm):
 
                 if self.steps_done >= self.steps_limit or force_stop:
                     self.prev_steps_done = self.steps_done
-                    self.terminated = True
+                    self.prev_episodes_done = self.episodes_done
                     filled = True
-                else:
-                    if ended:
-                        self.episode_mapping[idx] = next(self.mapping_indexer)
-                        self.episode_lengths[self.episode_mapping[idx]] = 0
         else:
-            if self.steps_done >= self.steps_limit:
-                raise RuntimeError(f"Steps have already been filled.")
+            raise RuntimeError(f"Steps have already been filled.")
+
+        if filled:
+            self.terminated = True
+        else:
+            self.handle_episode_mapping(terminated, reset_mapping)
 
         return filled
 
@@ -171,8 +173,9 @@ class NEAT(Algorithm):
 
         return true_scores
 
-    def set_scores(self, scores: dict[int, float], policy: dict[int, float]):
-        assert all([key in policy for key in scores.keys()])
+    def set_scores(self, scores: dict[int, float], policy: dict[int, float] | None):
+        if policy is not None:
+            assert all([key in policy for key in scores.keys()])
 
         def sort_key(item: tuple[int, float]):
             key, score = item
@@ -228,10 +231,8 @@ class NEAT(Algorithm):
 
             # Running environment to collect rollout data
             ts = clock.perf_counter()
-            self.init_limit(steps)
-            self.terminated = False
+            self.steps_limit = self.steps_done + steps
             self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
-            self.handle_episode_mapping(False, None, False)
             run_time = clock.perf_counter() - ts
             if verbose and verbose >= 2:
                 print(f"collected data in {CM(f'{round(run_time, 2)}s', Fore.LIGHTCYAN_EX)}")
@@ -291,8 +292,10 @@ class NEAT(Algorithm):
 
             # Calculate and set scores
             with torch.no_grad():
-                policy_accuracy = self.get_accuracy(batch_indices, states, actions, None,
-                                                    accuracy_error, accuracy_type, verbose, keys=valid_keys)[0]
+                policy_accuracy = self.get_accuracy(
+                    batch_indices, states, actions, None,
+                    accuracy_error, accuracy_type, verbose, keys=valid_keys
+                )[0] if self.pol_reg != 0 else None
                 ts = clock.perf_counter()
                 balanced_scores = {}
                 for genus in self.population.genera:
@@ -310,33 +313,50 @@ class NEAT(Algorithm):
                 ep_len_mean = np.mean(episode_lengths[best_genome_key]).item()
                 ep_len_std  = np.std(episode_lengths[best_genome_key]).item()
                 episode_indices: list[int] = np.unique(episode_mapping[best_genome_key])
-                episode_rewards = [
-                    [
-                        reward.mean().cpu().item()
-                        for idx, reward in enumerate(rewards[best_genome_key])
-                        if episode_mapping[best_genome_key][idx] == ep_idx
+
+                def get(buffer: TensorDict, episodic_mapping: dict[int, list[int]], key: int) -> list[list[float]]:
+                    return [
+                        [
+                            value.mean().cpu().item()
+                            for idx, value in enumerate(buffer[best_genome_key])
+                            if episodic_mapping[best_genome_key][idx] == ep_idx
+                        ]
+                        for ep_idx in episode_indices
                     ]
-                    for ep_idx in episode_indices
-                ]
-                cum_episode_rewards = [
-                    [
-                        reward.mean().cpu().item()
-                        for idx, reward in enumerate(cum_rewards[best_genome_key])
-                        if episode_mapping[best_genome_key][idx] == ep_idx
-                    ]
-                    for ep_idx in episode_indices
-                ]
+                episode_rewards = get(rewards, episode_mapping, best_genome_key)
+                cum_episode_rewards = get(cum_rewards, episode_mapping, best_genome_key)
                 ep_rew_mean = np.mean([np.mean(episode) for episode in episode_rewards]).item()
                 ep_rew_std = np.mean([np.std(episode) for episode in episode_rewards]).item()
                 ep_cum_rew = np.mean([np.mean(episode) for episode in cum_episode_rewards]).item()
+                # global_rew = np.mean([
+                #     np.mean([np.mean(episode) for episode in get(rewards, episode_mapping, key)]).item()
+                #     for key in rewards.keys()
+                # ])
+                # global_cum_rew = np.mean([
+                #     np.mean([
+                #         np.mean(episode) for episode in
+                #         get(cum_rewards, episode_mapping, key)
+                #     ]).item()
+                #     for key in cum_rewards.keys()
+                # ])
                 try:
-                    policy_acc = policy_accuracy[best_genome_key] * 100
+                    if self.pol_reg != 0:
+                        policy_acc = policy_accuracy[best_genome_key] * 100
+                    else:
+                        policy_acc = self.get_accuracy(
+                            batch_indices, states, actions, None,
+                            accuracy_error, accuracy_type, verbose, keys=[best_genome_key]
+                        )[0][best_genome_key]
+                    if self.pol_reg != 0:
+                        policy_reduction = 1 if len(policy_accuracy) <= 1 else sorted(
+                            list(policy_accuracy.keys()), key=lambda k: policy_accuracy[k]
+                        ).index(best_genome_key) / (len(policy_accuracy)-1)
+                    else:
+                        policy_reduction = 0
+                    # explained_variance = self._explained_variance(batch_indices, states, rewards, best_genome_key)[best_genome_key]
                 except RuntimeError:
                     policy_acc = np.nan
-                # explained_variance = self._explained_variance(batch_indices, states, rewards, best_genome_key)[best_genome_key]
-                policy_reduction = 1 if len(policy_accuracy) <= 1 else sorted(
-                    list(policy_accuracy.keys()), key=lambda k: policy_accuracy[k]
-                ).index(best_genome_key) / (len(policy_accuracy)-1)
+                    policy_reduction = np.nan
                 buffer_sizes_primary = self.replay.buffer_sizes()
                 buffer_sizes_secondary = self.score_buffer.buffer_sizes()
 
@@ -353,11 +373,12 @@ class NEAT(Algorithm):
                                     params.append(p[key].flatten())
                         params = torch.cat(params)
                         return torch.mean(params).cpu().item(), torch.std(params).cpu().item(), \
-                               torch.max(params).cpu().item(), torch.min(params).cpu().item()
+                               torch.max(params).cpu().item(), torch.min(params).cpu().item(), \
+                               torch.sum(params == 0).cpu().item() / params.numel()
                     except Exception:
-                        return torch.nan, torch.nan, torch.nan, torch.nan
+                        return torch.nan, torch.nan, torch.nan, torch.nan, torch.nan
 
-                mean, std, maximum, minimum = get_range(best_genome_key)
+                mean, std, maximum, minimum, zero_count = get_range(best_genome_key)
                 processing_time = np.floor(clock.perf_counter() - pts)
 
                 if verbose and verbose >= 2:
@@ -378,6 +399,8 @@ class NEAT(Algorithm):
                 self.writer.add_scalar(extra+'ep_rew_mean', ep_rew_mean, self.updates_done)
                 self.writer.add_scalar(extra+'ep_rew_std', ep_rew_std, self.updates_done)
                 self.writer.add_scalar(extra+'ep_cum_rew', ep_cum_rew, self.updates_done)
+                # self.writer.add_scalar(extra+'global_rew', global_rew, self.updates_done)
+                # self.writer.add_scalar(extra+'global_cum_rew', global_cum_rew, self.updates_done)
                 self.writer.add_scalar(extra+'buffer_size_pri', buffer_sizes_primary[best_genome_key], self.updates_done)
                 self.writer.add_scalar(extra+'buffer_size_sec', buffer_sizes_secondary[best_genome_key], self.updates_done)
 
@@ -403,6 +426,7 @@ class NEAT(Algorithm):
                 self.writer.add_scalar(extra+'param_std', std, self.updates_done)
                 self.writer.add_scalar(extra+'param_min', minimum, self.updates_done)
                 self.writer.add_scalar(extra+'param_max', maximum, self.updates_done)
+                self.writer.add_scalar(extra+'zeros', zero_count, self.updates_done)
                 for param, label in zip(get_range(None), ['mean', 'std', 'max', 'min']):
                     self.writer.add_scalar(extra+f'global_{label}', param, self.updates_done)
 
@@ -439,7 +463,7 @@ class NEAT(Algorithm):
                     f"\n|\t{'run_time': <25}| {run_time: <21} |"
                     # f"\n|\t{'train_time': <25}| {train_time: <21} |"
                     f"\n|\t{'steps_done': <25}| {self.steps_done: <21} |"
-                    f"\n|\t{'episodes_done': <25}| {self.episodes_done+1: <21} |"
+                    f"\n|\t{'episodes_done': <25}| {self.episodes_done: <21} |"
                     f"\n|\t{'current_episodes_done': <25}| {len(self.episode_lengths) if self.episode_lengths else 1: <21} |"
                     f"\n{'|TRAINING:': <29}|{'': <22} |"
                     # f"\n|\t{'kl_divergence': <25}| {kl_divergence: <21} |"

@@ -482,37 +482,37 @@ class RModel(Model):
         self.stride         = 1
         self.norm_groups    = norm_groups
         self.differential   = differential
+        padding_mode   = 'reflect'
 
         # Build
         self.pri_actv = nn.SiLU()
         self.pol_proj = neat.nn.Sequential(*[
             Transpose(),
-            # GroupNorm(1, inputs, affine=True, bias=bias, device=device, dtype=dtype),
-            Conv1d(inputs, dim_size, self.kernel_size, self.stride, -1, bias=bias, device=device, dtype=dtype),
+            Conv1d(inputs, dim_size, self.kernel_size, self.stride, -1, bias=bias, device=device, dtype=dtype, padding_mode=padding_mode),
             ResidualBlock(dim_size, dim_size, self.kernel_size, self.norm_groups,
-                          bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+                          bias, device, dtype, image_ndim=1, actv=self.pri_actv, padding_mode=padding_mode),
             ConverBase((seq_len,), dim_size, self.kernel_size, self.norm_groups, layers, heads, kv_heads,
-                       self.differential, True, bias, device, dtype, actv=self.pri_actv, auto_single=True),
+                       self.differential, True, bias, device, dtype, actv=self.pri_actv, auto_single=True, padding_mode=padding_mode),
             ResidualBlock(dim_size, dim_size, 1, self.norm_groups,
-                          bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+                          bias, device, dtype, image_ndim=1, actv=self.pri_actv, padding_mode=padding_mode),
             nn.Flatten(-2, -1),
             self.pri_actv,
         ])
         self.mean_log_std = Linear(dim_size, 2*outputs, bias, device, dtype)
         self.sec_actv   = None
-        self.val_proj   = neat.nn.Sequential(*[
-            Transpose(),
-            Conv1d(inputs, dim_size, self.kernel_size, self.stride, -1, bias=bias, device=device, dtype=dtype),
-            ResidualBlock(dim_size, dim_size, self.kernel_size, self.norm_groups,
-                          bias, device, dtype, image_ndim=1, actv=self.pri_actv),
-            ConverBase((seq_len,), dim_size, self.kernel_size, self.norm_groups, layers, heads, kv_heads,
-                       self.differential, True, bias, device, dtype, actv=self.pri_actv, auto_single=True),
-            # ResidualBlock(dim_size, dim_size, 1, self.norm_groups,
-            #               bias, device, dtype, image_ndim=1, actv=self.pri_actv),
-            nn.Flatten(-2, -1),
-            self.pri_actv,
-        ])
-        self.decode     = Linear(dim_size, 1, bias, device, dtype)
+        # self.val_proj   = neat.nn.Sequential(*[
+        #     Transpose(),
+        #     Conv1d(inputs, dim_size, self.kernel_size, self.stride, -1, bias=bias, device=device, dtype=dtype),
+        #     ResidualBlock(dim_size, dim_size, self.kernel_size, self.norm_groups,
+        #                   bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+        #     ConverBase((seq_len,), dim_size, self.kernel_size, self.norm_groups, layers, heads, kv_heads,
+        #                self.differential, True, bias, device, dtype, actv=self.pri_actv, auto_single=True),
+        #     # ResidualBlock(dim_size, dim_size, 1, self.norm_groups,
+        #     #               bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+        #     nn.Flatten(-2, -1),
+        #     self.pri_actv,
+        # ])
+        # self.decode     = Linear(dim_size, 1, bias, device, dtype)
 
     def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
         return self.get_policy(state, keys=keys, **kwargs)
@@ -551,10 +551,10 @@ class RModel(Model):
             action = self.sec_actv(action)
         return action
 
-    def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
-        latent      = self.val_proj(state, keys=keys)
-        value       = self.decode(latent, keys=keys)
-        return value
+    # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
+    #     latent      = self.val_proj(state, keys=keys)
+    #     value       = self.decode(latent, keys=keys)
+    #     return value
 
 
 def fix(value: float, default: float = 1):
@@ -568,18 +568,18 @@ def fix(value: float, default: float = 1):
 GENOMES     = 100
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 64
-KERNEL_SIZE = 1
+EMBED_SIZE  = 26
+KERNEL_SIZE = 3
 NORM_GROUPS = 1
-SEQ_LEN     = 1
+SEQ_LEN     = 8
 LAYERS      = 1
 HEADS       = 1
 KV_HEADS    = None
-ENABLE_BIAS = False
-DIFFERENTIAL = False
-MEMORY_SIZE = 5
-GAMMA       = np.exp(np.log(0.10) / 16)
-ALPHA       = fix(np.exp(np.log(1.5) / (MEMORY_SIZE - 1)), 1.0)
+ENABLE_BIAS = True
+DIFFERENTIAL = True
+MEMORY_SIZE = 2
+GAMMA       = np.exp(np.log(0.33) / 8)
+ALPHA       = fix(np.exp(np.log(1.25) / (MEMORY_SIZE - 1)), 1.0)
 BETA        = None # fix(np.exp(np.log(1.5) / (5 - 1)), 1.0)
 LOSS_REG    = 0.
 
@@ -715,15 +715,16 @@ def evaluate(population: neat.Population, **options):
                 calc_time = clock.perf_counter() - ts
                 # game.update(actions[:, 0])
                 game.update(actions)
-                game.draw(False)
+                if (population.generation+1) % 5 == 0:
+                    game.draw(False)
                 rewards = torch.softmax(game.birds.score.unsqueeze(-1), 0)
                 # rewards += (rewards - rewards.min(dim=0, keepdim=True)[0])
                 # extend(reward_buffer, game.birds.score.unsqueeze(-1))
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"rewards =>\n{rewards}\n\tshape = {rewards.shape}")
-                    v = MODEL.get_value(observations[:len(reverse_mapping0)].unsqueeze(1), ).squeeze(1)
-                    print(f"values =>\n{v}\n\tshape = {v.shape}")
-                    del v
+                    # v = MODEL.get_value(observations[:len(reverse_mapping0)].unsqueeze(1), ).squeeze(1)
+                    # print(f"values =>\n{v}\n\tshape = {v.shape}")
+                    # del v
                 # print(f"\rO = {outputs.flatten().cpu().numpy()} SCORE: = {game.birds.score.cpu().numpy()}", end='')
 
                 round_end = (game.birds.active() == 0 and game_step == RUNS-1) or game.score >= LIMIT
@@ -755,7 +756,12 @@ def evaluate(population: neat.Population, **options):
             if step == DEBUG_STEP:
                 DEBUG = False
 
-        print(f"\n\nEpisodes = {trainer.replay.episodes()}")
+        print("------------------------------ Post debugging ------------------------------")
+        print(f"Buffer multiplier = {MEMORY_SIZE}")
+        print(f"Mapping = {trainer.episode_mapping}")
+        print(f"Lengths = {trainer.episode_lengths}")
+        print(f"Episodes = {trainer.replay.episodes()}")
+        print("----------------------------------------------------------------------------")
 
         u_lim, l_lim = game.window.height * 0.95, (game.window.height - game.window.floor) * 1.05
         # print(f"u lim = {u_lim}, l lim = {l_lim}")
@@ -778,22 +784,27 @@ def run():
     # Configuration
     print(f"creating config")
     config = neat.Config()
-    config.genome.init_type             = 'uniform'
-    config.genome.weight_init_mean      = 0
-    config.genome.weight_init_std       = 0.5
+
+    config.genome.init_type             = 'normal'
+    config.genome.weight_init_mean      = 0.0
+    config.genome.weight_init_std       = 1.0
     config.genome.weight_min_value      = -np.inf
     config.genome.weight_max_value      = np.inf
-    config.genome.weight_mutate_power   = 1e-2
-    config.genome.weight_mutate_rate    = 0.75
-    config.genome.weight_replace_rate   = 0.03
+    config.genome.weight_mutate_power   = 1e-1
+    config.genome.weight_mutate_rate    = 0.60
+    config.genome.weight_replace_rate   = 0.01
+    config.genome.conn_add_prob         = 0.40
+    config.genome.conn_del_prob         = 0.10
+    config.genome.single_structural_mutation = True
+
     config.reproduction.min_species_size = GENOMES
     config.reproduction.purge           = 1
     config.reproduction.survival_threshold = 0.10
     config.reproduction.cross_threshold = 0.05
-    config.reproduction.elitism         = 15
+    config.reproduction.elitism         = 30
     config.species.compatibility_threshold = np.inf
     config.stagnation.max_stagnation    = 1
-    config.stagnation.species_elitism   = 3
+    config.stagnation.species_elitism   = 2
     config.save()
     config.load(2)
 
@@ -803,20 +814,22 @@ def run():
     population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
     population.absorb_population(population1)
     print(MODEL.pol_proj)
-    population.load_dict(name='flappy_bird', file_no=None)
+    # population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.NEAT(
         population,
         schedulers=[
-            neat.optim.scheduler.CosineAnnealing(config, 25, 100., 'weight_mutate_power', True, True),
-            neat.optim.scheduler.CosineAnnealing(config, 10, 0.01, 'weight_mutate_rate', True, True),
+            neat.optim.scheduler.RandomAnnealing(config, 0.5, np.pi, 'weight_init_std', True),
+            neat.optim.scheduler.CosineAnnealing(config, 10, 10, 'weight_mutate_power', True, True),
+            neat.optim.scheduler.CosineAnnealing(config, 15, 0.2, 'weight_mutate_rate', True, True),
+            neat.optim.scheduler.CosineAnnealing(config, 15, 10, 'weight_replace_rate', True, True),
         ],
         device=DEVICE, dtype=DTYPE,
         log_sub_dir='flappy_bird\\',
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
-        gamma=GAMMA, alpha=ALPHA, beta=BETA, reverse=True,
+        gamma=GAMMA, alpha=ALPHA, beta=BETA, reverse=False,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
     )
 

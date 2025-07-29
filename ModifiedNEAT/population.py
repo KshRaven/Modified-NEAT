@@ -42,7 +42,7 @@ class Population(object):
     threads_per_block = 8
     group_indexer = Indexer(0)
 
-    def __init__(self, genomes: int, module: NeatModule, config: Config = None, save_state: dict = None, **options):
+    def __init__(self, genomes: int, module: NeatModule, config: Config = None, state_dict: dict[str, Any] = None, **options):
         # ------------------------------ Globals ------------------------------ #
         self.genus: int = next(self.genus_indexer)
         self.genera = [self.genus]
@@ -72,8 +72,7 @@ class Population(object):
         # ------------------------------ Data Loading ------------------------------ #
         self._initialized = False
         verbose = manage_params(options, 'verbose', 2)
-        # TODO: Fix this variable name
-        if save_state is None:
+        if state_dict is None:
             # TODO: Implement initialization for CPU functions
             # Create a population from scratch, then partition into species.
             self.genomes = self.reproduction.create_new(
@@ -87,7 +86,7 @@ class Population(object):
                 tpb=self.threads_per_block, verbose=verbose
             )
         else:
-            self.load_dict(save_state, verbose=verbose)
+            self.load_dict(state_dict, verbose=verbose)
         self._initialized = True
 
         # ------------------------------ Post Evaluation ------------------------------ #

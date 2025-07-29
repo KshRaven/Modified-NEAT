@@ -49,7 +49,7 @@ class Algorithm(object):
         self.prev_episodes_done         = self.episodes_done
         self.updates_done               = 0
         self.batch_size                 = manage_params(options, 'batch_size', 512)
-        self.terminated                 = False
+        self.terminated                 = True
         # ------------------------------ States ------------------------------ #
         self.device: torch.device       = device
         self.dtype: torch.dtype         = dtype
@@ -113,41 +113,32 @@ class Algorithm(object):
     def reset_buffers(self):
         self.replay.reset()
 
-    # TODO: Might have to remove envs parameter because of redundancy
-    def handle_episode_mapping(
-            self, terminated: Union[bool, list[bool]], envs: Union[Any, list[Any]] = None,
-            force_reset: bool | list[bool] = False
-    ):
+    def handle_episode_mapping(self, terminated: bool | list[bool], force_reset: bool | list[bool] = False):
         # Type handling and error catching
         if isinstance(terminated, bool):
             terminated = [terminated]
-        if envs is not None and not isinstance(envs, (list, tuple)):
-            envs = [envs]
-            assert len(terminated) == len(envs)
         if isinstance(force_reset, bool):
-            force_reset = [force_reset for _ in range(len(terminated))]
+            force_reset = [force_reset for _ in terminated]
         assert len(terminated) == len(force_reset)
 
         # Handle episode mapping
-        completions: list[bool] = terminated \
-            if envs is None or any([not hasattr(env, 'done') for env in envs]) \
-            else [env.done for env in envs]
-        if any(completions) or any(force_reset) or len(self.episode_mapping) == 0 or self.terminated:
+        if any(terminated) or any(force_reset) or len(self.episode_mapping) == 0 or self.terminated:
             # Give env new mapping if it is done
-            self.episode_mapping: dict[int, int] = {
-                # Assign new mapping for each env if has been terminated
-                env_idx: next(self.mapping_indexer)
-                if any([self.episode_mapping.get(env_idx) is None, done and not self.terminated, force_reset[env_idx] and not self.terminated])
-                # Else assign old mapping if not done
-                else self.episode_mapping[env_idx]
-                for env_idx, done in enumerate(completions)
-            }
+            for env_idx, (done, reset) in enumerate(zip(terminated, force_reset)):
+                # Assign new mapping for each env instance on no mapping, instance termination or forced reset
+                ep_map = self.episode_mapping.get(env_idx)
+                # ep_len = self.episode_lengths.get(ep_map)
+                if any([ep_map is None, done, reset]):
+                    # print(cmod(f"Assigned mapping {self.episode_mapping.get(env_idx)} "
+                    #            f"term: {len(terminated)} -> {[self.episode_mapping.get(env_idx) is None, done, force_reset[env_idx]]}", Fore.LIGHTRED_EX))
+                    self.episode_mapping[env_idx] = next(self.mapping_indexer)
             # Delete invalid ep mapping; NOTE: For the case where num of envs change
             for env_idx in list(self.episode_mapping.keys()):
                 if 0 > env_idx > len(terminated) - 1:
                     del self.episode_mapping[env_idx]
             # Delete invalid episode maps
             mapping_list = list(self.episode_mapping.values())
+            # NOTE: Set self.terminated to False after running this method, because ep_lengths might be deleted on continuous episode runs
             if self.terminated:
                 for ep_map in list(self.episode_lengths.keys()):
                     if ep_map not in mapping_list:
@@ -156,20 +147,12 @@ class Algorithm(object):
             assert len(self.episode_mapping) == len(force_reset)
             for env_idx, env_map in enumerate(mapping_list):
                 # Init for episodes that are not in dict, been completed or forcefully reset
-                if self.episode_lengths.get(env_map) is None or completions[env_idx] or force_reset[env_idx]:
+                if self.episode_lengths.get(env_map) is None:
                     self.episode_lengths[env_map] = 0
-        # TODO: Check if still necessary. Reset episode lengths after training run regardless if env was not done.
-        if self.steps_done == self.prev_steps_done:
+        # For case where rollout buffer has been filled and new episodes have been made fore future env data collection
+        if self.terminated: # self.steps_done == self.prev_steps_done:
             for ep_map in self.episode_lengths.keys():
                 self.episode_lengths[ep_map] = 0
-
-    def init_limit(self, steps: int):
-        """
-        Used to set the steps_done to stop at when running evaluation function
-        :param steps:
-        """
-        self.steps_limit = self.steps_done + steps
-        self.terminated = False
 
     def get_batches(self, keys: list[int], batch_size: int = None, shuffle=False):
         batches = {}
@@ -310,17 +293,21 @@ class Algorithm(object):
             episodes = {key: [0 for _ in range(max_records)] for key in keys}
 
         @njit
-        def sorting_is_correct(eps_: list[int]):
-            idx_ = eps_[0]
-            for ep_idx_ in eps_:
-                if ep_idx_ < idx_ or ep_idx_ > idx_ + 1:
-                    return False
-                idx_ = ep_idx_
-            return True
+        def sorting_is_correct(episode_list: list[int]):
+            # Start as first episodes
+            current_ep = episode_list[0]
+            # Loop until last episode index
+            for ep_to_check in episode_list:
+                if ep_to_check < current_ep:
+                    return False, (current_ep, ep_to_check)
+                current_ep = ep_to_check
+            return True, None
 
         for key, eps in episodes.items():
-            if not sorting_is_correct(eps):
-                raise ValueError(f"Episodes have not been sorted well for key '{key}'.")
+            correct, error = sorting_is_correct(eps)
+            if not correct:
+                raise ValueError(f"Episodes have not been sorted well for '{self.__class__.__name__}'; "
+                                 f"Error for key '{key}' at index {error[1]}, when testing for index {error[0]}.")
 
         returns: TensorDict = {}
         for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):

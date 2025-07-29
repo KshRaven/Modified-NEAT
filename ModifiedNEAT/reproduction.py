@@ -176,10 +176,6 @@ class Reproduction:
             repro_cutoff = max(2, int(np.ceil(survival_threshold * len(old_members))))
             # Use at least two parents no matter what the threshold fraction result is.
             old_members = old_members[:repro_cutoff]
-            # TODO: Enable probabilities when numba supports prob in numpy.random.choice()
-            # probs = np.array([g.fitness for g in old_members]) * darwin_multiplier
-            # probs += (np.abs(probs.min()) + 1e-10)
-            # probs = probs / probs.sum()
 
             # Randomly choose parents and produce the number of offspring allotted to the species.
             for _ in prange(spawn):
@@ -198,7 +194,7 @@ class Reproduction:
                 child.mutate(*structure_params, weight_params, bias_params)
                 # TODO: Enable this when mutation of structure is available
                 # Update layers in case of modification
-                # child.update_from_ModifiedNEAT()
+                # child.update_from_ModifiedNEAT() <- build
                 new_population[gid] = child
                 if ancestors is not None:
                     ancestors[gid] = (parent1, parent2)

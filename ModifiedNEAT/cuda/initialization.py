@@ -18,19 +18,24 @@ def initialize_genome(parameter: GPUArray, g: int, x: int, y: int, init_type: in
                       norm_min: float, norm_max: float, rng_states: GPUArray, rng_index: int):
     uni_min = max(norm_min, (mean - (2 * std)))
     uni_max = min(norm_max, (mean + (2 * std)))
-    # if parameter.ndim == 1:
+    if parameter.ndim == 1:
+        raise NotImplementedError()
     #     if init_type == 0:
     #         parameter[g] = clamp(normal(rng_states, rng_index, mean, std), norm_min, norm_max)
     #     elif init_type == 1:
     #         parameter[g] = uniform(rng_states, rng_index, uni_min, uni_max)
-    # elif parameter.ndim == 2:
+    elif parameter.ndim == 2:
+        raise NotImplementedError()
     #     if init_type == 0:
     #         parameter[g, x] = clamp(normal(rng_states, rng_index, mean, std), norm_min, norm_max)
     #     elif init_type == 1:
     #         parameter[g, x] = uniform(rng_states, rng_index, uni_min, uni_max)
     if parameter.ndim == 3:
         if init_type == 0:
-            parameter[g, x, y] = clamp(normal(rng_states, rng_index, mean, std), norm_min, norm_max)
+            parameter[g, x, y] = clamp(
+                normal(rng_states, rng_index, mean, std),
+                norm_min, norm_max
+            )
         elif init_type == 1:
             parameter[g, x, y] = uniform(rng_states, rng_index, uni_min, uni_max)
     else:

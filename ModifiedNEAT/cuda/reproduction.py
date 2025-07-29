@@ -5,8 +5,8 @@ from ModifiedNEAT.config import Config
 from ModifiedNEAT.species import Species, SpeciesSet, FLOAT, INT, SPECIES
 from ModifiedNEAT.stagnation import Stagnation
 from ModifiedNEAT.reporter.base import ReporterSet
-from ModifiedNEAT.cuda.functional import calc_grid, prob, normal, clamp, get_rng_states, get_value, set_value
-from ModifiedNEAT.cuda.initialization import initialize_genome
+from ModifiedNEAT.cuda.functional import calc_grid, prob, get_rng_states, get_value, set_value
+from ModifiedNEAT.cuda.mutation import mutate
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
 from numba import njit, types, prange, cuda
@@ -120,7 +120,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         for i, p in enumerate(factors):
             probabilities[i] = np.random.rand()
             if multiplier_fitness > 0:
-                probabilities[i] *= (p - minimum) / (maximum - minimum)
+                probabilities[i] += (p - minimum) / (maximum - minimum)
         return genomes[np.argmax(probabilities)]
 
     # Populate global genera members
@@ -173,8 +173,6 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
                     extra_members.extend(genus_members[:cross_cutoff])
         if len(extra_members) > 1:
             extra_members = sort({g.key: g for g in extra_members}, criteria)
-
-        # TODO: Enable probabilities when numba supports prob in numpy.random.choice()
 
         # Randomly choose parents and produce the number of offspring allotted to the species.
         for _ in prange(spawn):
@@ -253,41 +251,6 @@ def crossover(genus: int, source: GPUArray, updates: GPUArray, parents: GPUArray
                 value = get_value(updates, genome_idx, x, y)
 
         set_value(updates, genome_idx, x, y, value)
-
-
-@cuda.jit(device=True)
-def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: float, mutate_power: float,
-                  replace_rate: float, init_type: str, mean: float, std: float, minimum: float, maximum: float,
-                  probabilities: GPUArray, normals: GPUArray, rng_index: int):
-    r = prob(probabilities, rng_index)
-    if r < mutate_rate:
-        value = clamp(get_value(parameter, g, x, y) + normal(normals, rng_index, 0., mutate_power), minimum, maximum)
-        set_value(parameter, g, x, y, value)
-    elif r < replace_rate + mutate_rate:
-        initialize_genome(parameter, g, x, y, init_type, mean, std, minimum, maximum, normals, rng_index)
-
-
-@cuda.jit
-def mutate(
-        updates: GPUArray, children: GPUArray, mutate_rate: float, mutate_power: float, replace_rate: float,
-        init_type: str, mean: float, std: float, minimum: float, maximum: float,
-        probabilities: GPUArray, normals: GPUArray,
-        # debugging: GPUArray
-):
-    genome_idx, x, y = cuda.grid(3)
-    # Parameter shape (genomes, *spatial_dims)
-    g_lim = updates.shape[0]
-    x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
-    y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
-    s_g, s_x, s_y = cuda.gridsize(3)
-
-    # Linearized thread index
-    rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
-
-    if genome_idx < g_lim and x < x_lim and y < y_lim:
-        if children[genome_idx] is True:
-            mutate_genome(updates, genome_idx, x, y, mutate_rate, mutate_power, replace_rate, init_type,
-                          mean, std, minimum, maximum, probabilities, normals, rng_index)
 
 
 def update_children(
@@ -384,7 +347,7 @@ def update_children(
             step += 1
             # with cuda.defer_cleanup():
             # ------------------------------ Sending data to GPU ------------------------------ #
-            # TODO: Re-enable this if necessary after testing if it raises error in crosssover
+            # TODO: Re-enable this if necessary after testing if it raises error in crossover
             # ctype = cp.float32 if genus_param.dtype == torch.float32 else cp.float64
             array_update, original_shape = reshape(cp.zeros((len(new_population), *genus_param.original_shape),)) # ctype))
             array_sources = tuple([cp.asarray(reshape(p.data)[0]) for p in param_group])
@@ -406,13 +369,18 @@ def update_children(
             # ------------------------------ Remove data from GPU ------------------------------ #
             del array_sources
             # ------------------------------ Define mutation kernel and randomizer values ------------------------------ #
-            probabilities = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)[0]
+            probabilities = cp.stack([
+                get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)[0]
+                for _ in range(2 if config.genome.single_structural_mutation else 3)
+            ], axis=0)
             normals = get_rng_states(kernel_shape, seed, get_normal=True, use_cuda=True)[0]
             # ------------------------------ Run mutation using configuration ------------------------------ #
             mutate[*kernel_shape](
                 array_update, child_filter, config.genome.weight_mutate_rate, config.genome.weight_mutate_power,
                 config.genome.weight_replace_rate, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,
-                config.genome.weight_min_value, config.genome.weight_max_value, probabilities, normals,
+                config.genome.weight_min_value, config.genome.weight_max_value,
+                config.genome.single_structural_mutation, config.genome.conn_add_prob, config.genome.conn_del_prob,
+                probabilities, normals,
             )
             if verbose and verbose >= 4:
                 genus_param.md = array_update.copy().get() - genus_param.cd

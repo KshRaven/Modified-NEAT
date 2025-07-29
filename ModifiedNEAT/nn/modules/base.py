@@ -119,6 +119,8 @@ class Linear(NeatModule):
             raise e
 
 
+# ---------- Normalization ----------
+
 class LayerNorm(NeatModule):
     def __init__(self, normalized_shape: Union[int, Iterable[int]], eps=1e-8, elementwise_affine=True,
                  bias=True, device=torch.device('cpu'), dtype=torch.float32):
@@ -178,7 +180,7 @@ class RMSNorm(NeatModule):
 
 
 class GroupNorm(NeatModule):
-    def __init__(self, groups: int, channels: int, eps=1e-6, affine=True,
+    def __init__(self, groups: int, channels: int, eps=1e-9, affine=True,
                  bias=True, device=torch.device('cpu'), dtype=torch.float32):
         super(GroupNorm, self).__init__(groups=groups, channels=channels, eps=eps, affine=affine, bias=affine and bias)
         if channels % groups != 0:
@@ -220,11 +222,9 @@ class GroupNorm(NeatModule):
         # Reshape back to (N, C, *)
         tensor = tensor.view(genomes, batch_size, channels, *pixels)
 
+        # Apply affine transformation
         if self.affine:
-            # Apply affine transformation
-            # print(f"tensor = {tensor.shape}")
             weights = self.expand(self.weights[keys], tensor, offset=1, keys=keys)
-            # print(f"weight = {weights.shape}")
             tensor = tensor * weights
             if self.bias:
                 tensor = tensor + self.expand(self.biases[keys], tensor, offset=1, keys=keys)
@@ -295,20 +295,30 @@ class Convolution(NeatModule):
                 if pv == -1:
                     padding[pi] = calc_padding(kernel_size[pi], stride, dilation)
             padding = tuple(padding)
-            if padding_mode == 'zeros':
+            self._mean_padding = True if padding_mode == 'mean' else False
+            if padding_mode in ['zeros', 'mean']:
                 padding_mode = 'constant'
             elif isinstance(padding_mode, (int, float)):
                 padding_value = padding_mode
                 padding_mode = 'constant'
             elif padding_mode not in ['constant', 'reflect', 'replicate', 'circular']:
+                padding_value = None
                 raise ValueError(f"Supported padding modes are ['zeros', 'constant', <constant numerical value>, "
-                                 f"'reflect', 'replicate', 'circular']")
+                                 f"'reflect', 'replicate', 'circular', 'mean']")
+            if self._mean_padding:
+                raise NotImplementedError(f"Mean padding is not avaialble yet!")
         # print(kernel_size, padding)
         assert len(kernel_size) == len(padding)
 
+        # TODO: Fix how modules are displayed
         super(Convolution, self).__init__(
-            channels_in=channels_in, channels_out=channels_out, kernel_size=kernel_size, stride=stride,
-            padding=padding, dilation=dilation, groups=groups, bias=bias, padding_mode=padding_mode
+            channels_in=channels_in, channels_out=channels_out, kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+            bias=bias if bias is True else False,
+            padding_mode='zeros' if padding_mode == 'constant' and padding_value == 0 else padding_mode
         )
 
         # Attributes
@@ -466,8 +476,10 @@ class Conv1d(Convolution):
     def __init__(self, channels_in: int, channels_out: int, kernel_size: Union[int, tuple[int, int]], stride=1,
                  padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
                  device=torch.device('cpu'), dtype=torch.float32):
-        super(Conv1d, self).__init__(channels_in, channels_out, kernel_size, stride, dilation, padding, padding_mode,
-                                     groups, 1, bias, device, dtype)
+        super(Conv1d, self).__init__(
+            channels_in, channels_out, kernel_size, stride, dilation, padding, padding_mode,
+            groups, 1, bias, device, dtype
+        )
 
 
 class Conv2d(Convolution):

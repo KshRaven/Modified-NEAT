@@ -31,29 +31,29 @@ class GenomeConfig(Configuration):
         self.weight_max_value       = math.inf
         self.weight_min_value       = -math.inf
         self.weight_mutate_power    = 1.0
-        self.weight_mutate_rate     = 0.50
-        self.weight_replace_rate    = 0.05
+        self.weight_mutate_rate     = 0.60
+        self.weight_replace_rate    = 0.10
 
         self.bias_init_mean         = MEAN
         self.bias_init_std          = STD
         self.bias_max_value         = math.inf
         self.bias_min_value         = -math.inf
         self.bias_mutate_power      = 1.0
-        self.bias_mutate_rate       = 0.50
-        self.bias_replace_rate      = 0.05
+        self.bias_mutate_rate       = 0.0
+        self.bias_replace_rate      = 0.0
 
         self.compatibility_disjoint_coefficient = 1.0
         self.compatibility_weight_coefficient   = 0.5
 
-        self.conn_add_prob   = 0.5
-        self.conn_del_prob   = 0.5
-        self.node_add_prob   = 0.2
-        self.node_del_prob   = 0.2
+        self.conn_add_prob   = 0.40
+        self.conn_del_prob   = 0.10
+        self.node_add_prob   = 0.0
+        self.node_del_prob   = 0.0
 
         self.initial_connection = 'full'
-        self.init_type = 'uniform'
+        self.init_type = 'normal'
 
-        self.single_structural_mutation = False
+        self.single_structural_mutation = True
 
 
 class SpeciesConfig(Configuration):
