@@ -6,7 +6,7 @@ from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 import numpy as np
 import cupy as cp
 
-SEED = int(np.random.randint(0, int(1e3)))
+SEED = int(np.random.randint(0, int(2 ** 20)))
 
 
 def set_seed(seed: int):

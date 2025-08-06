@@ -77,7 +77,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
                     available_gid: int, spawn_amounts: list[int], remaining_species: list[Species], to_delete: list[int],
                     elitism: int, survival_threshold: float, cross_threshold: float, cross_multiplier: float,
                     darwin_multiplier: float, criteria: str, ancestors: dict[int, tuple[Genome, Genome]],
-                    equal_params: bool):
+                    equal_params: bool, preserve: bool):
     if len(spawn_amounts) != len(remaining_species):
         raise ValueError(f"Mismatch in reproduction data")
 
@@ -139,12 +139,16 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
 
         # Delete unwanted members
         executions = [gid for gid in specie.members.keys() if gid in to_delete]
-        if len(specie.members) - len(executions) > 1:
-            for gid in executions:
-                if gid in to_delete and len(specie.members) > 1:
-                    del specie.members[gid]
+        execution_count = 0
         # The species has at least one member for the next generation, so retain it.
-        # old_members: list[Genome] = List(specie.members.values())
+        for member in sort(specie.members, criteria)[::-1]:
+            purge_limit_reached = not preserve or (len(specie.members) - execution_count <= elitism and preserve)
+            if not purge_limit_reached and len(specie.members) > 1:
+                if member.key in executions:
+                    del specie.members[member.key]
+                    execution_count += 1
+            else:
+                break
         # Sort members in order of descending fitness.
         old_members = sort(specie.members, criteria)
         # Clear specie's members
@@ -154,8 +158,9 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         # Transfer elites to new generation.
         if elitism > 0:
             for m in old_members[:elitism]:
-                genus_population[m.key] = m
-                spawn -= 1
+                if m.key not in executions:
+                    genus_population[m.key] = m
+                    spawn -= 1
 
         if spawn <= 0:
             continue
@@ -377,9 +382,11 @@ def update_children(
             # ------------------------------ Run mutation using configuration ------------------------------ #
             mutate[*kernel_shape](
                 array_update, child_filter, config.genome.weight_mutate_rate, config.genome.weight_mutate_power,
-                config.genome.weight_replace_rate, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,
+                config.genome.weight_replace_rate, init_type,
+                config.genome.weight_init_mean, config.genome.weight_init_std,
                 config.genome.weight_min_value, config.genome.weight_max_value,
-                config.genome.single_structural_mutation, config.genome.conn_add_prob, config.genome.conn_del_prob,
+                config.genome.single_structural_mutation,
+                config.genome.weight_add_prob, config.genome.weight_del_prob,
                 probabilities, normals,
             )
             if verbose and verbose >= 4:
@@ -474,7 +481,7 @@ def reproduce(
             genus, genus_population, population, species_set.species, genome_indexer, spawn_amounts, remaining_species, to_delete,
             int(config.reproduction.elitism), config.reproduction.survival_threshold, config.reproduction.cross_threshold,
             config.reproduction.cross_multiplier, config.reproduction.darwin_multiplier,
-            config.general.fitness_criterion, ancestors, False
+            config.general.fitness_criterion, ancestors, False, config.reproduction.preserve_elite
         )
         update_children(
             config, genus, modules, population, genus_population, ancestors, tpb, config.general.seed, verbose

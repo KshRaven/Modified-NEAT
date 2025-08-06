@@ -268,6 +268,63 @@ class BufferEncoding(NeatModule):
         return tensor
 
 
+class SequenceEncoding(NeatModule):
+    def __init__(self, max_pixels: tuple[int, ...], embed_size: int, bias=True, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
+        super(SequenceEncoding, self).__init__()
+        self.pixels_totals  = int(np.prod(max_pixels))
+        self.positions      = torch.arange(self.pixels_totals, device=device, dtype=dtype).reshape(max_pixels).\
+                                  unsqueeze(0).unsqueeze(1).unsqueeze(2) / (self.pixels_totals-1)
+        # BUILD
+        if len(max_pixels) == 1:
+            Convolution = Conv1d
+        elif len(max_pixels) == 2:
+            Convolution = Conv2d
+        elif len(max_pixels) == 3:
+            Convolution = Conv3d
+        else:
+            raise ValueError(f"Unsupported num of image dimension '{len(max_pixels)}'")
+        # shape(genomes, batch_size, channels, *pixels)
+        self.encoding       = Convolution(1, embed_size, 1, bias=bias, device=device, dtype=dtype)
+        # self.activation     = nn.SiLU()
+
+        # ATTRIBUTES
+        self.max_pixels     = max_pixels
+        self.ndim           = len(max_pixels)
+        self.embed_size     = embed_size
+        self.selector       = torch.arange(int(np.max(self.max_pixels)), device=device, dtype=torch.int32)
+        self.encoding_memory: Tensor|None = None
+
+        # STATES
+        self.device  = device
+        self.dtype   = dtype
+
+    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, offset: tuple[int, int] = None, verbose: int = None, hold=False):
+        if offset is None:
+            offset = [0 for _ in range(self.ndim)]
+        if verbose and verbose >= 2:
+            print(get_tensor_info(tensor, "Unencoded tensor", verbose))
+        # tensor = (genomes, batch_size, channels, *pixels)
+        (genomes, _, channels), pixels = tensor.shape[:3], tensor.shape[3:]
+        assert len(pixels) == len(offset) == self.ndim
+
+        # Expanding positional encoding to shape of input
+        positions = self.positions.expand(genomes, *self.positions.shape[1:])
+        for dim, off in zip(pixels[::-1], offset[::-1]):
+            positions = torch.index_select(positions, -1, self.selector[off:off+dim])
+        if verbose and verbose >= 2:
+            print(get_tensor_info(positions, "Positions", verbose))
+        positional_encoding: Tensor = self.encoding(positions, keys=keys)
+        # positional_encoding = self.activation(positional_encoding)
+
+        # Add encoding to tensor
+        tensor = tensor + positional_encoding
+        if verbose:
+            print(get_tensor_info(positional_encoding, "Positional Encoding", verbose))
+            print(get_tensor_info(tensor, "Encoded tensor", verbose))
+
+        return tensor
+
+
 # --------------------------------------------- #
 # Attention                                     #
 # --------------------------------------------- #
@@ -373,8 +430,8 @@ class AttentionLambda(NeatModule):
         self.min_val = init_mean - init_std*2
         self.max_val = init_mean + init_std*2
 
-    def biases(self, tensor, keys):
-        return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, keys=keys)
+    def biases(self, tensor, keys, offset=None):
+        return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, offset=offset, keys=keys)
 
     def update_limit(self):
         for param in self.neat_parameters():
@@ -391,7 +448,7 @@ class AttentionLambda(NeatModule):
         k2 = self.k2[keys] # F.tanh(self.k2[keys], self.min_val, self.max_val)
         base = torch.exp(torch.sum(q1 * k1, -2)) - torch.exp(torch.sum(q2 * k2, -2))
         return (
-            (base  + self.biases(base, keys)) * self.multipliers # ** self.exponents * self.multipliers
+            (base + self.biases(base, keys, 0)) * self.multipliers # ** self.exponents * self.multipliers
         ).unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
         # Returns shape (genomes, batch_size, heads, lambdas, query_len, key_len)
 
@@ -514,7 +571,7 @@ class Attention(NeatModule):
         # values shape:    (batch_size, value_len, heads, head_dim)
         # attention shape: (batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
-            attention = attention * (1 - self.diff_lambda.biases(attention, keys))
+            attention = attention * (1 - self.diff_lambda.biases(attention, keys, 2))
 
         return scores, attention
 
@@ -622,8 +679,8 @@ class ConvSelfAttention(NeatModule):
         self.constant = manage_params(options, 'constant', 10000)
         self.epsilon = manage_params(options, 'epsilon', 1e-9)
         self.affine = manage_params(options, 'affine', True)
-        self.norm_groups = manage_params(options, 'norm_groups', None)
-        self.skip_connection = manage_params(options, ['skip_connection', 'residual'], False)
+        self.norm_groups = manage_params(options, 'norm_groups', 1)
+        self.skip_connection = manage_params(options, ['skip_connection', 'residual'], True)
 
         # ATTRIBUTES
         self.heads      = heads
@@ -689,10 +746,11 @@ class ConvSelfAttention(NeatModule):
         (g, b), c, p = image.shape[:2], image.shape[2] // multiplier, image.shape[3:]
         assert c == heads * head_dim
         # Return shape (genomes, batch_size, pixels, heads, head_dim)
-        return image.view(g, b, c, -1).transpose(-1, -2).contiguous().view(g, b, -1, heads, head_dim*multiplier), (b, c, p)
+        return image.view(g, b, c, -1).transpose(-1, -2).contiguous().view(g, b, -1, heads, head_dim*multiplier), (g, b, c, p)
 
     @staticmethod
     def revert(tensor: Tensor, batch_size: int, channels: int, pixels: list[int]):
+        # Return shape (genomes, batch_size, channels, *pixels)
         return tensor.transpose(-1, -2).contiguous().view(-1, batch_size, channels, *pixels)
 
     def attention(self, query: Tensor, key: Tensor, value: Tensor, keys: Union[int, Iterable[int]], mask: bool, verbose: int = None):
@@ -701,9 +759,9 @@ class ConvSelfAttention(NeatModule):
             key     = key.view(*key.shape[:-1], self.att_coeff_num, -1)
         # Get the attention score (energy)
         energy = torch.einsum("...qhd,...khd->...hqk" if not self.differential else "...qhcd,...khcd->...hcqk", [query, key])
-        # queries shape: (batch_size, query_len, heads, head_dim)
-        # key shape:     (batch_size, key_len, heads, head_dim)
-        # energy shape:  (batch_size, heads, query_len, key_len)
+        # queries shape: (genomes, batch_size, query_len, heads, *coeffs, head_dim)
+        # key shape:     (genomes, batch_size, key_len, heads, *coeffs, head_dim)
+        # energy shape:  (genomes, batch_size, heads, *coeffs, query_len, key_len)
         if verbose:
             print(get_tensor_info(energy, 'Energy', verbose))
 
@@ -739,11 +797,11 @@ class ConvSelfAttention(NeatModule):
 
         # Get the weighted sum of the values and reshape to remove heads
         attention = self.head_norm(torch.einsum("...hqv,...vhd->...qhd", [scores, value]), keys=keys)
-        # scores shape:    (batch_size, heads, query_len, value_len)
-        # values shape:    (batch_size, value_len, heads, head_dim)
-        # attention shape: (batch_size, query_len, heads, head_dim) then concat last 2 dim
+        # scores shape:    (genomes, batch_size, heads, query_len, value_len)
+        # values shape:    (genomes, batch_size, value_len, heads, head_dim)
+        # attention shape: (genomes, batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
-            attention = attention * (1 - self.diff_lambda.biases(attention, keys))
+            attention = attention * (1 - self.diff_lambda.biases(attention, keys, 2))
 
         return scores, attention
 
@@ -756,6 +814,10 @@ class ConvSelfAttention(NeatModule):
             assert 0 < pos_idx < self.pixels_total
         if verbose:
             print(f'\n{CM("Executing Self Attention", Fore.LIGHTBLUE_EX)}')
+            print(get_tensor_info(tensor, f'Input', verbose, Fore.LIGHTRED_EX))
+            if pretext is not None:
+                print(get_tensor_info(pretext, f'Pretext', verbose, Fore.LIGHTRED_EX))
+
 
         # Get residue and pre-normalize
         residue = tensor if pretext is None else pretext
@@ -777,7 +839,7 @@ class ConvSelfAttention(NeatModule):
         batch_size, q_seq_len = query.shape[:2]
 
         # Reshape Q, K, V for each rep head
-        query, (b, c, p) = self.convert(query, self.heads, self.head_dim, self.mult)
+        query, (g, b, c, p) = self.convert(query, self.heads, self.head_dim, self.mult)
         key     = self.convert(key, self.kv_heads, self.head_dim, self.mult)[0]
         value   = self.convert(value, self.kv_heads, self.head_dim)[0]
         if verbose:
@@ -801,8 +863,8 @@ class ConvSelfAttention(NeatModule):
         # Apply attention
         attention_scores, attention = self.attention(query, key.contiguous(), value.contiguous(), keys,
                                                      self.causal_mask and pretext is None, verbose)
-        attention = attention.reshape(batch_size, -1, self.dim_size)
-        # out_view shape:  (batch_size, query_len, embed_size)
+        attention = attention.reshape(g, b, -1, self.dim_size)
+        # out_view shape:  (genomes, batch_size, *pixels, channels)
         if verbose:
             print(get_tensor_info(attention, 'Attented Values', verbose))
 
@@ -979,7 +1041,7 @@ class ConvCrossAttention(NeatModule):
         # values shape:    (batch_size, value_len, heads, head_dim)
         # attention shape: (batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
-            attention = attention * (1 - self.diff_lambda.biases(attention, keys))
+            attention = attention * (1 - self.diff_lambda.biases(attention, keys, 2))
 
         return scores, attention
 
@@ -1371,13 +1433,17 @@ class ConverBase(NeatModule):
 
         # ModifiedNEAT
         options['auto_single'] = False
+        self.positional_encoding = SequenceEncoding(max_pixels, dim_size, bias, device, dtype)
         self.layers: list[ConverBlock] = nn.ModuleList()
         for layer_idx in range(layers):
             if layer_idx == layers-1:
                 options['auto_single'] = self.auto_single
+                kernel_size = 1
+                options['padding'] = -1
             self.layers.append(
                 ConverBlock(
-                    max_pixels, dim_size, kernel_size, norm_groups, heads, kv_heads, differential, layer_idx,
+                    max_pixels, dim_size, kernel_size,
+                    norm_groups, heads, kv_heads, differential, layer_idx,
                     causal_mask, bias, device, dtype, **options
                 )
             )
@@ -1393,13 +1459,16 @@ class ConverBase(NeatModule):
             # Single mode is only when on final layer, pixels span 1 dimension and tensor has 3 dimensions only
             single_fetch = single and layer_idx == len(self.layers) - 1 and len(self.max_pixels) == 1 and tensor.ndim == 4
             # shape (batch_size, channels, *pixels)
+            tensor = self.positional_encoding(tensor, keys=keys, offset=None, verbose=verbose)
             if single_fetch:
                 # Using last token index in sequence to get the next token
                 set_pretext = torch.select(tensor, 3, -1).unsqueeze(-1)
             else:
                 set_pretext = pretext
+                if set_pretext is not None:
+                    set_pretext = self.positional_encoding(tensor, keys=keys, offset=None, verbose=verbose)
             tensor = layer(tensor, keys=keys, pretext=set_pretext, context=context, pos_idx=pos_idx,
-                           verbose=verbose if layer_idx == 0 else False, get=get)
+                           verbose=verbose, get=get)
 
         return tensor
 

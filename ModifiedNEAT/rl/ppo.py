@@ -49,7 +49,7 @@ class PPO(Algorithm):
         super().__init__(population, schedulers, device, dtype, **options)
 
         # Buffers
-        self.replay.add_buffers('state', 'action', 'prob', 'reward', 'ep_map')
+        self.primary.add_buffers('state', 'action', 'prob', 'reward', 'ep_map')
 
         # Options
         self.norm_rew: bool               = manage_params(options, ['norm_rew'], False)
@@ -118,7 +118,7 @@ class PPO(Algorithm):
         filled = False
         if self.steps_done < self.steps_limit:
             for idx, ended in enumerate(terminated):
-                self.replay.update(
+                self.primary.update(
                     state       = observations,
                     action      = actions,
                     prob        = probs,
@@ -204,13 +204,13 @@ class PPO(Algorithm):
             pts = clock.perf_counter()
             invalid_population = len(self.population.to_delete) == len(self.population.genomes)
             valid_keys = [
-                key for key in self.replay.mapping.keys() if key not in self.population.to_delete or invalid_population
+                key for key in self.primary.mapping.keys() if key not in self.population.to_delete or invalid_population
             ] if self.validate else list(self.population.genomes.keys())
             # TODO: Check whether only rolling out valid keys is necessary
             with torch.no_grad():
                 # Roll out data from buffers
                 ts = clock.perf_counter()
-                states, actions, probabilities, rewards, episode_mapping = self.replay.rollout(
+                states, actions, probabilities, rewards, episode_mapping = self.primary.rollout(
                     ['state', 'action', 'prob', 'reward', 'ep_map'], as_list=True, stack=True, keys=valid_keys
                 )
                 rollout_time = clock.perf_counter() - ts
@@ -281,7 +281,7 @@ class PPO(Algorithm):
                 policy_reduction = 1 if len(policy_accuracy) <= 1 else sorted(
                     list(policy_accuracy.keys()), key=lambda k: policy_accuracy[k]
                 ).index(best_genome_key) / (len(policy_accuracy)-1)
-                buffer_sizes = self.replay.buffer_sizes()
+                buffer_sizes = self.primary.buffer_sizes()
 
                 # noinspection PyBroadException
                 def get_range(key: Union[int, None]):
@@ -432,7 +432,7 @@ class PPO(Algorithm):
                             keys: Union[int, list[int]] = None):
         if isinstance(keys, (int, float)):
             keys = [keys]
-        keys = list(self.replay.mapping.keys()) if keys is None else keys
+        keys = list(self.primary.mapping.keys()) if keys is None else keys
         with torch.no_grad():
             ex_var = {}
 

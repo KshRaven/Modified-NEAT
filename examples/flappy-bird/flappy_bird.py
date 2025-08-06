@@ -710,7 +710,7 @@ def evaluate(population: neat.Population, **options):
                         beskt_key = None
                 print(f"\r{CM('Executing', Fore.GREEN)}: time_elapsed = {round(clock.perf_counter()-gts)}s, "
                       f"alive = {alive}, max_rew = {max_score}, best_key={best_key}, ct={calc_time:.2e}, sd={trainer.steps_done} "
-                      f"bl={trainer.replay.max_size()}", end='')
+                      f"bl={trainer.primary.max_size()}", end='')
 
             # break if score gets large enough
             if round_end or terminate:
@@ -723,7 +723,7 @@ def evaluate(population: neat.Population, **options):
             if step == DEBUG_STEP:
                 DEBUG = False
 
-        print(f"\n\nEpisodes = {trainer.replay.episodes()}")
+        print(f"\n\nEpisodes = {trainer.primary.episodes()}")
 
         u_lim, l_lim = game.window.height * 0.95, (game.window.height - game.window.floor) * 1.05
         # print(f"u lim = {u_lim}, l lim = {l_lim}")

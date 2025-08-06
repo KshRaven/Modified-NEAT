@@ -18,42 +18,25 @@ class GeneralConfig(Configuration):
         self.seed                = SEED
 
 
-MEAN = 0.0
-STD = 1.0
-
-
 class GenomeConfig(Configuration):
     def __init__(self):
         super(GenomeConfig, self).__init__('genome config')
 
-        self.weight_init_mean       = MEAN
-        self.weight_init_std        = STD
-        self.weight_max_value       = math.inf
+        self.weight_init_mean       = 0.0
+        self.weight_init_std        = 1.0
+        self.weight_max_value       = +math.inf
         self.weight_min_value       = -math.inf
         self.weight_mutate_power    = 1.0
         self.weight_mutate_rate     = 0.60
-        self.weight_replace_rate    = 0.10
-
-        self.bias_init_mean         = MEAN
-        self.bias_init_std          = STD
-        self.bias_max_value         = math.inf
-        self.bias_min_value         = -math.inf
-        self.bias_mutate_power      = 1.0
-        self.bias_mutate_rate       = 0.0
-        self.bias_replace_rate      = 0.0
+        self.weight_replace_rate    = 0.05
+        self.weight_add_prob        = 0.30
+        self.weight_del_prob        = 0.20
 
         self.compatibility_disjoint_coefficient = 1.0
-        self.compatibility_weight_coefficient   = 0.5
+        self.compatibility_weight_coefficient   = 0.10
 
-        self.conn_add_prob   = 0.40
-        self.conn_del_prob   = 0.10
-        self.node_add_prob   = 0.0
-        self.node_del_prob   = 0.0
-
-        self.initial_connection = 'full'
         self.init_type = 'normal'
-
-        self.single_structural_mutation = True
+        self.single_structural_mutation = False
 
 
 class SpeciesConfig(Configuration):
@@ -76,14 +59,15 @@ class ReproductionConfig(Configuration):
     def __init__(self):
         super(ReproductionConfig, self).__init__('reproduction config')
 
-        self.elitism            = 50
+        self.elitism            = 30
         self.clone_threshold    = 0.00
         self.survival_threshold = 0.10
         self.cross_threshold    = 0.00
         self.cross_multiplier   = 0.75
-        self.darwin_multiplier  = 0.00
+        self.darwin_multiplier  = 0.10
         self.min_species_size   = 100
         self.purge              = 0
+        self.preserve_elite     = False
 
 
 class Config:

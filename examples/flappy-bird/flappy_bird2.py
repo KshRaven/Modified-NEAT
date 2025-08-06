@@ -1,7 +1,7 @@
 
 from ModifiedNEAT.util.fancy_text import CM, Fore
 from ModifiedNEAT.nn.base import Model
-from ModifiedNEAT.nn.modules.sub import Linear, Conv1d, Transpose, ResidualBlock, Sequential, GroupNorm, ConverBase
+from ModifiedNEAT.nn.modules.sub import Linear, Conv1d, Transpose, ResidualBlock, Sequential, GroupNorm, ConverBase, SequenceEncoding
 from ModifiedNEAT.nn.modules import Reformer
 from ModifiedNEAT.util.datetime import unix_to_datetime_file
 
@@ -34,7 +34,7 @@ DTYPE = torch.float32
 # Define window
 THRESHOLD = 0.9
 WIN_HEIGHT = 800
-WIN_WIDTH  = 550
+WIN_WIDTH  = 450
 WIN = pygame.display.set_mode((WIN_WIDTH, WIN_HEIGHT))
 pygame.display.set_caption("Flappy Bird")
 
@@ -54,11 +54,11 @@ gen = 0
 
 class Pipe(object):
     image = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "pipe.png")).convert_alpha())
-    u_lim: int = 0
-    l_lim: int = 50
+    u_lim: int = 20
+    l_lim: int = 40
     pxt: float = 1.0
 
-    def __init__(self, x: int, gap_l_lim=180, gap_u_lim=230, velocity=6):
+    def __init__(self, x: int, gap_l_lim=200, gap_u_lim=200, velocity=6):
         self.gap_l_lim = gap_l_lim
         self.gap_u_lim = gap_u_lim
         self.velocity = velocity
@@ -115,7 +115,7 @@ class Pipe(object):
 class Base:
     def __init__(self, y: int):
         self.image = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "base.png")).convert_alpha())
-        self.velocity = 5
+        self.velocity = 6
         self.width = self.image.get_width()
 
         self.y = y
@@ -146,7 +146,7 @@ def blitRotateCenter(surf: pygame.Surface, image: pygame.Surface, topleft: tuple
 
 
 class Window(object):
-    def __init__(self, height: int = 800, width: int = 600, hitbox: int = 20):
+    def __init__(self, height: int = 800, width: int = 500, hitbox: int = 20):
         self.height = height
         self.width = width
         self.display = pygame.display.set_mode((WIN_WIDTH, WIN_HEIGHT))
@@ -165,7 +165,7 @@ class Window(object):
 class Pipes(object):
     def __init__(self, gen_pos: int):
         self.gen_pos = gen_pos
-        self.pipes = [Pipe(gen_pos)]
+        self.pipes = [Pipe(self.gen_pos)]
         self.to_del = []
 
     def get(self):
@@ -390,11 +390,11 @@ class Game(object):
         if render:
             pygame.display.set_caption("Flappy Bird")
         self.window: Window = Window()
-        Pipe.u_lim = 50
-        Pipe.l_lim = 450
+        Pipe.u_lim = 70
+        Pipe.l_lim = 430
         def_height = round(self.window.height * 2 / 5)
         def_width = round(self.window.width * 2 / 5)
-        self.pipes: Pipes = Pipes(round(self.window.width * 0.75))
+        self.pipes: Pipes = Pipes(round(self.window.width * 0.80))
         self.birds: Birds = Birds(birds, def_width, def_height, type2count, offset, device, dtype)
         self.base: Base = Base(self.window.floor)
         self.clock = pygame.time.Clock()
@@ -412,6 +412,8 @@ class Game(object):
         self.birds.jump(activation)
         self.birds.move()
         self.birds.check_collision(self.pipes.get(), self.window)
+        # if self.pipes.pipes[-1].x + self.pipes.gen_pos < self.window.width:
+        #     self.pipes.add()
         if self.birds.check_passed(self.pipes):
             self.pipes.add()
             self.score += 1
@@ -505,6 +507,7 @@ class RModel(Model):
         #     Conv1d(inputs, dim_size, self.kernel_size, self.stride, -1, bias=bias, device=device, dtype=dtype),
         #     ResidualBlock(dim_size, dim_size, self.kernel_size, self.norm_groups,
         #                   bias, device, dtype, image_ndim=1, actv=self.pri_actv),
+        #     SequenceEncoding(seq_len, dim_size, bias, device, dtype),
         #     ConverBase((seq_len,), dim_size, self.kernel_size, self.norm_groups, layers, heads, kv_heads,
         #                self.differential, True, bias, device, dtype, actv=self.pri_actv, auto_single=True),
         #     # ResidualBlock(dim_size, dim_size, 1, self.norm_groups,
@@ -565,21 +568,21 @@ def fix(value: float, default: float = 1):
 
 
 # Network
-GENOMES     = 100
+GENOMES     = 50
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 26
+EMBED_SIZE  = 64
 KERNEL_SIZE = 3
 NORM_GROUPS = 1
-SEQ_LEN     = 8
+SEQ_LEN     = 4
 LAYERS      = 1
-HEADS       = 1
-KV_HEADS    = None
+HEADS       = 4
+KV_HEADS    = HEADS
 ENABLE_BIAS = True
 DIFFERENTIAL = True
-MEMORY_SIZE = 2
-GAMMA       = np.exp(np.log(0.33) / 8)
-ALPHA       = fix(np.exp(np.log(1.25) / (MEMORY_SIZE - 1)), 1.0)
+MEMORY_SIZE = 3
+GAMMA       = np.exp(np.log(0.33) / 4)
+ALPHA       = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
 BETA        = None # fix(np.exp(np.log(1.5) / (5 - 1)), 1.0)
 LOSS_REG    = 0.
 
@@ -619,7 +622,6 @@ def evaluate(population: neat.Population, **options):
     for genome in population.genomes.values():
         genome.fitness = 0
 
-    trainer.deque_episodes(MEMORY_SIZE-1)
     terminate = False
     start = 0
     run_step = 0
@@ -743,7 +745,7 @@ def evaluate(population: neat.Population, **options):
                         beskt_key = None
                 print(f"\r{CM('Executing', Fore.GREEN)}: time_elapsed = {round(clock.perf_counter()-gts)}s, "
                       f"alive = {alive}, max_rew = {max_score}, best_key={best_key}, ct={calc_time:.2e}, sd={trainer.steps_done} "
-                      f"bl={trainer.replay.max_size()}", end='')
+                      f"bl={trainer.primary.max_size()}", end='')
 
             # break if score gets large enough
             if round_end or terminate:
@@ -756,11 +758,11 @@ def evaluate(population: neat.Population, **options):
             if step == DEBUG_STEP:
                 DEBUG = False
 
-        print("------------------------------ Post debugging ------------------------------")
+        print("\n------------------------------ Post debugging ------------------------------")
         print(f"Buffer multiplier = {MEMORY_SIZE}")
         print(f"Mapping = {trainer.episode_mapping}")
         print(f"Lengths = {trainer.episode_lengths}")
-        print(f"Episodes = {trainer.replay.episodes()}")
+        print(f"Episodes = {trainer.primary.episodes()}")
         print("----------------------------------------------------------------------------")
 
         u_lim, l_lim = game.window.height * 0.95, (game.window.height - game.window.floor) * 1.05
@@ -785,26 +787,26 @@ def run():
     print(f"creating config")
     config = neat.Config()
 
-    config.genome.init_type             = 'normal'
-    config.genome.weight_init_mean      = 0.0
-    config.genome.weight_init_std       = 1.0
-    config.genome.weight_min_value      = -np.inf
-    config.genome.weight_max_value      = np.inf
-    config.genome.weight_mutate_power   = 1e-1
-    config.genome.weight_mutate_rate    = 0.60
-    config.genome.weight_replace_rate   = 0.01
-    config.genome.conn_add_prob         = 0.40
-    config.genome.conn_del_prob         = 0.10
-    config.genome.single_structural_mutation = True
+    config.genome.init_type                     = 'normal'
+    config.genome.weight_init_mean              = 0.0
+    config.genome.weight_init_std               = 1.0
+    config.genome.weight_min_value              = -np.inf
+    config.genome.weight_max_value              = +np.inf
+    config.genome.weight_mutate_power           = 1e-1
+    config.genome.weight_mutate_rate            = 0.65
+    config.genome.weight_replace_rate           = 0.10
+    config.genome.weight_add_prob               = 0.33
+    config.genome.weight_del_prob               = 0.33
+    config.genome.single_structural_mutation    = False
 
-    config.reproduction.min_species_size = GENOMES
-    config.reproduction.purge           = 1
-    config.reproduction.survival_threshold = 0.10
-    config.reproduction.cross_threshold = 0.05
-    config.reproduction.elitism         = 30
-    config.species.compatibility_threshold = np.inf
-    config.stagnation.max_stagnation    = 1
-    config.stagnation.species_elitism   = 2
+    config.reproduction.min_species_size        = GENOMES
+    config.reproduction.purge                   = 1
+    config.reproduction.survival_threshold      = 0.10
+    config.reproduction.cross_threshold         = 0.05
+    config.reproduction.elitism                 = 15
+    config.species.compatibility_threshold      = np.inf
+    config.stagnation.max_stagnation            = 1
+    config.stagnation.species_elitism           = 2
     config.save()
     config.load(2)
 
@@ -819,10 +821,10 @@ def run():
     trainer = neat.rl.NEAT(
         population,
         schedulers=[
-            neat.optim.scheduler.RandomAnnealing(config, 0.5, np.pi, 'weight_init_std', True),
-            neat.optim.scheduler.CosineAnnealing(config, 10, 10, 'weight_mutate_power', True, True),
-            neat.optim.scheduler.CosineAnnealing(config, 15, 0.2, 'weight_mutate_rate', True, True),
-            neat.optim.scheduler.CosineAnnealing(config, 15, 10, 'weight_replace_rate', True, True),
+            neat.optim.scheduler.RandomAnnealing(config, 1e-1, 1e-0, 5, ['weight_init_std', 'weight_mutate_power'], True),
+            # neat.optim.scheduler.CosineAnnealing(config, 10, 10, 'weight_mutate_power', True, True),
+            # neat.optim.scheduler.CosineAnnealing(config, 15, 0.2, 'weight_mutate_rate', True, True),
+            # neat.optim.scheduler.CosineAnnealing(config, 15, 5, 'weight_replace_rate', True, True),
         ],
         device=DEVICE, dtype=DTYPE,
         log_sub_dir='flappy_bird\\',
@@ -831,6 +833,7 @@ def run():
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
         gamma=GAMMA, alpha=ALPHA, beta=BETA, reverse=False,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
+        max_episodes=MEMORY_SIZE,
     )
 
     # Run for up to 50 generations.

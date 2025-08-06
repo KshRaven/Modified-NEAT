@@ -1,9 +1,8 @@
 
 from ModifiedNEAT.nn.base import Model
 from ModifiedNEAT.population import Population
-from ModifiedNEAT.rl.base import Algorithm, TensorDict
+from ModifiedNEAT.rl.base import Algorithm, TensorDict, NEATAlgoWarning
 from ModifiedNEAT.optim.scheduler import Scheduler
-from ModifiedNEAT.util import ReplayBuffer
 from ModifiedNEAT.util.datetime import eta, clock
 from ModifiedNEAT.util.qol import manage_params
 from ModifiedNEAT.util.fancy_text import CM, Fore
@@ -13,6 +12,7 @@ from typing import Union, Iterable
 
 import torch
 import numpy as np
+import warnings
 
 
 class NEAT(Algorithm):
@@ -44,15 +44,13 @@ class NEAT(Algorithm):
         super().__init__(population, schedulers, device, dtype, **options)
 
         # Buffers
-        self.replay.add_buffers('state', 'action', 'reward', 'ep_map')
-        self.score_buffer = ReplayBuffer()
-        self.score_buffer.add_buffers('score', 'ep_map')
+        self.primary.add_buffers('state', 'action', 'reward', 'ep_map')
+        self.secondary.add_buffers('ec_reward', 'ep_map', 'ep_len') # Maps each episodes' mean cumulative reward to use as score
         self.score_idx = 0
 
         # Options
         self.gamma: float       = manage_params(options, 'gamma', 0.95)
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
-        self.beta: float | None = manage_params(options, 'beta', None)
         self.reverse: bool      = manage_params(options, 'reverse', True)
         self.epsilon: float     = manage_params(options, 'epsilon', 1e-10)
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
@@ -60,61 +58,23 @@ class NEAT(Algorithm):
         self.validate: bool     = manage_params(options, 'validate', True)
         self.segr_size: Union[float, None] = manage_params(options, 'segr_size', None)
         self.target_kl: Union[float, None] = manage_params(options, 'target_kl', None)
+        self.max_steps: Union[float, None] = manage_params(options, 'max_steps', None)
+        self.max_episodes: Union[float, None] = manage_params(options, 'max_episodes', None)
+        if self.max_steps is not None and self.max_episodes is not None:
+            warnings.warn(
+                category=NEATAlgoWarning,
+                message=f"Not recommended to apply both max_steps and max_episodes!"
+            )
 
         self.logging.add_buffers(
             'kl_divergence', 'std', # 'explained_variance'
             'ep_len_mean', 'ep_len_std', 'ep_rew_mean', 'ep_rew_std', 'policy_acc', 'reward_acc'
         )
 
-    def update_mapping(self, mapping: dict[int, int]):
-        self.replay.update_mapping(mapping)
-        self.logging.update_mapping(mapping)
-        self.score_buffer.update_mapping(mapping)
-
-    def deque_episodes_secondary(self, episodes: int, keys: list[int] = None):
-        """
-        Deletes the episodes before the last n episodes.
-        Used to compensate for the long data collection times of the NEAT evaluation functions.
-        :param episodes: (int) Number of recent episodes to keep.
-        :param keys: (list[int])
-        :return: (none)
-        """
-        assert episodes >= 0
-        filters = {}
-        episode_mapping: dict[int, list[int]] = self.score_buffer.rollout(buffers='ep_map', as_list=True)[0]
-        for key in self.score_buffer.mapping.keys():
-            episodes_to_del = torch.tensor([ep for ep in range(self.score_idx+1) if ep < (self.score_idx+1-episodes)])
-            mapping = torch.tensor(episode_mapping[key])
-            episode_filter  = torch.isin(mapping, episodes_to_del)
-            record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
-            # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
-            filters[key] = record_filter
-        self.score_buffer.deque(filters, keys)
-
-    def deque_steps_secondary(self, steps: int, keys: list[int] = None):
-        """
-        Deletes the last n steps.
-        Used to compensate for the large data sizes of the NEAT evaluation functions.
-        :param steps: (int) Number of steps to keep.
-        :param keys: (list[int])
-        :return: (none)
-        """
-        assert steps >= 0
-        filters = {}
-        episode_mapping: dict[int, list[int]] = self.score_buffer.rollout(buffers='ep_map', as_list=True)[0]
-        for key in self.score_buffer.mapping.keys():
-            records = len(episode_mapping[key])
-            limit = max(0, records - steps)
-            filters[key] = [i for i in range(records) if i < limit]
-        self.score_buffer.deque(filters, keys)
-
-    def reset_buffers(self):
-        self.replay.reset()
-        self.score_buffer.reset()
+        self.prev_valid_keys: list[int] = None
 
     def update(self, observations: Tensor, actions: Tensor, rewards: Tensor,
-               terminated: Union[bool, list[bool]], force_stop=False,
-               envs: Union[object, list[object]] = None, reset_mapping: bool | list[bool] = False):
+               terminated: Union[bool, list[bool]], force_stop=False, reset_mapping: bool | list[bool] = False):
         if isinstance(terminated, bool):
             terminated = [terminated]
 
@@ -126,7 +86,7 @@ class NEAT(Algorithm):
         if self.steps_done < self.steps_limit:
             # Loop through all environments
             for idx, ended in enumerate(terminated):
-                self.replay.update(
+                self.primary.update(
                     state   = observations,
                     action  = actions,
                     reward  = rewards,
@@ -151,28 +111,6 @@ class NEAT(Algorithm):
 
         return filled
 
-    def calculate_scores(self, raw_scores: dict[int, float]) -> dict[int, float]:
-        # Add the keys that have been removed by validation
-        min_score = min(list(raw_scores.values()))
-        for key in self.score_buffer.mapping.keys():
-            if key not in raw_scores:
-                raw_scores[key] = min_score - self.epsilon
-        # Re-arrange raw_scores for buffer update
-        raw_scores = {key: raw_scores[key] for key in self.score_buffer.mapping.keys()}
-        new_fitnesses = np.array(list(raw_scores.values()))
-
-        self.score_idx += 1
-        if self.beta is not None:
-            self.score_buffer.update(score=new_fitnesses, ep_map=self.score_idx)
-            scores, episode_mapping = self.score_buffer.rollout(['score', 'ep_map'], as_list=True, stack=True)
-            self.sort_episodes(episode_mapping, scores)
-            true_scores = self.compute_returns(scores, 0, self.beta, self.reverse, episode_mapping)
-            true_scores = {k: torch.mean(t, dim=-1).item() for k, t in true_scores.items()}
-        else:
-            true_scores = raw_scores
-
-        return true_scores
-
     def set_scores(self, scores: dict[int, float], policy: dict[int, float] | None):
         if policy is not None:
             assert all([key in policy for key in scores.keys()])
@@ -188,7 +126,7 @@ class NEAT(Algorithm):
             scores = dict(sorted(scores.items(), key=sort_key, reverse=True))
         else:
             scores = dict(sorted(scores.items(), key=sort_key, reverse=True))
-        true_scores = self.calculate_scores(scores)
+        true_scores = scores
 
         available_keys = list(true_scores.keys())
         available_scores = list(true_scores.values())
@@ -231,25 +169,28 @@ class NEAT(Algorithm):
 
             # Running environment to collect rollout data
             ts = clock.perf_counter()
+            # TODO: The method for updating mapping of population keys should be here. Should support grouped keys maybe
             self.steps_limit = self.steps_done + steps
             self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
+            if len(self.population.to_delete) == len(self.population.genomes):
+                self.population.to_delete.clear()
             run_time = clock.perf_counter() - ts
             if verbose and verbose >= 2:
                 print(f"collected data in {CM(f'{round(run_time, 2)}s', Fore.LIGHTCYAN_EX)}")
 
             # Rolling out genomes that are not to be deleted
             pts = clock.perf_counter()
+            # TODO: Might need to remove the check below since it might be redundant
             invalid_population = len(self.population.to_delete) == len(self.population.genomes)
             valid_keys = [
-                key for key in self.replay.mapping.keys() if key not in self.population.to_delete or invalid_population
+                key for key in self.primary.mapping.keys() if key not in self.population.to_delete or invalid_population
             ] if self.validate else list(self.population.genomes.keys())
             if len(valid_keys) == 0:
                 valid_keys = list(self.population.genomes.keys())
-            # TODO: Check whether only rolling out valid keys is necessary
             with torch.no_grad():
                 # Roll out data from buffers
                 ts = clock.perf_counter()
-                states, actions, rewards, episode_mapping = self.replay.rollout(
+                states, actions, rewards, episode_mapping = self.primary.rollout(
                     ['state', 'action', 'reward', 'ep_map'], as_list=True, stack=True, keys=valid_keys
                 )
                 rollout_time = clock.perf_counter() - ts
@@ -265,30 +206,64 @@ class NEAT(Algorithm):
 
                 # Compute returns
                 ts = clock.perf_counter()
-                cum_rewards = self.compute_returns(rewards, self.gamma, self.alpha, self.reverse, episode_mapping)
+                returns_current = self.compute_returns(rewards, self.gamma, 0.0, False, episode_mapping)
                 ret_comp_time = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"computed returns in {CM(f'{round(ret_comp_time, 2)}s', Fore.LIGHTCYAN_EX)}")
 
+                # Set the new episodic returns to the secondary buffer
+                episodic_returns: dict[int, dict[int, tuple[float, int]]] = {
+                    key: {
+                        uei: (torch.mean(returns_current[key][episode_indices]).item(), len(episode_indices))
+                        for episode_indices, uei in [
+                            ([idx for idx, ep_idx in enumerate(episode_mapping[key]) if ep_idx == unique_ep_idx], unique_ep_idx)
+                            for unique_ep_idx in np.unique(episode_mapping[key])
+                        ]
+                    }
+                    for key in valid_keys
+                }
+                validate_lengths = [len(er) for er in episodic_returns.values()]
+                if not all([l == validate_lengths[0] for l in validate_lengths]):
+                    raise RuntimeError(f"Ensure all genomes go through the same number of steps in the environment;"
+                                       f"Got:\n {validate_lengths}")
+                episodes = sorted(set(sum([list(r.keys()) for r in episodic_returns.values()], [])))
+                for ep_idx in episodes:
+                    ec_reward = torch.tensor([
+                        episodic_returns[key][ep_idx][0] if key in valid_keys else -np.inf
+                        for key in self.secondary.mapping.keys()
+                    ])
+                    ep_len = [
+                        episodic_returns[key][ep_idx][1] if key in valid_keys else -np.inf
+                        for key in self.secondary.mapping.keys()
+                    ]
+                    self.secondary.update(ec_reward=ec_reward, ep_map=int(ep_idx), ep_len=ep_len)
+
+                if self.max_steps is not None:
+                    self.deque_steps_secondary(self.max_steps)
+                if self.max_episodes is not None:
+                    self.deque_episodes_secondary(self.max_episodes)
+
+                # Get full returns
+                returns, full_mapping, episode_lengths = self.secondary.rollout(
+                    ['ec_reward', 'ep_map', 'ep_len'], as_list=True, stack=True, keys=valid_keys
+                )
+                self.sort_episodes(full_mapping, returns)
+                returns = self.compute_returns(returns, 0, self.alpha, self.reverse, full_mapping)
+
                 # Compute scores from returns
                 scores: dict[int, float] = {
                     key: np.mean([
-                        torch.mean(cum_rewards[key][indices]).item()
+                        torch.mean(returns[key][indices]).item()
                         for indices in [
-                            [idx for idx, ep_idx in enumerate(episode_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(episode_mapping[key])
+                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
+                            for u_idx in np.unique(full_mapping[key])
                         ]
                     ])
                     for key in valid_keys
                 }
-                # unique_ep_count = {key: len(np.unique(episode_mapping[key])) for key in valid_keys}
-                # if verbose and verbose >= 2:
-                #     print(f"highest episode count is {CM(max(list(unique_ep_count.values())), Fore.LIGHTMAGENTA_EX)}")
-                # scores = self.calculate_scores(raw_scores)
-                # scores = {key: scores[key] for key in valid_keys}
 
                 # Get batches wrt. steps done per key
-                batch_indices = self.get_batches(valid_keys, batch_size, True)
+                batch_indices = self.get_batches(valid_keys, batch_size, False)
 
             # Calculate and set scores
             with torch.no_grad():
@@ -312,33 +287,33 @@ class NEAT(Algorithm):
                 ts = clock.perf_counter()
                 ep_len_mean = np.mean(episode_lengths[best_genome_key]).item()
                 ep_len_std  = np.std(episode_lengths[best_genome_key]).item()
-                episode_indices: list[int] = np.unique(episode_mapping[best_genome_key])
 
                 def get(buffer: TensorDict, episodic_mapping: dict[int, list[int]], key: int) -> list[list[float]]:
                     return [
                         [
                             value.mean().cpu().item()
-                            for idx, value in enumerate(buffer[best_genome_key])
-                            if episodic_mapping[best_genome_key][idx] == ep_idx
+                            for idx, value in enumerate(buffer[key])
+                            if episodic_mapping[key][idx] == ep_idx
                         ]
-                        for ep_idx in episode_indices
+                        for ep_idx in np.unique(episodic_mapping[key])
                     ]
                 episode_rewards = get(rewards, episode_mapping, best_genome_key)
-                cum_episode_rewards = get(cum_rewards, episode_mapping, best_genome_key)
+                cum_episode_rewards = get(returns, full_mapping, best_genome_key)
                 ep_rew_mean = np.mean([np.mean(episode) for episode in episode_rewards]).item()
                 ep_rew_std = np.mean([np.std(episode) for episode in episode_rewards]).item()
                 ep_cum_rew = np.mean([np.mean(episode) for episode in cum_episode_rewards]).item()
-                # global_rew = np.mean([
-                #     np.mean([np.mean(episode) for episode in get(rewards, episode_mapping, key)]).item()
-                #     for key in rewards.keys()
-                # ])
-                # global_cum_rew = np.mean([
-                #     np.mean([
-                #         np.mean(episode) for episode in
-                #         get(cum_rewards, episode_mapping, key)
-                #     ]).item()
-                #     for key in cum_rewards.keys()
-                # ])
+                global_rew = np.mean([
+                    np.mean([
+                        np.mean(episode) for episode in get(rewards, episode_mapping, key)
+                    ]).item()
+                    for key in rewards.keys()
+                ])
+                global_cum_rew = np.mean([
+                    np.mean([
+                        np.mean(episode) for episode in get(returns, full_mapping, key)
+                    ]).item()
+                    for key in returns.keys()
+                ])
                 try:
                     if self.pol_reg != 0:
                         policy_acc = policy_accuracy[best_genome_key] * 100
@@ -357,8 +332,8 @@ class NEAT(Algorithm):
                 except RuntimeError:
                     policy_acc = np.nan
                     policy_reduction = np.nan
-                buffer_sizes_primary = self.replay.buffer_sizes()
-                buffer_sizes_secondary = self.score_buffer.buffer_sizes()
+                buffer_sizes_primary = self.primary.buffer_sizes()
+                buffer_sizes_secondary = self.secondary.buffer_sizes()
 
                 # noinspection PyBroadException
                 def get_range(key: Union[int, None]):
@@ -399,8 +374,8 @@ class NEAT(Algorithm):
                 self.writer.add_scalar(extra+'ep_rew_mean', ep_rew_mean, self.updates_done)
                 self.writer.add_scalar(extra+'ep_rew_std', ep_rew_std, self.updates_done)
                 self.writer.add_scalar(extra+'ep_cum_rew', ep_cum_rew, self.updates_done)
-                # self.writer.add_scalar(extra+'global_rew', global_rew, self.updates_done)
-                # self.writer.add_scalar(extra+'global_cum_rew', global_cum_rew, self.updates_done)
+                self.writer.add_scalar(extra+'global_rew', global_rew, self.updates_done)
+                self.writer.add_scalar(extra+'global_cum_rew', global_cum_rew, self.updates_done)
                 self.writer.add_scalar(extra+'buffer_size_pri', buffer_sizes_primary[best_genome_key], self.updates_done)
                 self.writer.add_scalar(extra+'buffer_size_sec', buffer_sizes_secondary[best_genome_key], self.updates_done)
 
@@ -426,17 +401,23 @@ class NEAT(Algorithm):
                 self.writer.add_scalar(extra+'param_std', std, self.updates_done)
                 self.writer.add_scalar(extra+'param_min', minimum, self.updates_done)
                 self.writer.add_scalar(extra+'param_max', maximum, self.updates_done)
-                self.writer.add_scalar(extra+'zeros', zero_count, self.updates_done)
-                for param, label in zip(get_range(None), ['mean', 'std', 'max', 'min']):
+                self.writer.add_scalar(extra+'param_zeros', zero_count, self.updates_done)
+                for param, label in zip(get_range(None), ['mean', 'std', 'max', 'min', 'zeros']):
                     self.writer.add_scalar(extra+f'global_{label}', param, self.updates_done)
 
                 # Population
                 survival_rate = len(valid_keys) / len(self.population.genomes)
                 best_genome = self.population.genomes[best_genome_key]
+                if self.prev_valid_keys is None:
+                    creep = 0
+                else:
+                    creep = len([key for key in valid_keys if key in self.prev_valid_keys]) / len(self.population.genomes)
+                self.prev_valid_keys = valid_keys
                 extra = 'population/'
                 self.writer.add_scalar(extra+'best_genome', best_genome.key, self.updates_done)
                 self.writer.add_scalar(extra+'best_fitness', best_genome.fitness, self.updates_done)
                 self.writer.add_scalar(extra+'survival_rate', survival_rate, self.updates_done)
+                self.writer.add_scalar(extra+'creep_score', creep, self.updates_done)
 
                 # Schedule
                 extra = 'schedule/'
@@ -477,6 +458,9 @@ class NEAT(Algorithm):
                     f"\n{bar}"
                 )
 
+            # Clean up
+            self.deque_steps(0)
+
             if self.schedulers is not None:
                 for s in self.schedulers:
                     s.step()
@@ -486,16 +470,12 @@ class NEAT(Algorithm):
                                     terminate_skip=True)
 
             epoch_done += 1
-            if self.beta is not None:
-                self.deque_steps(0)
-            else:
-                self.deque_steps_secondary(0)
 
     def _explained_variance(self, batches: dict[int, list[list[int]]], states: TensorDict, rewards: TensorDict,
                             keys: Union[int, list[int]] = None):
         if isinstance(keys, (int, float)):
             keys = [keys]
-        keys = list(self.replay.mapping.keys()) if keys is None else keys
+        keys = list(self.primary.mapping.keys()) if keys is None else keys
         with torch.no_grad():
             ex_var = {}
 

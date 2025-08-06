@@ -21,6 +21,9 @@ import random
 import numpy as np
 import math
 
+class NEATAlgoWarning(Warning):
+    pass
+
 TensorDict = dict[int, Tensor]
 
 
@@ -39,7 +42,8 @@ class Algorithm(object):
         self.models                     = models
         self.population: Population     = population
         self.schedulers: list[Scheduler] = schedulers
-        self.replay                     = ReplayBuffer()
+        self.primary                    = ReplayBuffer()
+        self.secondary                  = ReplayBuffer()
         self.logging                    = ReplayBuffer()
         # ------------------------------ Attributes ------------------------------ #
         self.steps_done                 = 0
@@ -70,7 +74,8 @@ class Algorithm(object):
         raise ValueError(f"Cannot find module")
 
     def update_mapping(self, mapping: dict[int, int]):
-        self.replay.update_mapping(mapping)
+        self.primary.update_mapping(mapping)
+        self.secondary.update_mapping(mapping)
         self.logging.update_mapping(mapping)
 
     def deque_episodes(self, episodes: int, keys: list[int] = None):
@@ -83,15 +88,15 @@ class Algorithm(object):
         """
         assert episodes >= 0
         filters = {}
-        episode_mapping: dict[int, list[int]] = self.replay.rollout(buffers='ep_map', as_list=True)[0]
-        for key in self.replay.mapping.keys():
+        episode_mapping: dict[int, list[int]] = self.primary.rollout(buffers='ep_map', as_list=True)[0]
+        for key in self.primary.mapping.keys():
             episodes_to_del = torch.tensor([ep for ep in range(self.episodes_done) if ep < (self.episodes_done-episodes)])
             mapping         = torch.tensor(episode_mapping[key])
             episode_filter  = torch.isin(mapping, episodes_to_del)
             record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
             # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
             filters[key] = record_filter
-        self.replay.deque(filters, keys)
+        self.primary.deque(filters, keys)
 
     def deque_steps(self, steps: int, keys: list[int] = None):
         """
@@ -103,15 +108,54 @@ class Algorithm(object):
         """
         assert steps >= 0
         filters = {}
-        episode_mapping: dict[int, list[int]] = self.replay.rollout(buffers='ep_map', as_list=True)[0]
-        for key in self.replay.mapping.keys():
+        episode_mapping: dict[int, list[int]] = self.primary.rollout(buffers='ep_map', as_list=True)[0]
+        for key in self.primary.mapping.keys():
             records = len(episode_mapping[key])
             limit = max(0, records - steps)
             filters[key] = [i for i in range(records) if i < limit]
-        self.replay.deque(filters, keys)
+        self.primary.deque(filters, keys)
+
+    def deque_episodes_secondary(self, episodes: int, keys: list[int] = None):
+        """
+        Deletes the episodes before the last n episodes.
+        Used to compensate for the long data collection times of the NEAT evaluation functions.
+        :param episodes: (int) Number of recent episodes to keep.
+        :param keys: (list[int])
+        :return: (none)
+        """
+        assert episodes >= 0
+        filters = {}
+        episode_mapping: dict[int, list[int]] = self.secondary.rollout(buffers='ep_map', as_list=True)[0]
+        for key in self.secondary.mapping.keys():
+            maximum = max(self.secondary.data[key]['ep_map'])
+            episodes_to_del = torch.tensor([ep for ep in range(maximum+1) if ep < (maximum+1-episodes)])
+            mapping = torch.tensor(episode_mapping[key])
+            episode_filter  = torch.isin(mapping, episodes_to_del)
+            record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
+            # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
+            filters[key] = record_filter
+        self.secondary.deque(filters, keys)
+
+    def deque_steps_secondary(self, steps: int, keys: list[int] = None):
+        """
+        Deletes the last n steps.
+        Used to compensate for the large data sizes of the NEAT evaluation functions.
+        :param steps: (int) Number of steps to keep.
+        :param keys: (list[int])
+        :return: (none)
+        """
+        assert steps >= 0
+        filters = {}
+        episode_mapping: dict[int, list[int]] = self.secondary.rollout(buffers='ep_map', as_list=True)[0]
+        for key in self.secondary.mapping.keys():
+            records = len(episode_mapping[key])
+            limit = max(0, records - steps)
+            filters[key] = [i for i in range(records) if i < limit]
+        self.secondary.deque(filters, keys)
 
     def reset_buffers(self):
-        self.replay.reset()
+        self.primary.reset()
+        self.secondary.reset()
 
     def handle_episode_mapping(self, terminated: bool | list[bool], force_reset: bool | list[bool] = False):
         # Type handling and error catching
@@ -157,7 +201,7 @@ class Algorithm(object):
     def get_batches(self, keys: list[int], batch_size: int = None, shuffle=False):
         batches = {}
         for key in keys:
-            records = len(list(self.replay.data[key].values())[0])
+            records = len(list(self.primary.data[key].values())[0])
 
             if batch_size is None:
                 batch_size = records
@@ -281,9 +325,9 @@ class Algorithm(object):
             zero_rew_num = np.count_nonzero([len(tensor) for tensor in rewards.values()])
             print(CM(
                 f"\nThe number of genomes with 0 rewards are {zero_rew_num}/{len(rewards)}:\n" + (
-                    f"\tgenomes = {len(self.replay.data)}"
-                    f"\tmin_size = {self.replay.min_size()}"
-                    f"\tmax_size = {self.replay.max_size()}"
+                    f"\tgenomes = {len(self.primary.data)}"
+                    f"\tmin_size = {self.primary.min_size()}"
+                    f"\tmax_size = {self.primary.max_size()}"
                     f"\n"
                 ) if self is not None else '',
                 Fore.MAGENTA
@@ -323,9 +367,13 @@ class Algorithm(object):
                         factor -= 1
                     else:
                         factor += 1
-                reward = reward * (alpha ** factor)
+                if alpha is not None and alpha != 0.0:
+                    reward = reward * (alpha ** factor)
                 # reward = reward * ((alpha if (reward > 0 and alpha > 1) or (reward < 0 and alpha < 1) else 1) ** factor)
-                discounted_reward = reward + (discounted_reward * gamma)
+                if gamma != 0:
+                    discounted_reward = reward + (discounted_reward * gamma)
+                else:
+                    discounted_reward = reward
                 rewards_to_go.insert(0, discounted_reward)
                 idx = ep_idx
             cm = torch.stack(rewards_to_go).to(rewards_.device, rewards_.dtype)
@@ -343,7 +391,7 @@ class Algorithm(object):
                      keys: Union[int, list[int]] = None) -> tuple[dict[int, float], dict[int, float]]:
         if isinstance(keys, (int, float)):
             keys = [keys]
-        all_keys = list(self.replay.mapping.keys())
+        all_keys = list(self.primary.mapping.keys())
         keys = all_keys if keys is None else keys
         with torch.no_grad():
             ts, ud, ut = clock.perf_counter(), 0, len(keys)
@@ -359,7 +407,11 @@ class Algorithm(object):
 
                         # Get action accuracy
                         action = actions[key][batch].to(self.device)
-                        action_pred: Tensor = self.get_module(key).get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
+                        try:
+                            action_pred: Tensor = self.get_module(key).get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
+                        except Exception as e:
+                            self.get_module(key).get_policy(observation.unsqueeze(0), keys=key, verbose=2)
+                            raise e
                         try:
                             if type == 'continuous':
                                 action_res = ((action_pred <= action * (1+error)) & (action_pred >= action * (1-error))).float()

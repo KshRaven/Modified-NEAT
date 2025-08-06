@@ -24,6 +24,7 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
                   ssm: bool, add_param: float, delete_param: float,
                   probabilities: tuple[GPUArray, ...], normals: GPUArray, rng_index: int):
     value = get_value(parameter, g, x, y)
+
     if ssm:
         div = max(1, add_param + delete_param)
         r = prob(probabilities[0], rng_index)

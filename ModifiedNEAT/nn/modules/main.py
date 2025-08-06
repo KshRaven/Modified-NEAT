@@ -1,6 +1,6 @@
 
 from ModifiedNEAT.nn.base import Model, NeatModule
-from ModifiedNEAT.nn.modules import BufferEncoding, BufferEmbedding, TransformerBase
+from ModifiedNEAT.nn.modules import SequenceEncoding, BufferEncoding, BufferEmbedding, TransformerBase
 from ModifiedNEAT.nn.modules import Sequential, Linear, Transpose, Ignore
 from ModifiedNEAT.nn.modules import Conv1d, Conv2d, Conv3d, ResidualBlock, ConverBase
 from ModifiedNEAT.nn.modules import LayerNorm, RMSNorm, GroupNorm, BatchNorm
@@ -153,7 +153,7 @@ class Conver(NeatModule):
             *[
                 ResidualBlock(dim_size, dim_size, kernel_size, norm_groups, bias, device, dtype, **options)
                 for _ in range(self.enc_layers)
-            ]
+            ],
         )
         self.transformer = ConverBase(
             (max_seq_len,), dim_size, self.trans_kernel_size, norm_groups, layers, heads, kv_heads, differential,
@@ -391,9 +391,9 @@ class Reformer(Model):
         mean    = self.get_mean(source, keys)
         std     = self.get_std(source, keys)
         if verbose:
-            print(f"\n{CM('Mean =>', Fore.LIGHTCYAN_EX)}\n{mean}, \n\tdim = {mean.shape}")
+            print(get_tensor_info(mean, f"{self.__class__.__name__} Mean", verbose))
             if std is not None:
-                print(f"\n{CM('Std =>', Fore.LIGHTCYAN_EX)}\n{std}, \n\tdim = {std.shape}")
+                print(get_tensor_info(std, f"{self.__class__.__name__} StdDev", verbose))
         dist    = self.dist(mean, std, None, None)
         action  = dist.sample() if self.probabilistic else mean
         if self.sec_actv is not None:

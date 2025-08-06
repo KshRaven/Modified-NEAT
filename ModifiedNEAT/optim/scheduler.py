@@ -16,6 +16,7 @@ class Scheduler(object):
         elif isinstance(params, str):
             params = [params]
         self.params: list[str] = params
+        self._step_idx = 0
 
     def get(self, variable: str, config: Config = None) -> Union[int, float, bool, str, None]:
         if config is None:
@@ -39,6 +40,7 @@ class Scheduler(object):
         raise ValueError(f"Variable '{variable}' does not exist in Config")
 
     def reset(self):
+        self._step_idx = 0
         for param in self.params:
             self.set(param, self.get(param, self._config), self.config)
 
@@ -46,6 +48,7 @@ class Scheduler(object):
         raise NotImplementedError(f"modify method is not implemented")
 
     def step(self):
+        self._step_idx += 1
         for param in self.params:
             self.modify(param)
 
@@ -58,7 +61,6 @@ class CosineAnnealing(Scheduler):
         self.period = period
         self.factor = factor
         self._theta = np.linspace(0, (2 if not warm else 1) * np.pi, period)
-        self._step_idx = 0
         self.log_scaling = log
 
     def modifier(self, param: str):
@@ -85,14 +87,13 @@ class CosineAnnealing(Scheduler):
         self.set(param, new_value)
 
     def modify(self, param: str):
-        self._step_idx += 1
         self.modifier(param)
         if self._step_idx == self.period:
             self.reset()
 
 
 class RandomAnnealing(Scheduler):
-    def __init__(self, config: Config, min: float, max: float, params: Union[str, list[str]] = None, log=False):
+    def __init__(self, config: Config, min: float, max: float, step=1, params: Union[str, list[str]] = None, log=False):
         assert max > min
         super(RandomAnnealing, self).__init__(config, params)
         for param in self.params:
@@ -101,18 +102,19 @@ class RandomAnnealing(Scheduler):
         self.log_scaling = log
         self.min = min
         self.max = max
+        self._step = step
 
     def modify(self, param: str):
-        min, max = self.min, self.max
-        if self.log_scaling:
-            min, max = np.log10(min), np.log10(max)
-        diff = max - min
-        scale = np.random.rand() * diff
-        new_value = min + scale
-        if self.log_scaling:
-            new_value = 10 ** new_value
-        self.set(param, new_value)
-
+        if self._step_idx % self._step == 0:
+            min, max = self.min, self.max
+            if self.log_scaling:
+                min, max = np.log10(min), np.log10(max)
+            diff = max - min
+            scale = np.random.rand() * diff
+            new_value = min + scale
+            if self.log_scaling:
+                new_value = 10 ** new_value
+            self.set(param, new_value)
 
 
 if __name__ == '__main__':
