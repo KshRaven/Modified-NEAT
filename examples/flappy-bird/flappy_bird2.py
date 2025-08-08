@@ -832,7 +832,7 @@ def run():
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
-        gamma=GAMMA, alpha=ALPHA, beta=BETA, reverse=False, best=True,
+        gamma=GAMMA, alpha=ALPHA, reverse=False, best=True, normalize=True,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
         max_episodes=MEMORY_SIZE,
     )

@@ -53,6 +53,7 @@ class NEAT(Algorithm):
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
         self.reverse: bool      = manage_params(options, 'reverse', False)
         self.best: bool         = manage_params(options, 'best', False)
+        self.normalize: bool    = manage_params(options, 'normalize', True)
         self.epsilon: float     = manage_params(options, 'epsilon', 1e-10)
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
         self.pol_reg: float     = manage_params(options, 'pol_reg', 0.0)
@@ -120,9 +121,9 @@ class NEAT(Algorithm):
             key, score = item
             return score, -key
 
-        scores = dict(sorted(self.normalize(scores).items(), key=sort_key, reverse=True))
+        scores = dict(sorted(self.normalize_array(scores).items(), key=sort_key, reverse=True))
         if self.pol_reg != 0:
-            policy = self.normalize(policy, None, self.segr_size, scores)
+            policy = self.normalize_array(policy, None, self.segr_size, scores)
             scores = {key: self.rew_reg*scores[key] + self.pol_reg*policy[key] for key in scores.keys()}
             scores = dict(sorted(scores.items(), key=sort_key, reverse=True))
         else:
@@ -142,10 +143,10 @@ class NEAT(Algorithm):
             if genome.key in available_keys:
                 genome.fitness = true_scores[genome.key]
             else:
-                if pre_set:
-                    genome.fitness = min_fitness - ((maximum - genome.fitness) / (maximum - minimum))
-                else:
-                    genome.fitness = min_fitness - self.epsilon
+                # if pre_set:
+                #     genome.fitness = min_fitness - ((maximum - genome.fitness) / (maximum - minimum))
+                # else:
+                genome.fitness = min_fitness - self.epsilon
 
         criterion = self.population.config.general.fitness_criterion
         if criterion == 'max':
@@ -207,7 +208,7 @@ class NEAT(Algorithm):
 
                 # Compute returns
                 ts = clock.perf_counter()
-                returns_current = self.compute_returns(rewards, self.gamma, 0.0, False, False, episode_mapping)
+                returns_current = self.compute_returns(rewards, self.gamma, 0.0, False, False, False, episode_mapping)
                 ret_comp_time = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"computed returns in {CM(f'{round(ret_comp_time, 2)}s', Fore.LIGHTCYAN_EX)}")
@@ -249,7 +250,7 @@ class NEAT(Algorithm):
                     ['ec_reward', 'ep_map', 'ep_len'], as_list=True, stack=True, keys=valid_keys
                 )
                 self.sort_episodes(full_mapping, returns)
-                returns = self.compute_returns(returns, 0, self.alpha, self.reverse, self.best, full_mapping)
+                returns = self.compute_returns(returns, 0, self.alpha, self.reverse, self.best, self.normalize, full_mapping)
 
                 # Compute scores from returns
                 scores: dict[int, float] = {
@@ -276,7 +277,7 @@ class NEAT(Algorithm):
                 balanced_scores = {}
                 for genus in self.population.genera:
                     genus_scores = {key: score for key, score in scores.items() if self.population.genomes[key].genus == genus}
-                    for key, score in self.normalize(genus_scores).items():
+                    for key, score in self.normalize_array(genus_scores).items():
                         balanced_scores[key] = score
                 best_genome_key = self.set_scores(balanced_scores, policy_accuracy)
                 set_time = clock.perf_counter() - ts
@@ -410,7 +411,7 @@ class NEAT(Algorithm):
                 survival_rate = len(valid_keys) / len(self.population.genomes)
                 best_genome = self.population.genomes[best_genome_key]
                 if self.prev_valid_keys is None:
-                    creep = 0
+                    creep = np.nan
                 else:
                     creep = len([key for key in valid_keys if key in self.prev_valid_keys]) / len(self.population.genomes)
                 self.prev_valid_keys = valid_keys

@@ -316,7 +316,7 @@ class Algorithm(object):
         return returns, advantages
 
     @staticmethod
-    def compute_returns_static(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False, best=False,
+    def compute_returns_static(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False, best=False, normalize=True,
                         episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None):
         keys = list(rewards.keys())
         try:
@@ -353,8 +353,14 @@ class Algorithm(object):
                 raise ValueError(f"Episodes have not been sorted well for '{self.__class__.__name__}'; "
                                  f"Error for key '{key}' at index {error[1]}, when testing for index {error[0]}.")
 
+        minimum, maximum = [
+            g([f(r).cpu().item() for r in rewards.values()])
+            for f, g in zip([torch.min, torch.max], [np.min, np.max])
+        ] if normalize else (None, None)
         returns: TensorDict = {}
         for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):
+            if normalize:
+                rewards_ = (rewards_ - minimum) / (maximum - minimum)
             if best:
                 if len(rewards_) != len(episodes_):
                     raise ValueError(f"Number of rewards (scores) must be equal to number of episodes for key '{key}' "
@@ -390,8 +396,8 @@ class Algorithm(object):
         return returns
 
     def compute_returns(self, rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False,
-                        best=False, episodes: dict[int, list[int]] = None, device: torch.device = None):
-        return self.compute_returns_static(rewards, gamma, alpha, reverse, best, episodes, device, self)
+                        best=False, normalize=False, episodes: dict[int, list[int]] = None, device: torch.device = None):
+        return self.compute_returns_static(rewards, gamma, alpha, reverse, best, normalize, episodes, device, self)
 
     def get_accuracy(self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
                      rewards: TensorDict = None, error=0.10, type='continuous', verbose: int = None,
@@ -478,7 +484,7 @@ class Algorithm(object):
         ]
         return clusters
 
-    def normalize(self, array: dict[int, Any], index: int = None, segr_size: int = None, ranking: dict[int, float] = None):
+    def normalize_array(self, array: dict[int, Any], index: int = None, segr_size: int = None, ranking: dict[int, float] = None):
         keys, source = list(array.keys()), list(array.values())
 
         # Handle errors
@@ -507,7 +513,7 @@ class Algorithm(object):
         # print(np.max(source), np.min(source), source.mean(), source.std())
         maximum, minimum = np.max(source), np.min(source)
         if maximum > minimum:
-            norm_source: ndarray[float] = (source - minimum) / (maximum - minimum)
+            norm_source: ndarray = (source - minimum) / (maximum - minimum)
         else:
             norm_source = np.full_like(source, 1.0)
 
@@ -525,14 +531,14 @@ class Algorithm(object):
             clusters = self.segregate(norm_array, segr_size)
             segr_range = max(list(norm_array.values())) / len(clusters)
             for c_idx, cluster in enumerate(clusters):
-                for key, norm_value in self.normalize(cluster).items():
+                for key, norm_value in self.normalize_array(cluster).items():
                     segr_norm_array[key] = (norm_value*segr_range) + ((len(clusters)-1-c_idx)*segr_range)
             norm_array = segr_norm_array
 
         return norm_array
 
     @staticmethod
-    def level(array: dict[int, Any]) -> dict[int, float]:
+    def level_array(array: dict[int, Any]) -> dict[int, float]:
         keys, source = list(array.keys()), list(array.values())
 
         # Handle errors

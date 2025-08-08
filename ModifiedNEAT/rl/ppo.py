@@ -146,8 +146,8 @@ class PPO(Algorithm):
     def set_scores(self, scores: dict[int, float], policy: dict[int, float]):
         assert all([key in policy for key in scores.keys()])
         if self.pol_reg != 0:
-            scores = dict(sorted(self.normalize(scores).items(), key=lambda item: (item[1], -item[0]), reverse=True))
-            policy = self.normalize(policy, None, self.groups, scores)
+            scores = dict(sorted(self.normalize_array(scores).items(), key=lambda item: (item[1], -item[0]), reverse=True))
+            policy = self.normalize_array(policy, None, self.groups, scores)
             true_scores = {key: self.rew_reg*scores[key] + self.pol_reg*policy[key] for key in scores.keys()}
             true_scores = dict(sorted(true_scores.items(), key=lambda item: (item[1], -item[0]), reverse=True))
         else:
