@@ -531,7 +531,7 @@ class RModel(Model):
         latent      = self.pol_proj(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = torch.distributions.Normal(mean, std)
-        action      = dist.sample()
+        action      = mean # dist.sample()
         if self.sec_actv is not None:
             action = self.sec_actv(action)
         log_prob    = dist.log_prob(action)
@@ -549,7 +549,7 @@ class RModel(Model):
         latent      = self.pol_proj(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = torch.distributions.Normal(mean, std)
-        action      = dist.sample()
+        action      = mean # dist.sample()
         if self.sec_actv is not None:
             action = self.sec_actv(action)
         return action
@@ -571,16 +571,16 @@ def fix(value: float, default: float = 1):
 GENOMES     = 50
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 64
-KERNEL_SIZE = 3
+EMBED_SIZE  = 16
+KERNEL_SIZE = 1
 NORM_GROUPS = 1
-SEQ_LEN     = 4
+SEQ_LEN     = 2
 LAYERS      = 1
-HEADS       = 4
+HEADS       = 1
 KV_HEADS    = HEADS
 ENABLE_BIAS = True
-DIFFERENTIAL = True
-MEMORY_SIZE = 3
+DIFFERENTIAL = False
+MEMORY_SIZE = 5
 GAMMA       = np.exp(np.log(0.33) / 4)
 ALPHA       = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
 BETA        = None # fix(np.exp(np.log(1.5) / (5 - 1)), 1.0)
@@ -807,6 +807,7 @@ def run():
     config.species.compatibility_threshold      = np.inf
     config.stagnation.max_stagnation            = 1
     config.stagnation.species_elitism           = 2
+    config.reproduction.darwin_multiplier       = 0.50
     config.save()
     config.load(2)
 
@@ -831,7 +832,7 @@ def run():
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
-        gamma=GAMMA, alpha=ALPHA, beta=BETA, reverse=False,
+        gamma=GAMMA, alpha=ALPHA, beta=BETA, reverse=False, best=True,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
         max_episodes=MEMORY_SIZE,
     )

@@ -163,7 +163,7 @@ class Conver(NeatModule):
         for layer_idx in range(self.dec_layers):
             if layer_idx != self.dec_layers - 1:
                 decoder.append(
-                    ResidualBlock(dim_size, dim_size, kernel_size, norm_groups, bias, device, dtype, **options)
+                    ResidualBlock(dim_size, dim_size, 1, norm_groups, bias, device, dtype, **options)
                 )
             else:
                 decoder.extend([

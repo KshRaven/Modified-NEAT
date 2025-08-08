@@ -316,7 +316,7 @@ class Algorithm(object):
         return returns, advantages
 
     @staticmethod
-    def compute_returns_static(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False,
+    def compute_returns_static(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False, best=False,
                         episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None):
         keys = list(rewards.keys())
         try:
@@ -355,6 +355,14 @@ class Algorithm(object):
 
         returns: TensorDict = {}
         for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):
+            if best:
+                if len(rewards_) != len(episodes_):
+                    raise ValueError(f"Number of rewards (scores) must be equal to number of episodes for key '{key}' "
+                                     f"when parameter 'best' is enabled.")
+                scores = torch.mean(rewards_.view(rewards_.shape[0], -1), dim=-1)
+                _, episode_ranking = torch.sort(scores, descending=False) # Ensure the best is last
+                rewards_ = rewards_[episode_ranking]
+                reverse = False
             assert key == c_key
             rewards_to_go = []
             idx = episodes_[-1]
@@ -367,9 +375,8 @@ class Algorithm(object):
                         factor -= 1
                     else:
                         factor += 1
-                if alpha is not None and alpha != 0.0:
+                if alpha is not None and alpha > 1.0:
                     reward = reward * (alpha ** factor)
-                # reward = reward * ((alpha if (reward > 0 and alpha > 1) or (reward < 0 and alpha < 1) else 1) ** factor)
                 if gamma != 0:
                     discounted_reward = reward + (discounted_reward * gamma)
                 else:
@@ -383,8 +390,8 @@ class Algorithm(object):
         return returns
 
     def compute_returns(self, rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False,
-                        episodes: dict[int, list[int]] = None, device: torch.device = None):
-        return self.compute_returns_static(rewards, gamma, alpha, reverse, episodes, device, self)
+                        best=False, episodes: dict[int, list[int]] = None, device: torch.device = None):
+        return self.compute_returns_static(rewards, gamma, alpha, reverse, best, episodes, device, self)
 
     def get_accuracy(self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
                      rewards: TensorDict = None, error=0.10, type='continuous', verbose: int = None,

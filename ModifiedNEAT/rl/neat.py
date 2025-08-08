@@ -51,7 +51,8 @@ class NEAT(Algorithm):
         # Options
         self.gamma: float       = manage_params(options, 'gamma', 0.95)
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
-        self.reverse: bool      = manage_params(options, 'reverse', True)
+        self.reverse: bool      = manage_params(options, 'reverse', False)
+        self.best: bool         = manage_params(options, 'best', False)
         self.epsilon: float     = manage_params(options, 'epsilon', 1e-10)
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
         self.pol_reg: float     = manage_params(options, 'pol_reg', 0.0)
@@ -206,7 +207,7 @@ class NEAT(Algorithm):
 
                 # Compute returns
                 ts = clock.perf_counter()
-                returns_current = self.compute_returns(rewards, self.gamma, 0.0, False, episode_mapping)
+                returns_current = self.compute_returns(rewards, self.gamma, 0.0, False, False, episode_mapping)
                 ret_comp_time = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"computed returns in {CM(f'{round(ret_comp_time, 2)}s', Fore.LIGHTCYAN_EX)}")
@@ -248,7 +249,7 @@ class NEAT(Algorithm):
                     ['ec_reward', 'ep_map', 'ep_len'], as_list=True, stack=True, keys=valid_keys
                 )
                 self.sort_episodes(full_mapping, returns)
-                returns = self.compute_returns(returns, 0, self.alpha, self.reverse, full_mapping)
+                returns = self.compute_returns(returns, 0, self.alpha, self.reverse, self.best, full_mapping)
 
                 # Compute scores from returns
                 scores: dict[int, float] = {
