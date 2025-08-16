@@ -319,21 +319,22 @@ class Algorithm(object):
     def compute_returns_static(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False, best=False, normalize=True,
                         episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None):
         keys = list(rewards.keys())
-        try:
-            max_records = int(np.max([tensor.shape for tensor in rewards.values()]))
-        except Exception as e:
-            zero_rew_num = np.count_nonzero([len(tensor) for tensor in rewards.values()])
-            print(CM(
-                f"\nThe number of genomes with 0 rewards are {zero_rew_num}/{len(rewards)}:\n" + (
-                    f"\tgenomes = {len(self.primary.data)}"
-                    f"\tmin_size = {self.primary.min_size()}"
-                    f"\tmax_size = {self.primary.max_size()}"
-                    f"\n"
-                ) if self is not None else '',
-                Fore.MAGENTA
-            ))
-            raise e
+
         if episodes is None:
+            try:
+                max_records = int(np.max([tensor.shape  if not isinstance(tensor, (float, int)) else tensor for tensor in rewards.values()]))
+            except Exception as e:
+                zero_rew_num = np.count_nonzero([len(tensor) for tensor in rewards.values()])
+                print(CM(
+                    f"\nThe number of genomes with 0 rewards are {zero_rew_num}/{len(rewards)}:\n" + (
+                        f"\tgenomes = {len(self.primary.data)}"
+                        f"\tmin_size = {self.primary.min_size()}"
+                        f"\tmax_size = {self.primary.max_size()}"
+                        f"\n"
+                    ) if self is not None else '',
+                    Fore.MAGENTA
+                ))
+                raise e
             episodes = {key: [0 for _ in range(max_records)] for key in keys}
 
         @njit
@@ -353,14 +354,19 @@ class Algorithm(object):
                 raise ValueError(f"Episodes have not been sorted well for '{self.__class__.__name__}'; "
                                  f"Error for key '{key}' at index {error[1]}, when testing for index {error[0]}.")
 
-        minimum, maximum = [
+        def fixed_std(tensor):
+            if tensor.ndim < 1 or tensor.numel() <= 1:
+                return torch.zeros_like(tensor).mean()
+            return torch.std(tensor)
+
+        global_mean, global_std = [
             g([f(r).cpu().item() for r in rewards.values()])
-            for f, g in zip([torch.min, torch.max], [np.min, np.max])
+            for f, g in zip([torch.mean, fixed_std], [np.mean, np.mean])
         ] if normalize else (None, None)
         returns: TensorDict = {}
         for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):
             if normalize:
-                rewards_ = (rewards_ - minimum) / (maximum - minimum)
+                rewards_ = (rewards_ - global_mean) / (global_std + 1e-9)
             if best:
                 if len(rewards_) != len(episodes_):
                     raise ValueError(f"Number of rewards (scores) must be equal to number of episodes for key '{key}' "

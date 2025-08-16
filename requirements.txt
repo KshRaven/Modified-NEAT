@@ -1,7 +1,7 @@
 
 numba
 numpy
-cupy
+cupy-cuda12x
 torch
 matplotlib
 colorama

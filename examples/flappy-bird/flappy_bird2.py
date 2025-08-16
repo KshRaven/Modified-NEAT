@@ -78,7 +78,7 @@ class Pipe(object):
         self.set_height()
 
     def set_height(self,):
-        self.height = random.randrange(self.u_lim, self.l_lim)
+        self.height = float(random.randrange(self.u_lim, self.l_lim))
         self.top    = self.height - self.pipe_top.get_height()
         self.bottom = self.height + random.randint(self.gap_l_lim, self.gap_u_lim)
 

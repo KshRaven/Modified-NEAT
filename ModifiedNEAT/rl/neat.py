@@ -411,15 +411,23 @@ class NEAT(Algorithm):
                 survival_rate = len(valid_keys) / len(self.population.genomes)
                 best_genome = self.population.genomes[best_genome_key]
                 if self.prev_valid_keys is None:
-                    creep = np.nan
+                    creep = creep_max = np.nan
+                elif len(valid_keys) <= 0:
+                    creep = creep_max = 0.0
                 else:
-                    creep = len([key for key in valid_keys if key in self.prev_valid_keys]) / len(self.population.genomes)
+                    creep = len([key for key in self.prev_valid_keys if key in valid_keys]) / len(valid_keys)
+                    max_buffer_size = max(buffer_sizes_secondary.values())
+                    creep_max = len([
+                        key for key in self.prev_valid_keys
+                        if key in valid_keys and buffer_sizes_secondary[key] == max_buffer_size
+                    ]) / len(valid_keys)
                 self.prev_valid_keys = valid_keys
                 extra = 'population/'
                 self.writer.add_scalar(extra+'best_genome', best_genome.key, self.updates_done)
                 self.writer.add_scalar(extra+'best_fitness', best_genome.fitness, self.updates_done)
                 self.writer.add_scalar(extra+'survival_rate', survival_rate, self.updates_done)
                 self.writer.add_scalar(extra+'creep_score', creep, self.updates_done)
+                self.writer.add_scalar(extra+'creep_score_max', creep_max, self.updates_done)
 
                 # Schedule
                 extra = 'schedule/'
