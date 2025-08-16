@@ -13,7 +13,6 @@ INT     = types.int64
 STR     = typeof('str')
 BOOL    = types.boolean
 
-from neat import DefaultGenome
 @jitclass([
     ('key', INT),
     ('bias', FLOAT),

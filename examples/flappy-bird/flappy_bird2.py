@@ -326,8 +326,8 @@ class Birds(object):
                    self.y.detach().cpu().numpy(), self.dead.detach().cpu().numpy())
         for idx, (bird_mask, x, y, dead) in enumerate(zip_):
             if not dead:
-                top_offset = (pipe.x - x, pipe.top - round(y))
-                bot_offset = (pipe.x - x, pipe.bottom - round(y))
+                top_offset = (int(pipe.x - x), int(pipe.top - round(y)))
+                bot_offset = (int(pipe.x - x), int(pipe.bottom - round(y)))
 
                 b_point = bird_mask.overlap(bot_mask, bot_offset)
                 t_point = bird_mask.overlap(top_mask, top_offset)
@@ -817,7 +817,7 @@ def run():
     population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
     population.absorb_population(population1)
     print(MODEL.pol_proj)
-    # population.load_dict(name='flappy_bird', file_no=None)
+    population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.NEAT(
         population,
@@ -832,7 +832,7 @@ def run():
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
-        gamma=GAMMA, alpha=ALPHA, reverse=False, best=True, normalize=True,
+        gamma=GAMMA, alpha=ALPHA, reverse=False, best=False, normalize=True,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
         max_episodes=MEMORY_SIZE,
     )

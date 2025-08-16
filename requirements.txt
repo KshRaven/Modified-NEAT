@@ -1,5 +1,7 @@
 
 numba
+numba-cuda[cu12]
+numba-cuda[cu13]
 numpy
 cupy-cuda12x
 torch
