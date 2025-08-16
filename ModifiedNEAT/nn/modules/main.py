@@ -137,7 +137,7 @@ class Conver(NeatModule):
             Convolution(self.feedback, dim_size, 1, stride=1, padding=-1,
                         padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                         bias=bias, device=device, dtype=dtype),
-            GroupNorm(dim_size, dim_size, self.epsilon, False, bias, device, dtype),
+            GroupNorm(dim_size, dim_size, self.epsilon, self.affine, False, device, dtype),
             Convolution(dim_size, self.feedback, 1, stride=1, padding=-1,
                         padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                         bias=bias, device=device, dtype=dtype),

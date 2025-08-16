@@ -38,7 +38,7 @@ class ResidualBlock(NeatModule):
         self.affine: bool     = manage_params(options, 'affine', True)
         self.image_ndim: bool     = manage_params(options, 'image_ndim', 2)
 
-        # ModifiedNEAT
+        # Build
         try:
             if self.image_ndim == 1:
                 Convolution = Conv1d

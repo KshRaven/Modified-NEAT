@@ -472,7 +472,7 @@ class Game(object):
 class RModel(Model):
     def __init__(self, inputs: int, outputs: int, seq_len: int, dim_size: int, layers: int,
                  kernel_size=1, heads: int = None, kv_heads: int = None, differential: int = False, norm_groups=1,
-                 bias=False, device: torch.device = 'cpu', dtype: torch.device = torch.float32):
+                 probabilistic=True, bias=False, device: torch.device = 'cpu', dtype: torch.device = torch.float32):
         super().__init__()
         # Attributes
         self.inputs         = inputs
@@ -484,6 +484,7 @@ class RModel(Model):
         self.stride         = 1
         self.norm_groups    = norm_groups
         self.differential   = differential
+        self.probabilistic  = probabilistic
         padding_mode   = 'reflect'
 
         # Build
@@ -500,7 +501,7 @@ class RModel(Model):
             nn.Flatten(-2, -1),
             self.pri_actv,
         ])
-        self.mean_log_std = Linear(dim_size, 2*outputs, bias, device, dtype)
+        self.mean_log_std = Linear(dim_size, 2*outputs, True, device, dtype)
         self.sec_actv   = None
         # self.val_proj   = neat.nn.Sequential(*[
         #     Transpose(),
@@ -531,7 +532,7 @@ class RModel(Model):
         latent      = self.pol_proj(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = torch.distributions.Normal(mean, std)
-        action      = mean # dist.sample()
+        action      = dist.sample() if self.probabilistic else mean
         if self.sec_actv is not None:
             action = self.sec_actv(action)
         log_prob    = dist.log_prob(action)
@@ -549,7 +550,7 @@ class RModel(Model):
         latent      = self.pol_proj(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = torch.distributions.Normal(mean, std)
-        action      = mean # dist.sample()
+        action      = dist.sample() if self.probabilistic else mean
         if self.sec_actv is not None:
             action = self.sec_actv(action)
         return action
@@ -571,18 +572,19 @@ def fix(value: float, default: float = 1):
 GENOMES     = 50
 INPUTS      = 5
 OUTPUTS     = 1
-EMBED_SIZE  = 16
+EMBED_SIZE  = 32
 KERNEL_SIZE = 1
 NORM_GROUPS = 1
 SEQ_LEN     = 2
 LAYERS      = 1
 HEADS       = 1
 KV_HEADS    = HEADS
-ENABLE_BIAS = True
+ENABLE_BIAS = False
 DIFFERENTIAL = False
+PROBABILISTIC = False
 MEMORY_SIZE = 5
 GAMMA       = np.exp(np.log(0.33) / 4)
-ALPHA       = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA       = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
 BETA        = None # fix(np.exp(np.log(1.5) / (5 - 1)), 1.0)
 LOSS_REG    = 0.
 
@@ -592,9 +594,9 @@ LOSS_REG    = 0.
 #                  pri_actv=nn.SiLU(), sec_actv=nn.Sigmoid())
 
 MODEL = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
-               ENABLE_BIAS, DEVICE, DTYPE)
+               PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE)
 MODEL1 = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
-                ENABLE_BIAS, DEVICE, DTYPE)
+                PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE)
 
 INIT_GEN: int = None
 
@@ -817,7 +819,7 @@ def run():
     population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
     population.absorb_population(population1)
     print(MODEL.pol_proj)
-    population.load_dict(name='flappy_bird', file_no=None)
+    # population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.NEAT(
         population,
