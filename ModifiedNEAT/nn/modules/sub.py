@@ -48,11 +48,11 @@ class ResidualBlock(NeatModule):
                 Convolution = Conv3d
             else:
                 raise ValueError(f"Unsupported num of image dimension '{self.image_ndim}'")
-            self.norm1 = GroupNorm(norm_groups, channels_in, self.epsilon, self.affine, bias, device, dtype)
+            self.norm1 = GroupNorm(norm_groups, channels_in, self.epsilon, self.affine, False, device, dtype)
             self.conv1 = Convolution(channels_in, self.hidden_size, kernel_size, self.stride, self.padding, self.dilation,
                                      bias=bias, device=device, dtype=dtype)
 
-            self.norm2 = GroupNorm(norm_groups, self.hidden_size, self.epsilon, self.affine, bias, device, dtype)
+            self.norm2 = GroupNorm(norm_groups, self.hidden_size, self.epsilon, self.affine, False, device, dtype)
             self.conv2 = Convolution(self.hidden_size, channels_out, kernel_size, self.stride, self.padding, self.dilation,
                                      bias=bias, device=device, dtype=dtype)
 
@@ -699,7 +699,7 @@ class ConvSelfAttention(NeatModule):
 
         # MODULES
         self.pre_norm = GroupNorm(
-            self.norm_groups, dim_size, self.epsilon, self.affine, bias, device=device, dtype=dtype
+            self.norm_groups, dim_size, self.epsilon, self.affine, False, device=device, dtype=dtype
         ) if self.norm_groups else None
         if len(max_pixels) == 1:
             Convolution = Conv1d
@@ -947,7 +947,7 @@ class ConvCrossAttention(NeatModule):
 
         # ModifiedNEAT
         self.pre_norm = GroupNorm(
-            self.norm_groups, dim_size, self.epsilon, self.affine, device=device, dtype=dtype
+            self.norm_groups, dim_size, self.epsilon, self.affine, False, device=device, dtype=dtype
         ) if self.norm_groups else None
         Convolution, CrossConvolution = get_conv(max_pixels), get_conv(cross_max_pixels)
         self.mult = 1+differential if differential else 1
@@ -1203,7 +1203,7 @@ class ConvSwiGLU(NeatModule):
 
         # BUILD
         self.pre_norm = GroupNorm(
-            self.norm_groups, dim_size, self.epsilon, self.affine, bias, device=device, dtype=dtype
+            self.norm_groups, dim_size, self.epsilon, self.affine, False, device=device, dtype=dtype
         ) if self.norm_groups else None
         Convolution = get_conv(self.image_ndim)
         self.inp_proj = Convolution(dim_size, hidden_size, kernel_size, stride=self.stride, dilation=self.dilation,
@@ -1433,7 +1433,7 @@ class ConverBase(NeatModule):
 
         # ModifiedNEAT
         options['auto_single'] = False
-        self.positional_encoding = SequenceEncoding(max_pixels, dim_size, bias, device, dtype)
+        self.positional_encoding = SequenceEncoding(max_pixels, dim_size, True, device, dtype)
         self.layers: list[ConverBlock] = nn.ModuleList()
         for layer_idx in range(layers):
             if layer_idx == layers-1:

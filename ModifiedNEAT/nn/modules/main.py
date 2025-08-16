@@ -137,7 +137,7 @@ class Conver(NeatModule):
             Convolution(self.feedback, dim_size, 1, stride=1, padding=-1,
                         padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                         bias=bias, device=device, dtype=dtype),
-            GroupNorm(dim_size, dim_size, self.epsilon, True, bias, device, dtype),
+            GroupNorm(dim_size, dim_size, self.epsilon, False, bias, device, dtype),
             Convolution(dim_size, self.feedback, 1, stride=1, padding=-1,
                         padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                         bias=bias, device=device, dtype=dtype),
@@ -167,7 +167,7 @@ class Conver(NeatModule):
                 )
             else:
                 decoder.extend([
-                    GroupNorm(norm_groups, dim_size, self.epsilon, self.affine, bias, device, dtype),
+                    GroupNorm(norm_groups, dim_size, self.epsilon, self.affine, False, device, dtype),
                     self.activation,
                     Conv1d(
                         dim_size, outputs, 1, 1,
@@ -293,14 +293,14 @@ class Reformer(Model):
         self.mean_log_std = Sequential(
             RMSNorm(dim_size, self.epsilon, self.affine, device, dtype),
             self.pri_actv,
-            Linear(dim_size, pol_out*(2 if self.probabilistic else 1), bias, device, dtype),
+            Linear(dim_size, pol_out*(2 if self.probabilistic else 1), True, device, dtype),
         )
         if manage_params(options, 'get_values', False):
             self.val_proj = Conver(
                 inputs, dim_size, max_seq_len, dim_size, kernel_size, layers, norm_groups, channels,
                 heads, kv_heads, differential, bias, device, dtype, **options
             )
-            self.decode = Linear(dim_size, val_out, bias, device, dtype)
+            self.decode = Linear(dim_size, val_out, True, device, dtype)
         else:
             self.val_proj = None
             self.decode = None
