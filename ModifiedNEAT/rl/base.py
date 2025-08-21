@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from numba import njit
 from numpy import ndarray
-from typing import Any, Union
+from typing import Any, Union, Callable
 from itertools import count
 
 import torch
@@ -21,8 +21,10 @@ import random
 import numpy as np
 import math
 
+
 class NEATAlgoWarning(Warning):
     pass
+
 
 TensorDict = dict[int, Tensor]
 
@@ -66,6 +68,16 @@ class Algorithm(object):
         self.log_sub_dir: str = manage_params(options, 'log_sub_dir', "")
         self.log_name: str = manage_params(options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
         self.writer = SummaryWriter(self.log_dir+self.log_sub_dir+self.log_name)
+        self._report_hook: Callable = None
+
+    def set_report_hook(self, hook: Callable):
+        """
+        :param hook: Set a function that receives the Trainer as its parameter to report on a given generation's
+            progress.
+            You can also just add a custom Reporter object to the Population class for post-evaluation statistics.
+        :return: None
+        """
+        self._report_hook = hook
 
     def get_module(self, key: int):
         for module in self.models:
@@ -316,8 +328,9 @@ class Algorithm(object):
         return returns, advantages
 
     @staticmethod
-    def compute_returns_static(rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False, best=False, normalize=True,
-                        episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None):
+    def compute_returns_static(
+            rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False, best=False,  normalize: int = 1,
+            episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None):
         keys = list(rewards.keys())
 
         if episodes is None:
@@ -362,11 +375,17 @@ class Algorithm(object):
         global_mean, global_std = [
             g([f(r).cpu().item() for r in rewards.values()])
             for f, g in zip([torch.mean, fixed_std], [np.mean, np.mean])
-        ] if normalize else (None, None)
+        ] if normalize == 1 else (None, None)
+        global_min, global_max = [
+            g([f(r).cpu().item() for r in rewards.values()])
+            for f, g in zip([torch.min, torch.max], [np.min, np.max])
+        ] if normalize == 2 else (None, None)
         returns: TensorDict = {}
         for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):
-            if normalize:
+            if normalize == 1:
                 rewards_ = (rewards_ - global_mean) / (global_std + 1e-9)
+            elif normalize == 2:
+                rewards_ = -1 + 2 * (rewards_ - global_min) / (global_max - global_min + 1e-9)
             if best:
                 if len(rewards_) != len(episodes_):
                     raise ValueError(f"Number of rewards (scores) must be equal to number of episodes for key '{key}' "

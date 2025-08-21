@@ -53,11 +53,11 @@ class NEAT(Algorithm):
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
         self.reverse: bool      = manage_params(options, 'reverse', False)
         self.best: bool         = manage_params(options, 'best', False)
-        self.normalize: bool    = manage_params(options, 'normalize', True)
+        self.normalize: int     = manage_params(options, 'normalize', 2)
         self.epsilon: float     = manage_params(options, 'epsilon', 1e-10)
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
         self.pol_reg: float     = manage_params(options, 'pol_reg', 0.0)
-        self.validate: bool     = manage_params(options, 'validate', True)
+        self.validate: bool     = manage_params(options, 'validate', False)
         self.segr_size: Union[float, None] = manage_params(options, 'segr_size', None)
         self.target_kl: Union[float, None] = manage_params(options, 'target_kl', None)
         self.max_steps: Union[float, None] = manage_params(options, 'max_steps', None)
@@ -408,7 +408,7 @@ class NEAT(Algorithm):
                     self.writer.add_scalar(extra+f'global_{label}', param, self.updates_done)
 
                 # Population
-                survival_rate = len(valid_keys) / len(self.population.genomes)
+                survival_rate = len([key for key in valid_keys if key not in self.population.to_delete]) / len(self.population.genomes)
                 best_genome = self.population.genomes[best_genome_key]
                 if self.prev_valid_keys is None:
                     creep = creep_max = np.nan
@@ -467,6 +467,8 @@ class NEAT(Algorithm):
                     # f"\n|\t{'reward_accuracy': <25}| {reward_acc: <21} |"
                     f"\n{bar}"
                 )
+            if self._report_hook is not None:
+                self._report_hook(self)
 
             # Clean up
             self.deque_steps(0)

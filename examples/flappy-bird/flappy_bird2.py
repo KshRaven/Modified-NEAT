@@ -582,9 +582,9 @@ KV_HEADS    = HEADS
 ENABLE_BIAS = False
 DIFFERENTIAL = False
 PROBABILISTIC = False
-MEMORY_SIZE = 5
-GAMMA       = np.exp(np.log(0.33) / 4)
-ALPHA       = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
+MEMORY_SIZE = 10
+GAMMA       = np.exp(np.log(0.33) / 16)
+ALPHA       = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
 BETA        = None # fix(np.exp(np.log(1.5) / (5 - 1)), 1.0)
 LOSS_REG    = 0.
 
@@ -799,7 +799,7 @@ def run():
     config.genome.weight_replace_rate           = 0.10
     config.genome.weight_add_prob               = 0.33
     config.genome.weight_del_prob               = 0.33
-    config.genome.single_structural_mutation    = False
+    config.genome.single_structural_mutation    = True
 
     config.reproduction.min_species_size        = GENOMES
     config.reproduction.purge                   = 1
@@ -834,7 +834,7 @@ def run():
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
                  f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
-        gamma=GAMMA, alpha=ALPHA, reverse=False, best=False, normalize=True,
+        gamma=GAMMA, alpha=ALPHA, reverse=False, best=False, normalize=2,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
         max_episodes=MEMORY_SIZE,
     )

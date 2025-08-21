@@ -2,8 +2,9 @@
 numba
 numba-cuda[cu13]
 numpy
-cupy-cuda12x
+cupy
 torch
 matplotlib
 colorama
 json5
+tensorboard

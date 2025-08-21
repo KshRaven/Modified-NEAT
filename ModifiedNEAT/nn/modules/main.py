@@ -136,20 +136,20 @@ class Conver(NeatModule):
             Transpose(),
             Convolution(self.feedback, dim_size, 1, stride=1, padding=-1,
                         padding_mode=manage_params(options, 'padding_mode', 'zeros'),
-                        bias=bias, device=device, dtype=dtype),
+                        bias=True, device=device, dtype=dtype),
             GroupNorm(dim_size, dim_size, self.epsilon, self.affine, False, device, dtype),
             Convolution(dim_size, self.feedback, 1, stride=1, padding=-1,
                         padding_mode=manage_params(options, 'padding_mode', 'zeros'),
                         bias=bias, device=device, dtype=dtype),
             nn.Tanh(),
             Transpose(),
-        ) if self.feedback and manage_params(options, 'feedback_gain', True) else None
+        ) if self.feedback and manage_params(options, 'feedback_gain', False) else None
         self.feedback_dropout = Ignore(manage_params(options, ['feedback_drop', 'feedback_dropout'], 0))
         self.encoder = Sequential(
             Transpose(),
             Conv1d(inputs, dim_size, self.init_kernel_size, 1, -1,
                    padding_mode=manage_params(options, 'padding_mode', 'zeros'),
-                   bias=bias, device=device, dtype=dtype),
+                   bias=True, device=device, dtype=dtype),
             *[
                 ResidualBlock(dim_size, dim_size, kernel_size, norm_groups, bias, device, dtype, **options)
                 for _ in range(self.enc_layers)
@@ -157,7 +157,7 @@ class Conver(NeatModule):
         )
         self.transformer = ConverBase(
             (max_seq_len,), dim_size, self.trans_kernel_size, norm_groups, layers, heads, kv_heads, differential,
-            self.causal_mask, bias, device, dtype, **options
+            self.causal_mask, False, device, dtype, **options
         )
         decoder = []
         for layer_idx in range(self.dec_layers):
@@ -260,7 +260,6 @@ class Conver(NeatModule):
 
 class Reformer(Model):
     def __init__(
-
             self, inputs: int, pol_out: int, val_out: int, max_seq_len: int, dim_size: int, layers: int,
             heads: int = None, kv_heads: int = None, differential=True,
             kernel_size=1, norm_groups=1, channels: Union[int, list[int]] = None,
