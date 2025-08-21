@@ -3,9 +3,9 @@ numba
 numba-cuda[cu13]
 numpy
 cupy-cuda13x
-torch
 matplotlib
 colorama
 tensorboard
 
+torch
 --extra-index-url https://download.pytorch.org/whl/cu129
