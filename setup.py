@@ -10,7 +10,7 @@ def load_requirements(filename='requirements.txt'):
         # Read each line and filter out empty lines and comments.
         requirements = [
             line.strip() for line in f
-            if line.strip() and not line.startswith('#')
+            if line.strip() and not line.startswith('#') and not ("--" in line)
         ]
     return requirements
 
