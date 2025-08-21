@@ -1,6 +1,7 @@
 
+--index-url  https://pypi.org/simple
+--extra-index-url https://pypi.ngc.nvidia.com
 --extra-index-url https://download.pytorch.org/whl/cu129
-
 
 cuda-toolkit
 numba
@@ -10,6 +11,5 @@ cupy-cuda13x
 matplotlib
 colorama
 tensorboard
-
 
 torch
