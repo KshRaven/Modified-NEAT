@@ -1,10 +1,13 @@
-
+cuda-toolkit
 numba
 numba-cuda[cu13]
 numpy
-cupy
+cupy-cuda13x
 torch
 matplotlib
 colorama
-json5
 tensorboard
+
+--index-url  https://pypi.org/simple
+--extra-index-url https://pypi.ngc.nvidia.com
+--extra-index-url https://download.pytorch.org/whl/cu129
