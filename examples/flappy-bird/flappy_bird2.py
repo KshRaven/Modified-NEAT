@@ -28,7 +28,7 @@ warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
 pygame.font.init()  # init font
 
-DEVICE = 'cpu' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 DTYPE = torch.float32
 
 # Define window
@@ -211,7 +211,7 @@ class Birds(object):
 
         self.images: list = [pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", f"bird{x}.png"))) for x in range(1, 4)]
         self.images_anti: list = [pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", f"anti{x}.png"))) for x in range(1, 4)]
-        self.is_anti = torch.zeros(num, dtype=torch.bool)
+        self.is_anti = torch.zeros(num, device=device, dtype=torch.bool)
         if type2count:
             self.is_anti[-type2count:] = True
         self.x[self.is_anti] -= offset
@@ -472,7 +472,7 @@ class Game(object):
 class RModel(Model):
     def __init__(self, inputs: int, outputs: int, seq_len: int, dim_size: int, layers: int,
                  kernel_size=1, heads: int = None, kv_heads: int = None, differential: int = False, norm_groups=1,
-                 probabilistic=True, bias=False, device: torch.device = 'cpu', dtype: torch.device = torch.float32):
+                 probabilistic=False, bias=False, device: torch.device = 'cpu', dtype: torch.device = torch.float32):
         super().__init__()
         # Attributes
         self.inputs         = inputs
@@ -569,22 +569,26 @@ def fix(value: float, default: float = 1):
 
 
 # Network
-GENOMES     = 50
+GENOMES     = 100
 INPUTS      = 5
 OUTPUTS     = 1
 EMBED_SIZE  = 32
 KERNEL_SIZE = 1
 NORM_GROUPS = 1
-SEQ_LEN     = 2
+SEQ_LEN     = 4
+SEQ_MULT    = 4
 LAYERS      = 1
 HEADS       = 1
 KV_HEADS    = HEADS
 ENABLE_BIAS = False
 DIFFERENTIAL = False
 PROBABILISTIC = False
-MEMORY_SIZE = 10
-GAMMA       = np.exp(np.log(0.33) / 16)
-ALPHA       = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
+MEMORY_SIZE = 5
+GAMMA       = np.exp(np.log(0.33) / 32)
+ALPHA       = fix(np.exp(np.log(1.33) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA_REVERSE = False
+ALPHA_BEST  = True
+REW_NORM    = 1
 BETA        = None # fix(np.exp(np.log(1.5) / (5 - 1)), 1.0)
 LOSS_REG    = 0.
 
@@ -593,21 +597,23 @@ LOSS_REG    = 0.
 #                  constant=2 ** np.floor(np.log2(SEQ_LEN * EMBED_SIZE)) // 2,
 #                  pri_actv=nn.SiLU(), sec_actv=nn.Sigmoid())
 
-MODEL = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
-               PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE)
-MODEL1 = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
+MODEL0 = RModel(INPUTS, OUTPUTS, SEQ_LEN, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
+                PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE)
+MODEL1 = RModel(INPUTS, OUTPUTS, SEQ_LEN*SEQ_MULT, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
+                PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE)
+MODEL2 = RModel(INPUTS, OUTPUTS, SEQ_LEN*SEQ_MULT**2, EMBED_SIZE, LAYERS, KERNEL_SIZE, HEADS, KV_HEADS, DIFFERENTIAL, NORM_GROUPS,
                 PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE)
 
 INIT_GEN: int = None
 
 RUNS = 1
-LIMIT = 40
+LIMIT = 20
 STEPS = LIMIT * 100 * RUNS
 
 
 def evaluate(population: neat.Population, **options):
     trainer: neat.rl.NEAT = options['trainer']
-    mapping0, mapping1 = population.get_mapping()
+    mapping0, mapping1, mapping2 = population.get_mapping()
     cons_mapping = population.get_mapping(consolidated=True)
     trainer.update_mapping(cons_mapping)
     # BUFFER = torch.zeros(SEQ_LEN, population.pop_size, INPUTS).to(DEVICE, DTYPE)
@@ -630,12 +636,12 @@ def evaluate(population: neat.Population, **options):
     game_step = 0
     DEBUG = True
     DEBUG_STEP = 0
-    MODEL.train()
+    MODEL0.train()
     while not terminate:
-        game = Game(population.size, len(mapping1), 0, DEVICE, DTYPE)
+        game = Game(population.size, len(mapping2), 0, DEVICE, DTYPE)
         # print(f"Anti Count = {game.birds.}")
         action_buffer = torch.zeros(population.size, SEQ_LEN, INPUTS).to(DEVICE, DTYPE)
-        reward_buffer = torch.zeros(population.size, SEQ_LEN, 1).to(DEVICE, DTYPE)
+        # reward_buffer = torch.zeros(population.size, SEQ_LEN, 1).to(DEVICE, DTYPE)
         ph, mh, pw = FLOOR, FLOOR-70, WIN_WIDTH
         global_mean = torch.tensor([ph/2, mh/2, mh/2, pw/2, pw/2], device=DEVICE, dtype=DTYPE).unsqueeze(0)
         global_std = torch.tensor([ph/4, mh/6, mh/6, pw/4, pw/4], device=DEVICE, dtype=DTYPE).unsqueeze(0)
@@ -646,6 +652,7 @@ def evaluate(population: neat.Population, **options):
         step = 0
         reverse_mapping0 = {index: key for key, index in mapping0.items()}
         reverse_mapping1 = {index: key for key, index in mapping1.items()}
+        reverse_mapping2 = {index: key for key, index in mapping2.items()}
 
         while exe and game.birds.active() > 0:
             # BUFFER[:] = 0
@@ -667,8 +674,8 @@ def evaluate(population: neat.Population, **options):
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"extended inputs =>\n{observations}\n\tshape = {observations.shape}")
                 ts = clock.perf_counter()
-                keys0, keys1 = [], []
-                indices0, indices1 = [], []
+                keys0, keys1, keys2 = [], [], []
+                indices0, indices1, indices2 = [], [], []
                 for index, dead in enumerate(game.birds.dead):
                     if not dead:
                         if index in reverse_mapping0:
@@ -677,6 +684,9 @@ def evaluate(population: neat.Population, **options):
                         elif index-len(mapping0) in reverse_mapping1:
                             keys1.append(reverse_mapping1[index-len(mapping0)])
                             indices1.append(index-len(mapping0))
+                        elif index-(len(mapping0)+len(mapping1)) in reverse_mapping2:
+                            keys2.append(reverse_mapping2[index-(len(mapping0)+len(mapping1))])
+                            indices2.append(index-(len(mapping0)+len(mapping1)))
                         else:
                             print(f"\nPopulation size {population.size}"
                                   f"\nReverse mapping \n{reverse_mapping0} \n{reverse_mapping1}"
@@ -688,21 +698,27 @@ def evaluate(population: neat.Population, **options):
                 if len(indices1) == 0:
                     keys1 = list(mapping1.keys())
                     indices1 = list(mapping1.values())
+                if len(indices2) == 0:
+                    keys2 = list(mapping2.keys())
+                    indices2 = list(mapping2.values())
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"keys =>\n{keys0}")
                     print(f"indices =>\n{indices0}")
-                observations0, observations1 = torch.split(observations, len(mapping0), dim=0)
-                actions0, probs = MODEL.get_action(observations0[indices0].unsqueeze(1), keys=keys0)
+                observations0, observations1, observations2 = torch.split(
+                    observations, [len(mapping0), len(mapping1), len(mapping2)], dim=0
+                )
+                actions0, probs = MODEL0.get_action(observations0[indices0].unsqueeze(1), keys=keys0)
                 actions1, probs = MODEL1.get_action(observations1[indices1].unsqueeze(1), keys=keys1)
+                actions2, probs = MODEL2.get_action(observations2[indices2].unsqueeze(1), keys=keys2)
                 # actions, probs = MODEL.get_action(observations.unsqueeze(1))
                 # shape(seq_len=1, genomes, features_out)
-                actions0, actions1, probs = actions0.squeeze(1), actions1.squeeze(1), probs.squeeze(1)
+                actions0, actions1, actions2, probs = actions0.squeeze(1), actions1.squeeze(1), actions2.squeeze(1), probs.squeeze(1)
                 # actions = (actions >= 0.95).float()
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"actions =>\n{actions0}\n\tshape = {actions0.shape}")
                     print(f"probs =>\n{probs}\n\tshape = {probs.shape}")
                 if True:
-                    padding = game.birds.bird_num - actions0.shape[0] - actions1.shape[1]
+                    padding = game.birds.bird_num - actions0.shape[0] - actions1.shape[0] - actions2.shape[0]
                     if padding > 0:
                         def fill_up(tensor: Tensor, indices: list[int], total: int):
                             fill = tensor.clone()
@@ -713,13 +729,14 @@ def evaluate(population: neat.Population, **options):
                             return tensor
                         actions0 = fill_up(actions0, indices0, len(reverse_mapping0))
                         actions1 = fill_up(actions1, indices1, len(reverse_mapping1))
-                    actions = torch.cat([actions0, actions1[..., :OUTPUTS]], dim=0)
+                        actions2 = fill_up(actions2, indices2, len(reverse_mapping2))
+                    actions = torch.cat([actions0, actions1, actions2[..., :OUTPUTS]], dim=0)
                 if DEBUG and population.generation == INIT_GEN and step == DEBUG_STEP:
                     print(f"filled actions =>\n{actions}\n\tshape = {actions.shape}")
                 calc_time = clock.perf_counter() - ts
                 # game.update(actions[:, 0])
                 game.update(actions)
-                if (population.generation+1) % 5 == 0:
+                if (population.generation+1) % 10 == 0:
                     game.draw(False)
                 rewards = torch.softmax(game.birds.score.unsqueeze(-1), 0)
                 # rewards += (rewards - rewards.min(dim=0, keepdim=True)[0])
@@ -794,7 +811,7 @@ def run():
     config.genome.weight_init_std               = 1.0
     config.genome.weight_min_value              = -np.inf
     config.genome.weight_max_value              = +np.inf
-    config.genome.weight_mutate_power           = 1e-1
+    config.genome.weight_mutate_power           = 3e-1
     config.genome.weight_mutate_rate            = 0.65
     config.genome.weight_replace_rate           = 0.10
     config.genome.weight_add_prob               = 0.33
@@ -804,21 +821,24 @@ def run():
     config.reproduction.min_species_size        = GENOMES
     config.reproduction.purge                   = 1
     config.reproduction.survival_threshold      = 0.10
-    config.reproduction.cross_threshold         = 0.05
-    config.reproduction.elitism                 = 15
+    config.reproduction.cross_threshold         = 0.10
+    config.reproduction.elitism                 = 50
     config.species.compatibility_threshold      = np.inf
     config.stagnation.max_stagnation            = 1
     config.stagnation.species_elitism           = 2
-    config.reproduction.darwin_multiplier       = 0.50
+    config.reproduction.darwin_multiplier       = 0.00
+    config.reproduction.preserve_elite          = False
     config.save()
     config.load(2)
 
     # Create the population, which is the top-level object for a NEAT run.
     print(f"creating population")
-    population = neat.Population(GENOMES, MODEL, config, init_reporter=True)
+    population = neat.Population(GENOMES, MODEL0, config, init_reporter=True)
     population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
+    population2 = neat.Population(GENOMES, MODEL2, config, init_reporter=True)
     population.absorb_population(population1)
-    print(MODEL.pol_proj)
+    population.absorb_population(population2)
+    print(MODEL0.pol_proj)
     # population.load_dict(name='flappy_bird', file_no=None)
 
     trainer = neat.rl.NEAT(
@@ -833,8 +853,9 @@ def run():
         log_sub_dir='flappy_bird\\',
         log_name=f"{unix_to_datetime_file(clock.time())}-"
                  f"s{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-b{int(ENABLE_BIAS)}-"
-                 f"g{round(GAMMA, 4)}-r{round(LOSS_REG, 4)}",
-        gamma=GAMMA, alpha=ALPHA, reverse=False, best=False, normalize=2,
+                 f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ar{ALPHA_REVERSE}-ab{ALPHA_BEST}-"
+                 f"rn{REW_NORM}-p{round(LOSS_REG, 4)}-sm{SEQ_MULT}",
+        gamma=GAMMA, alpha=ALPHA, reverse=ALPHA_REVERSE, best=ALPHA_BEST, normalize=REW_NORM,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
         max_episodes=MEMORY_SIZE,
     )
@@ -842,7 +863,7 @@ def run():
     # Run for up to 50 generations.
     print(f"starting evaluation: population={len(population.genomes)}")
     # trainer.load(name='flappy_bird', file_no=None)
-    trainer.learn(evaluate, STEPS, 100, 2048, 0.1, 'binary', 2)
+    trainer.learn(evaluate, STEPS, 150, 2048, 0.1, 'binary', 2)
 
     # while True:
     #     evaluate(population, trainer=trainer)
@@ -855,5 +876,5 @@ def run():
 
 
 if __name__ == '__main__':
-    print(MODEL)
+    print(MODEL0)
     run()

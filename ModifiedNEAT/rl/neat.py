@@ -216,7 +216,10 @@ class NEAT(Algorithm):
                 # Set the new episodic returns to the secondary buffer
                 episodic_returns: dict[int, dict[int, tuple[float, int]]] = {
                     key: {
-                        uei: (torch.mean(returns_current[key][episode_indices]).item(), len(episode_indices))
+                        uei: (
+                            torch.mean(returns_current[key][episode_indices]).item() - torch.std(returns_current[key][episode_indices]).item(),
+                            len(episode_indices)
+                        )
                         for episode_indices, uei in [
                             ([idx for idx, ep_idx in enumerate(episode_mapping[key]) if ep_idx == unique_ep_idx], unique_ep_idx)
                             for unique_ep_idx in np.unique(episode_mapping[key])
