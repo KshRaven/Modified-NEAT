@@ -1,13 +1,17 @@
 
---extra-index-url https://download.pytorch.org/whl/cu129
+# --extra-index-url https://download.pytorch.org/whl/cu129
 
+cuda-python
 cuda-toolkit
 numba
-numba-cuda[cu13]
+numba-cuda[cu12]
 numpy
-cupy-cuda13x
+# cupy
 matplotlib
 colorama
 tensorboard
 
 torch
+
+gymnasium
+pygame

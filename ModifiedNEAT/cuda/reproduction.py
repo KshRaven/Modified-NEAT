@@ -75,11 +75,30 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
 @njit(nogil=True)
 def create_children(genus: int, genus_population: dict[int, Genome], population: dict[int, Genome], species: dict[int, Species],
                     available_gid: int, spawn_amounts: list[int], remaining_species: list[Species], to_delete: list[int],
-                    elitism: int, survival_threshold: float, cross_threshold: float, cross_multiplier: float,
-                    darwin_multiplier: float, criteria: str, ancestors: dict[int, tuple[Genome, Genome]],
-                    equal_params: bool, preserve: bool):
+                    elitism: int, survival_threshold: float, clone_threshold: float, cross_threshold: float,
+                    cross_multiplier: float, darwin_multiplier: float,
+                    criteria: str, ancestors: dict[int, tuple[Genome, Genome]], equal_params: bool, preserve: bool):
     if len(spawn_amounts) != len(remaining_species):
         raise ValueError(f"Mismatch in reproduction data")
+
+    def get_limits(genomes: list[Genome]) -> tuple[int, int]:
+        if np.any(np.array([g.fitness is None for g in genomes])):
+            raise ValueError(f"A genome's fitness has not been set")
+        fitnesses = np.zeros(len(genomes), NP_FLOAT)
+        fitnesses[:] = np.array([g.fitness for g in genomes])
+        inf_fit_vals = np.isinf(fitnesses)
+        has_nan, all_inf = np.any(np.isnan(fitnesses)), np.all(inf_fit_vals)
+        if has_nan or all_inf:
+            verdict = "Has NaN fitness value" if has_nan else "All fitnesses are Inf"
+            raise ValueError(f"Invalid fitness value within specie's members. {verdict}")
+        _min, _max = np.min(fitnesses[~inf_fit_vals]).item(), np.max(fitnesses[~inf_fit_vals]).item()
+        _range = _max - _min
+        if _range == 0.0:
+            _range = abs(_max)
+        fitnesses[inf_fit_vals & (fitnesses < 0.0)] = _min - _range
+        fitnesses[inf_fit_vals & (fitnesses > 0.0)] = _max + _range
+        _minimum, _maximum = np.min(fitnesses).item(), np.max(fitnesses).item()
+        return _minimum, _maximum
 
     def sort(members: dict[int, Genome], crit: str) -> list[Genome]:
         genomes = List(members.values())
@@ -103,24 +122,28 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
                         genomes[j], genomes[j + 1] = genomes[j + 1], genomes[j]
         return genomes
 
-    def choice(main_genus: int, genomes: list[Genome], multiplier_cross: float, multiplier_fitness: float):
+    def choice(main_genus: int, genomes: list[Genome], multiplier_cross: float, multiplier_fitness: float,
+               # Using global limits to ensure when genome count low, this func doesn't focus on a given genome only
+               global_min: float, global_max: float, last_choice: Genome = None):
         if multiplier_cross is None:
-            multiplier_cross = 1
+            multiplier_cross = 0
+        multiplier_cross = max(-1, min(+1, multiplier_cross))
         if multiplier_fitness is None:
-            multiplier_fitness = 1
-        factors = np.array([
-            (g.fitness if g.genus == main_genus else g.fitness * multiplier_cross) * multiplier_fitness
-            for g in genomes
-        ])
-        maximum = np.max(factors)
-        minimum = np.min(factors)
-        if maximum == minimum:
-            minimum += 1e-12
-        probabilities = np.full(len(genomes), 0.0)
-        for i, p in enumerate(factors):
-            probabilities[i] = np.random.rand()
-            if multiplier_fitness > 0:
-                probabilities[i] += (p - minimum) / (maximum - minimum)
+            multiplier_fitness = 0
+        multiplier_fitness = max(-1, min(+1, multiplier_fitness))
+        if global_max == global_min:
+            global_min += 1e-12
+        probabilities = np.random.rand(len(genomes))
+        if multiplier_fitness != 0:
+            for i, g in enumerate(genomes):
+                factor = (g.fitness - global_min) / (global_max - global_min) * multiplier_fitness
+                if multiplier_cross > 0 and g.genus != main_genus:
+                    factor *= multiplier_cross
+                if multiplier_cross < 0 and g.genus == main_genus:
+                    factor *= 1 - multiplier_cross
+                if last_choice is not None and g.key == last_choice.key:
+                    factor *= 0.01
+                probabilities[i] += factor
         return genomes[np.argmax(probabilities)]
 
     # Populate global genera members
@@ -136,6 +159,9 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         # If elitism is enabled, each species always at least gets to retain its elites.
         spawn = max(spawn, elitism)
         assert spawn > 0
+
+        # Get fitness limits
+        minimum, maximum = get_limits(List(specie.members.values()))
 
         # Delete unwanted members
         executions = [gid for gid in specie.members.keys() if gid in to_delete]
@@ -166,7 +192,9 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
             continue
 
         # Only use the survival threshold fraction to use as parents for the next generation.
-        repro_cutoff = max(2, math.ceil(survival_threshold * len(old_members)))
+        member_count = len(old_members)
+        repro_cutoff = max(2, math.ceil(survival_threshold * member_count))
+        clone_cutoff = max(0, math.ceil(min(0.75, clone_threshold) * member_count))
         # Use at least two parents no matter what the threshold fraction result is.
         old_members = old_members[:repro_cutoff]
 
@@ -178,11 +206,17 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
                     extra_members.extend(genus_members[:cross_cutoff])
         if len(extra_members) > 1:
             extra_members = sort({g.key: g for g in extra_members}, criteria)
+            extra_min, extra_max = get_limits(extra_members)
+            minimum, maximum = min(minimum, extra_min), max(maximum, extra_max)
 
         # Randomly choose parents and produce the number of offspring allotted to the species.
-        for _ in prange(spawn):
-            parent1: Genome = choice(genus, old_members, cross_multiplier, darwin_multiplier)
-            parent2: Genome = choice(genus, List(list(old_members)+list(extra_members)), cross_multiplier, darwin_multiplier)
+        for spawn_index in prange(spawn):
+            # At least one genome has to be from the same genus in order to preserve genus integrity
+            parent1: Genome = choice(genus, old_members, cross_multiplier, darwin_multiplier, minimum, maximum)
+            if spawn_index < clone_cutoff:
+                parent2 = parent1
+            else:
+                parent2: Genome = choice(genus, List(list(old_members)+list(extra_members)), cross_multiplier, darwin_multiplier, minimum, maximum, parent1)
 
             # Note that if the parents are not distinct, crossover will produce a genetically identical clone of the parent (but with a different ID).
             gid = available_gid
@@ -211,7 +245,7 @@ def crossover(genus: int, source: GPUArray, updates: GPUArray, parents: GPUArray
     g_lim = updates.shape[0]
     x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
     y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
-    s_g, s_x, s_y = cuda.gridsize(3)
+    s_g, s_x, s_y = updates.shape # cuda.gridsize(3)
 
     # Linearized thread index
     rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
@@ -221,7 +255,7 @@ def crossover(genus: int, source: GPUArray, updates: GPUArray, parents: GPUArray
         genus0, genus1, genus_      = genera[genome_idx]
         filled0, filled1, filled_   = filled[genome_idx]
         if equal_sources or genus0 == genus1 == genus:
-            # For elite genomes
+            # For elite genomes or clones
             if parent0 == parent1 and genus == genus0 == genus1:
                 value = get_value(source, parent0, x, y)
                 filled[genome_idx, :2] = True
@@ -349,13 +383,14 @@ def update_children(
     if equal_param_num:
         step = 0
         for genus_param, param_group in zip(modules[genus].neat_parameters(), pgs):
+            dtype = genus_param.data.dtype if genus_param.data.dtype != torch.bfloat16 else torch.float32
             step += 1
             # with cuda.defer_cleanup():
             # ------------------------------ Sending data to GPU ------------------------------ #
             # TODO: Re-enable this if necessary after testing if it raises error in crossover
             # ctype = cp.float32 if genus_param.dtype == torch.float32 else cp.float64
             array_update, original_shape = reshape(cp.zeros((len(new_population), *genus_param.original_shape),)) # ctype))
-            array_sources = tuple([cp.asarray(reshape(p.data)[0]) for p in param_group])
+            array_sources = tuple([cp.asarray(reshape(p.data.clone().to(dtype))[0]) for p in param_group])
             # ------------------------------ Define crossover kernel and randomizer values ------------------------------ #
             genome_num = len(new_population)
             kernel_shape = calc_grid(genome_num, *array_update.shape[1:3], tpb=tpb)
@@ -478,8 +513,9 @@ def reproduce(
         ts = clock.perf_counter()
         # print(f"Current genome index = {genome_indexer}")
         genome_indexer = create_children(
-            genus, genus_population, population, species_set.species, genome_indexer, spawn_amounts, remaining_species, to_delete,
-            int(config.reproduction.elitism), config.reproduction.survival_threshold, config.reproduction.cross_threshold,
+            genus, genus_population, population, species_set.species, genome_indexer, spawn_amounts, remaining_species,
+            to_delete, int(config.reproduction.elitism),
+            config.reproduction.survival_threshold, config.reproduction.clone_threshold, config.reproduction.cross_threshold,
             config.reproduction.cross_multiplier, config.reproduction.darwin_multiplier,
             config.general.fitness_criterion, ancestors, False, config.reproduction.preserve_elite
         )

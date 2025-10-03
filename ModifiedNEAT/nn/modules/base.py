@@ -43,20 +43,28 @@ def has_parameter(method, param_name: str):
     return param_name in sig.parameters
 
 
+# ---------- Base ----------
+
 class Sequential(NeatModule):
     def __init__(self, *modules: NeatModule):
         super(Sequential, self).__init__()
         self.modules_list = nn.ModuleList(modules)
 
-    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None):
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
         for m_idx, module in enumerate(self.modules_list):
             try:
+                # print(f"Module {m_idx} '{module.__class__.__name__}': input = {tensor.shape}")
                 if isinstance(module, NeatModule):
-                    tensor = module(tensor, keys=keys)
+                    sig = inspect.signature(module.forward)
+                    if "verbose" in sig.parameters and not isinstance(module, (Linear, Convolution)):
+                        tensor = module(tensor, keys=keys, verbose=verbose)
+                    else:
+                        tensor = module(tensor, keys=keys)
                 else:
                     tensor = module(tensor)
-                # print(f"Module {m_idx} '{module.__class__.__name__}' = {tensor.shape}")
+                # print(f"Module {m_idx} '{module.__class__.__name__}': output = {tensor.shape}")
             except Exception as e:
+                print(tensor)
                 print(CM(f"Failed on module '{m_idx}' =>\n{module}\n"
                          f"\twith tensor shape {tensor.shape}", Fore.LIGHTRED_EX))
                 raise e
@@ -115,6 +123,42 @@ class Linear(NeatModule):
         except Exception as e:
             print(f"Input shape = {tensor.shape}")
             print(f"Weights shape = {self.weights.shape}")
+            print(f"Biases shape = {self.biases.shape if self.biases is not None else None}")
+            raise e
+
+
+class Polynomial(NeatModule):
+    def __init__(self, inputs: int, outputs: int, coefficients: int = 2, bias=True,
+                 device: torch.device = 'cpu', dtype: torch.dtype = torch.float32):
+        super(Polynomial, self).__init__(inputs=inputs, outputs=outputs, coefficients=coefficients, bias=bias)
+        self.coefficients = coefficients
+        self.has_bias = bias
+        assert coefficients >= 1
+        self.exponents = torch.arange(coefficients, device=device, dtype=dtype) + 1
+        self.weights = NeatParameter((coefficients, inputs, outputs), False, device, dtype)
+        self.biases  = NeatParameter(outputs, False, device, dtype) if bias else None
+
+
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
+        tensor = torch.transpose(tensor.unsqueeze(-1) ** self.exponents, -2, -1).unsqueeze(-2)
+        w = self.expand(self.weights[keys], tensor, keys=keys, offset=1)
+        try:
+            # print(f"lin_mod={self.weights.data.shape, tensor.shape}")
+            # print(w.shape, tensor.shape)
+            tensor = torch.sum(torch.matmul(tensor, w).squeeze(-2), dim=-2)
+            if self.has_bias:
+                b = self.expand(self.biases[keys], tensor, keys=keys)
+                tensor = tensor + b
+            else:
+                b = None
+
+            if not verbose:
+                return tensor
+            else:
+                return tensor, (w, b)
+        except Exception as e:
+            print(f"Input shape = {tensor.shape}")
+            print(f"Weights shape = {self.weights.shape} -> {w.shape}")
             print(f"Biases shape = {self.biases.shape if self.biases is not None else None}")
             raise e
 

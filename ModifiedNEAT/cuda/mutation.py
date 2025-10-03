@@ -35,11 +35,11 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
                     init_type, mean, std, minimum, maximum,
                     normals, rng_index
                 )
-            else:
-                clamp(
-                    value + normal(normals, rng_index, 0., mutate_power/3),
-                    minimum, maximum
-                )
+            # else:
+            #     clamp(
+            #         value + normal(normals, rng_index, 0., mutate_power/3),
+            #         minimum, maximum
+            #     )
         elif r < ((delete_param + add_param) / div):
             set_value(parameter, g, x, y, 0.0)
     else:
@@ -50,11 +50,11 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
                     init_type, mean, std, minimum, maximum,
                     normals, rng_index
                 )
-            else:
-                clamp(
-                    value + normal(normals, rng_index, 0., mutate_power/3),
-                    minimum, maximum
-                )
+            # else:
+            #     clamp(
+            #         value + normal(normals, rng_index, 0., mutate_power/3),
+            #         minimum, maximum
+            #     )
         elif prob(probabilities[1], rng_index) < delete_param:
             set_value(parameter, g, x, y, 0.0)
 
@@ -89,7 +89,7 @@ def mutate(
     g_lim = updates.shape[0]
     x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
     y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
-    s_g, s_x, s_y = cuda.gridsize(3)
+    s_g, s_x, s_y = updates.shape # cuda.gridsize(3)
 
     # Linearized thread index
     rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx

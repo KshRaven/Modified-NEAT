@@ -39,7 +39,7 @@ class Population(object):
     """
 
     genus_indexer = Indexer(0)
-    threads_per_block = 8
+    threads_per_block = 10
     group_indexer = Indexer(0)
 
     def __init__(self, genomes: int, module: NeatModule, config: Config = None, state_dict: dict[str, Any] = None, **options):

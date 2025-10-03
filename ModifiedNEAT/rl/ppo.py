@@ -56,7 +56,7 @@ class PPO(Algorithm):
         self.norm_adv: bool               = manage_params(options, ['norm_adv'], False)
         self.gamma: float                 = manage_params(options, 'gamma', 0.95)
         self.alpha: float                 = manage_params(options, 'alpha', 1.10)
-        self.reverse: int                 = manage_params(options, 'reverse', False)
+        self.order: int                 = manage_params(options, 'reverse', False)
         self.epsilon: float               = manage_params(options, 'epsilon', 1e-10)
         self.clip_range: float            = manage_params(options, 'clip_range', 0.3)
         self.pol_reg: float               = manage_params(options, 'pol_reg', 1.0)

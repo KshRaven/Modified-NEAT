@@ -13,6 +13,7 @@ from numpy import ndarray as CPUArray
 from typing import Union
 from torch import Tensor
 
+import torch
 import numpy as np
 import cupy as cp
 import time as clock
@@ -42,27 +43,27 @@ _Number = Union[float, int]
 
 @cuda.jit(device=True) # , cache=True)
 def atomic_add(array: GPUArray, index: _Index, value: _Number) -> None:
-    cuda.atomic.add(array, index, value)
-    # array[index] += value
+    # cuda.atomic.add(array, index, value)
+    array[index] += value
 
 
 @cuda.jit(device=True) # , cache=True)
 def atomic_sub(array: GPUArray, index: _Index, value: _Number) -> None:
-    cuda.atomic.sub(array, index, value)
-    # array[index] -= value
+    # cuda.atomic.sub(array, index, value)
+    array[index] -= value
 
 
 @cuda.jit(device=True)
 def calc_distance(parameter: GPUArray, total_distance: GPUArray,
-                  genome0: int, genome1: int, x: int, y: int,
+                  genome0: int, genome1: int, x: int,
                   compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     """
     Returns the genetic distance between this genome and the other. This distance value
     is used to compute genome compatibility for speciation.
     """
 
-    value0 = parameter[genome0, x, y]
-    value1 = parameter[genome1, x, y]
+    value0 = parameter[genome0, x]
+    value1 = parameter[genome1, x]
 
     current_distance = 0 # total_distance[genome0, genome1]
     disjoint_value = 0
@@ -75,8 +76,8 @@ def calc_distance(parameter: GPUArray, total_distance: GPUArray,
     current_distance = current_distance + disjoint_value * compatibility_disjoint_coefficient
 
     # Parameter shape = (genomes, x, y | 1)
-    x_s, y_s = parameter.shape[1:]
-    size = x_s * y_s
+    x_s = parameter.shape[1] # [:]
+    size = x_s # * y_s
     # if size != 0:
     current_distance = current_distance / size
 
@@ -87,17 +88,13 @@ def calc_distance(parameter: GPUArray, total_distance: GPUArray,
 def get_distance(parameter: GPUArray, total_distance: GPUArray,
                  compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     # select one genome
-    genome1, x, y = cuda.grid(3)
+    x, genome0, genome1 = cuda.grid(3)
     g_lim = total_distance.shape[0]
     x_lim = parameter.shape[1]
-    y_lim = 1 if parameter.ndim == 2 else parameter.shape[2]
-    if genome1 < g_lim and x < x_lim and y < y_lim:
-        genome_num = total_distance.shape[1]
-        # Compare it with all other genomes
-        for genome2 in range(genome_num):
-            calc_distance(parameter, total_distance, genome1, genome2, x, y,
-                          compatibility_weight_coefficient, compatibility_disjoint_coefficient)
-            cuda.syncthreads()
+    if genome0 < g_lim and genome1 < g_lim and x < x_lim:
+        calc_distance(parameter, total_distance, genome0, genome1, x,
+                      compatibility_weight_coefficient, compatibility_disjoint_coefficient)
+        # cuda.syncthreads()
 
 
 @njit(nogil=True)
@@ -122,7 +119,7 @@ def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArra
 
 
 def update_distances_cache(config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,
-                           tpb=1, verbose: int = None) -> float:
+                           tpb=10, verbose: int = None) -> float:
     total_distance = cp.zeros((module.genome_num, module.genome_num), genome_cache.total_distance.dtype)
 
     def reshape(tensor: Union[Tensor, cp.ndarray], required_ndim: int):
@@ -143,9 +140,10 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
     for param in module.neat_parameters():
         # with cuda.defer_cleanup():
         genome_num = len(module.mapping)
-        array = cp.asarray(reshape(param.data, 3)[0])
+        dtype = param.data.dtype if param.data.dtype != torch.bfloat16 else torch.float32
+        array = cp.asarray(reshape(param.data.clone().to(dtype), 2)[0])
         axes = array.shape[1:]
-        kernel_shape = calc_grid(genome_num, *axes, tpb=tpb)
+        kernel_shape = calc_grid(*axes, genome_num, genome_num, tpb=tpb)
         # if verbose:
         #     print(param.dtype, param.device, kernel_shape, array.shape, param.data.shape)
 
@@ -284,7 +282,7 @@ def _update_collection(genus: int, population: dict[int, Genome], species: dict[
 
 def speciate(config: Config, genera: list[int], modules: dict[int, NeatModule],
              species_set: SpeciesSet, population: dict[int, Genome],
-             generation: int, tpb=1, verbose: int = None):
+             generation: int, tpb=10, verbose: int = None):
     """
     Place genomes into species by genetic similarity.
 
@@ -363,6 +361,7 @@ def speciate(config: Config, genera: list[int], modules: dict[int, NeatModule],
 
         distances.extend(distances_cache.list())
 
+    distances = [x for x in distances if not any([np.isnan(x), np.isinf(x), x is None])]
     gd_mean = np.mean(distances)
     gd_std = np.std(distances)
     species_set.last_ct = (gd_mean, gd_std)

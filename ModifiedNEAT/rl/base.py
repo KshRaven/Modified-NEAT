@@ -61,6 +61,7 @@ class Algorithm(object):
         self.dtype: torch.dtype         = dtype
         self.episode_mapping: dict[int, int] = {}
         self.episode_lengths: dict[int, int] = {}
+        self._global_mean = self._global_std = self._global_min = self._global_max = None
         # ------------------------------ Tensorboard logging ------------------------------ #
         from ModifiedNEAT.util.storage import STORAGE_DIR
 
@@ -90,6 +91,13 @@ class Algorithm(object):
         self.secondary.update_mapping(mapping)
         self.logging.update_mapping(mapping)
 
+    @staticmethod
+    @njit
+    def get_episode_filter(mapping: list[int], episodes_done: int, episode_wanted: int):
+        episodes_to_del = [ep for ep in range(episodes_done) if ep < (episodes_done - episode_wanted)]
+        record_filter = [i for i, ep in enumerate(mapping) if ep in episodes_to_del]
+        return record_filter
+
     def deque_episodes(self, episodes: int, keys: list[int] = None):
         """
         Deletes the episodes before the last n episodes.
@@ -102,12 +110,12 @@ class Algorithm(object):
         filters = {}
         episode_mapping: dict[int, list[int]] = self.primary.rollout(buffers='ep_map', as_list=True)[0]
         for key in self.primary.mapping.keys():
-            episodes_to_del = torch.tensor([ep for ep in range(self.episodes_done) if ep < (self.episodes_done-episodes)])
-            mapping         = torch.tensor(episode_mapping[key])
-            episode_filter  = torch.isin(mapping, episodes_to_del)
-            record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
+            # episodes_to_del = torch.tensor([ep for ep in range(self.episodes_done) if ep < (self.episodes_done-episodes)])
+            # mapping         = torch.tensor(episode_mapping[key])
+            # episode_filter  = torch.isin(mapping, episodes_to_del)
+            # record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
             # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
-            filters[key] = record_filter
+            filters[key] = self.get_episode_filter(episode_mapping[key], self.episodes_done, episodes) # record_filter
         self.primary.deque(filters, keys)
 
     def deque_steps(self, steps: int, keys: list[int] = None):
@@ -124,7 +132,7 @@ class Algorithm(object):
         for key in self.primary.mapping.keys():
             records = len(episode_mapping[key])
             limit = max(0, records - steps)
-            filters[key] = [i for i in range(records) if i < limit]
+            filters[key] = list(range(limit)) # [i for i in range(records) if i < limit]
         self.primary.deque(filters, keys)
 
     def deque_episodes_secondary(self, episodes: int, keys: list[int] = None):
@@ -139,13 +147,13 @@ class Algorithm(object):
         filters = {}
         episode_mapping: dict[int, list[int]] = self.secondary.rollout(buffers='ep_map', as_list=True)[0]
         for key in self.secondary.mapping.keys():
-            maximum = max(self.secondary.data[key]['ep_map'])
-            episodes_to_del = torch.tensor([ep for ep in range(maximum+1) if ep < (maximum+1-episodes)])
-            mapping = torch.tensor(episode_mapping[key])
-            episode_filter  = torch.isin(mapping, episodes_to_del)
-            record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
-            # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
-            filters[key] = record_filter
+            max_ep = max(self.secondary.data[key]['ep_map']) + 1
+            # episodes_to_del = torch.tensor([ep for ep in range(max_ep) if ep < (max_ep-episodes)])
+            # mapping = torch.tensor(episode_mapping[key])
+            # episode_filter  = torch.isin(mapping, episodes_to_del)
+            # record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
+            # # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
+            filters[key] = self.get_episode_filter(episode_mapping[key], max_ep, episodes) # record_filter
         self.secondary.deque(filters, keys)
 
     def deque_steps_secondary(self, steps: int, keys: list[int] = None):
@@ -162,7 +170,7 @@ class Algorithm(object):
         for key in self.secondary.mapping.keys():
             records = len(episode_mapping[key])
             limit = max(0, records - steps)
-            filters[key] = [i for i in range(records) if i < limit]
+            filters[key] = list(range(limit)) # [i for i in range(records) if i < limit]
         self.secondary.deque(filters, keys)
 
     def reset_buffers(self):
@@ -212,8 +220,9 @@ class Algorithm(object):
 
     def get_batches(self, keys: list[int], batch_size: int = None, shuffle=False):
         batches = {}
+        buffer_sizes = self.primary.buffer_sizes()
         for key in keys:
-            records = len(list(self.primary.data[key].values())[0])
+            records = int(buffer_sizes[key])
 
             if batch_size is None:
                 batch_size = records
@@ -329,13 +338,16 @@ class Algorithm(object):
 
     @staticmethod
     def compute_returns_static(
-            rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False, best=False,  normalize: int = 1,
+            rewards: TensorDict, gamma: float = 0.99, alpha: float = 1.00, order=0, normalize: int = 1,
             episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None):
+        if -1 >= order > 6:
+            raise ValueError(f"Invalid alpha order: '{order}'")
+
         keys = list(rewards.keys())
 
         if episodes is None:
             try:
-                max_records = int(np.max([tensor.shape  if not isinstance(tensor, (float, int)) else tensor for tensor in rewards.values()]))
+                max_records = int(np.max([tensor.shape if not isinstance(tensor, (float, int)) else tensor for tensor in rewards.values()]))
             except Exception as e:
                 zero_rew_num = np.count_nonzero([len(tensor) for tensor in rewards.values()])
                 print(CM(
@@ -367,47 +379,105 @@ class Algorithm(object):
                 raise ValueError(f"Episodes have not been sorted well for '{self.__class__.__name__}'; "
                                  f"Error for key '{key}' at index {error[1]}, when testing for index {error[0]}.")
 
-        def fixed_std(tensor):
+        def torch_std(tensor):
             if tensor.ndim < 1 or tensor.numel() <= 1:
                 return torch.zeros_like(tensor).mean()
             return torch.std(tensor)
 
+        def numpy_std(array):
+            if len(array) <= 1:
+                return 0.0
+            return np.std(array)
+
+        def fetch(attr: float, var: float, func: callable):
+            if var is None:
+                return None
+            elif attr is None:
+                return var
+            else:
+                return func(attr, var)
+
         global_mean, global_std = [
             g([f(r).cpu().item() for r in rewards.values()])
-            for f, g in zip([torch.mean, fixed_std], [np.mean, np.mean])
+            for f, g in zip([torch.mean, torch_std], [np.mean, numpy_std])
         ] if normalize == 1 else (None, None)
         global_min, global_max = [
             g([f(r).cpu().item() for r in rewards.values()])
             for f, g in zip([torch.min, torch.max], [np.min, np.max])
-        ] if normalize == 2 else (None, None)
+        ] if normalize in [2, 3] else (None, None)
+        # if normalize:
+        #     try:
+        #         self._global_mean = global_mean = fetch(self._global_mean, global_mean, max)
+        #         self._global_std = global_std = fetch(self._global_std, global_std, min)
+        #         self._global_min = global_min = fetch(self._global_min, global_min, min)
+        #         self._global_max = global_max = fetch(self._global_max, global_max, max)
+        #     except AttributeError:
+        #         pass
+        # max_ep_len = np.max([
+        #     np.max([
+        #         len([i for i, ep_idx in enumerate(listing) if ep_idx == u_idx])
+        #         for u_idx in np.unique(listing)
+        #     ]).item()
+        #     for key, listing in episodes.items()
+        # ]).item()
         returns: TensorDict = {}
         for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):
-            if normalize == 1:
+            if normalize == 1 and global_std != 0.0:
                 rewards_ = (rewards_ - global_mean) / (global_std + 1e-9)
-            elif normalize == 2:
-                rewards_ = -1 + 2 * (rewards_ - global_min) / (global_max - global_min + 1e-9)
-            if best:
+            elif normalize in [2, 3] and (global_max - global_min) != 0.0:
+                rewards_ = (rewards_ - global_min) / (global_max - global_min)
+                if normalize == 3:
+                    rewards_ = -1 + 2 * rewards_
+            if order in [2, 3, 4, 5]:
                 if len(rewards_) != len(episodes_):
                     raise ValueError(f"Number of rewards (scores) must be equal to number of episodes for key '{key}' "
                                      f"when parameter 'best' is enabled.")
                 scores = torch.mean(rewards_.view(rewards_.shape[0], -1), dim=-1)
-                _, episode_ranking = torch.sort(scores, descending=False) # Ensure the best is last
+                _, episode_ranking = torch.sort(scores, descending=False if order in [2, 4] else True) # Ensure the best is last
                 rewards_ = rewards_[episode_ranking]
-                reverse = False
             assert key == c_key
             rewards_to_go = []
             idx = episodes_[-1]
             discounted_reward: Tensor = 0.
-            factor = len(np.unique(episodes_))-1 if not reverse else 0
+            ep_total = len(np.unique(episodes_))
+            ep_factors = list(range(ep_total))[::(-1 if order not in [1, 3, 5] else +1)]
+
+            def get_ai(remaining_factors: list[int]):
+                if len(remaining_factors) <= 0:
+                    raise ValueError(f"No episodes rolled out or incorrect mapping")
+                if order not in [4, 5, 6] or len(remaining_factors) == 1:
+                    return 0
+                else:
+                    ef = np.arange(len(remaining_factors))
+                    ef_ = ef[::-1] + 1
+                    try:
+                        return np.random.choice(ef, p=ef_ / np.cumsum(ef_).max() if order in [4, 5] else None)
+                    except Exception as e:
+                        print(ef)
+                        print(ef / np.cumsum(ef).max())
+                        print(remaining_factors)
+                        raise e
+            ep_factor = ep_factors.pop(get_ai(ep_factors))
+
+            # if ep_total >= 5:
+            #     pass
             for reward, ep_idx in reversed(list(zip(rewards_, episodes_))):
                 if idx != ep_idx:
                     discounted_reward = 0.
-                    if not reverse:
-                        factor -= 1
-                    else:
-                        factor += 1
+                    try:
+                        ep_factor = ep_factors.pop(get_ai(ep_factors))
+                    except Exception as e:
+                        print(ep_factors)
+                        print(get_ai(ep_factors))
+                        raise e
+                    if ep_total >= 5:
+                        pass
                 if alpha is not None and alpha > 1.0:
-                    reward = reward * (alpha ** factor)
+                    # TODO: Should length factor be re-enabled?
+                    # ep_len = len([e for e in episodes_ if e == ep_idx])
+                    # len_factor = 1 # ep_len / max_ep_len
+                    # diff = alpha - 1.0
+                    reward = reward * (alpha ** ep_factor) # ((1.0 + (diff * len_factor)) ** ep_factor)
                 if gamma != 0:
                     discounted_reward = reward + (discounted_reward * gamma)
                 else:
@@ -420,9 +490,9 @@ class Algorithm(object):
             returns[key] = cm
         return returns
 
-    def compute_returns(self, rewards: TensorDict, gamma: float = 0.95, alpha: float = 1.10, reverse=False,
-                        best=False, normalize=False, episodes: dict[int, list[int]] = None, device: torch.device = None):
-        return self.compute_returns_static(rewards, gamma, alpha, reverse, best, normalize, episodes, device, self)
+    def compute_returns(self, rewards: TensorDict, gamma: float = 0.99, alpha: float = 1.00, order=0,
+                        normalize=False, episodes: dict[int, list[int]] = None, device: torch.device = None):
+        return self.compute_returns_static(rewards, gamma, alpha, order, normalize, episodes, device, self)
 
     def get_accuracy(self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
                      rewards: TensorDict = None, error=0.10, type='continuous', verbose: int = None,

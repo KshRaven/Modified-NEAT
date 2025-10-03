@@ -18,14 +18,14 @@ class ReplayBuffer(object):
 
     def max_size(self):
         if len(self.data) > 0:
-            maximum = np.max([np.mean([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
+            maximum = np.max([np.max([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
             return maximum
         else:
             return 0
 
     def min_size(self):
         if len(self.data) > 0:
-            maximum = np.min([np.mean([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
+            maximum = np.min([np.min([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
             return maximum
         else:
             return 0
@@ -61,8 +61,12 @@ class ReplayBuffer(object):
                 self.data[key][name] = buffer[-max_length:]
 
     def _deque_buffers(self, key: int, to_del: list[int]):
+        to_del = sorted(set(to_del), reverse=True)
         for name, buffer in self.data[key].items():
-            self.data[key][name] = [item for idx, item in enumerate(buffer) if idx not in to_del]
+            buffer = list(buffer)
+            for idx in to_del:
+                del buffer[idx]
+            self.data[key][name] = buffer # [item for idx, item in enumerate(buffer) if idx not in to_del]
 
     def update_mapping(self, mapping: dict[int, int]):
         """
@@ -227,7 +231,7 @@ class ReplayBuffer(object):
             self.deque(filters, keys)
 
     def sort(self):
-        self.data = dict(sorted(self.data.items(), key=lambda item: len(item[1])))
+        self.data    = dict(sorted(self.data.items(), key=lambda item: len(item[1])))
         self.mapping = dict(sorted(self.mapping.items(), key=lambda item: item[1]))
         self.reverse = dict(sorted(self.reverse.items(), key=lambda item: item[0]))
 

@@ -291,13 +291,13 @@ class NeatModule(nn.Module):
         #     raise ValueError(f"Not all keys included in global tensor")
 
     @staticmethod
-    def expand(tensor: Union[Tensor, None], target: Tensor, offset: int = None, keys=None):
+    def expand(tensor: Union[Tensor, None], target: Tensor, offset: int = None, keys=None, padding: int = 0):
         if tensor is not None:
             # print(tensor.shape)
             # tensor = self.fetch(tensor, keys)
             if not(tensor.shape[0] == 1 or tensor.shape[0] == target.shape[0]):
                 raise ValueError(f"Tensors' key dims do not match; tensor={tensor.shape}, target={target.shape}.")
-            extra   = target.ndim - tensor.ndim
+            extra   = target.ndim - tensor.ndim + padding
             pre     = extra if offset is None else offset
             post    = 0 if offset is None else max(0, extra - offset)
             return tensor.view(tensor.shape[0], *[1 for _ in range(pre)], *tensor.shape[1:], *[1 for _ in range(post)])

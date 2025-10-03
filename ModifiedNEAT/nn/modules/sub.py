@@ -9,7 +9,7 @@ from typing import Union, Iterable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+# import torch.nn.functional as F
 import numpy as np
 
 
@@ -235,35 +235,48 @@ class BufferEmbedding(NeatModule):
 
 
 class BufferEncoding(NeatModule):
-    def __init__(self, max_seq_len: int, embed_size: int, bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
+    def __init__(self, max_seq_len: int, embed_size: int, bias=True, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
         super(BufferEncoding, self).__init__()
-        # ModifiedNEAT
-        self.positions      = torch.arange(max_seq_len, device=device, dtype=dtype).unsqueeze(0).unsqueeze(1).unsqueeze(-1) / (max_seq_len-1)
+        # BUILD
+        assert max_seq_len >= 1
+        self.positions      = torch.arange(max_seq_len, device=device, dtype=dtype).\
+                                  unsqueeze(0).unsqueeze(1).unsqueeze(-1)
+        if max_seq_len > 1:
+            self.positions /= (max_seq_len-1)
         # shape(genomes, batch_size, seq_len, features)
+        self.selector       = torch.arange(max_seq_len, device=device, dtype=torch.long)
         self.encoding       = Linear(1, embed_size, bias, device, dtype)
-        self.activation     = nn.SiLU()
+        # self.activation     = nn.SiLU()
 
         # ATTRIBUTES
         self.max_seq_len    = max_seq_len
         self.embed_size     = embed_size
+        self.encoding_memory: Tensor | None = None
 
         # STATES
         self.device  = device
         self.dtype   = dtype
 
-    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, verbose: int = None):
+    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, offset: tuple[int, int] = None, verbose: int = None, hold=False):
+        if offset is None:
+            offset = 0
+        if verbose and verbose >= 2:
+            print(get_tensor_info(tensor, "Unencoded tensor", verbose))
         # tensor = (genomes, batch_size, seq_len, embed_size)
         genomes, _, seq_len, _ = tensor.shape
         # Expanding positional encoding to shape of input
-        positions = self.positions[:, :, :seq_len]
+        positions = self.positions.expand(genomes, *self.positions.shape[1:])
+        positions = torch.index_select(positions, -2, self.selector[offset:offset+seq_len])
         if verbose and verbose >= 2:
-            print(f"\nPositions =>\n{positions}\n\tdim = {positions.shape}")
-        positional_encoding = self.activation(self.encoding(positions.expand(genomes, 1, seq_len, 1), keys=keys))
+            print(get_tensor_info(positions, "Positions", verbose))
+        positional_encoding: Tensor = self.encoding(positions, keys=keys)
+        # positional_encoding = self.activation(positional_encoding)
+
         # Add encoding to tensor
         tensor = tensor + positional_encoding
         if verbose:
-            print(f"\nPositional Encoding =>\n{positional_encoding}\n\tdim = {positional_encoding.shape}")
-            print(f"\nEncoded tensor =>\n{tensor}\n\tdim = {tensor.shape}")
+            print(get_tensor_info(positional_encoding, "Positional Encoding", verbose))
+            print(get_tensor_info(tensor, "Encoded tensor", verbose))
 
         return tensor
 
@@ -271,9 +284,11 @@ class BufferEncoding(NeatModule):
 class SequenceEncoding(NeatModule):
     def __init__(self, max_pixels: tuple[int, ...], embed_size: int, bias=True, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
         super(SequenceEncoding, self).__init__()
-        self.pixels_totals  = int(np.prod(max_pixels))
-        self.positions      = torch.arange(self.pixels_totals, device=device, dtype=dtype).reshape(max_pixels).\
-                                  unsqueeze(0).unsqueeze(1).unsqueeze(2) / (self.pixels_totals-1)
+        self.pixels_total  = int(np.prod(max_pixels))
+        self.positions      = torch.arange(self.pixels_total, device=device, dtype=dtype).reshape(max_pixels).\
+                                  unsqueeze(0).unsqueeze(1).unsqueeze(2)
+        if self.pixels_total > 1:
+            self.positions /= (self.pixels_total - 1)
         # BUILD
         if len(max_pixels) == 1:
             Convolution = Conv1d
@@ -453,16 +468,17 @@ class AttentionLambda(NeatModule):
         # Returns shape (genomes, batch_size, heads, lambdas, query_len, key_len)
 
 
-# TODO: Fix
 class Attention(NeatModule):
     def __init__(
-            self, max_seq_len: int, embed_size: int, heads: int = None, kv_heads: int = None, differential: int = None,
-            layer_idx: int = None, constant=10000.0, eps=1e-8, affine=True, causal_mask=True, bias=False,
-            device: DEVICE = 'cpu', dtype: DTYPE = torch.float32, **options):
+            self, max_seq_len: int, dim_size: int, heads: int = None, kv_heads: int = None,
+            differential: int = None, layer_idx: int = None, causal_mask=True,
+            bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32, **options):
         super(Attention, self).__init__()
+        self._heads = heads
+        self._kv_heads = kv_heads
         if heads is None:
             heads = 1
-        if embed_size % heads != 0:
+        if dim_size % heads != 0:
             raise ValueError(f"Embedding dimensions must be a multiple of heads num")
         if kv_heads is None:
             kv_heads = heads
@@ -471,13 +487,22 @@ class Attention(NeatModule):
         if isinstance(differential, bool):
             differential = int(differential)
 
-        inputs: int  = manage_params(options, 'inputs', None)
-        outputs: int = manage_params(options, 'outputs', None)
+        # OPTIONS
+        self.auto_single    = manage_params(options, 'auto_single', False)
+        self.constant       = manage_params(options, 'constant', 10000)
+        self.epsilon        = manage_params(options, ['eps', 'epsilon'], 1e-9)
+        self.affine         = manage_params(options, 'affine', True)
+        self.skip_connection = manage_params(options, ['skip_connection', 'residual'], True)
+        self.normalize      = manage_params(options, 'normalize', False)
+        self.stride         = manage_params(options, 'stride', None)
+        inputs: int         = manage_params(options, 'inputs', None)
+        outputs: int        = manage_params(options, 'outputs', None)
 
         # ATTRIBUTES
+        self.bias       = bias
         self.heads      = heads
-        self.embed_size = embed_size
-        self.head_dim   = embed_size // heads
+        self.dim_size   = dim_size
+        self.head_dim   = dim_size // heads
         self.kv_heads   = kv_heads
         self.q_kv_ratio = heads // kv_heads
         self.max_seq_len = max_seq_len
@@ -485,52 +510,47 @@ class Attention(NeatModule):
         self.att_coeff_num = None if not differential else 1+differential
         self.att_coeff_indices = None if not differential else torch.arange(differential, device=device) + 1
         self.causal_mask = causal_mask
-        self.constant   = constant
 
-        # ModifiedNEAT
+        # MODULES
+        self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
         self.mult = 1+differential if differential else 1
-        self.query_proj = nn.Linear(embed_size if not inputs else inputs, heads*self.head_dim*self.mult, bias, device, dtype)
-        self.key_proj   = nn.Linear(embed_size if not inputs else inputs, kv_heads*self.head_dim*self.mult, bias, device, dtype)
-        self.value_proj = nn.Linear(embed_size if not inputs else inputs, kv_heads*self.head_dim, bias, device, dtype)
-        self.out_proj   = nn.Linear(embed_size, embed_size if not outputs else outputs, bias, device, dtype)
-        self.rotary_embedding = RoPE(max_seq_len, embed_size * self.mult, heads, constant, device, dtype)
+        self.query_proj = Linear(dim_size if not inputs else inputs, heads*self.head_dim*self.mult, bias, device, dtype)
+        self.key_proj   = Linear(dim_size if not inputs else inputs, kv_heads*self.head_dim*self.mult, bias, device, dtype)
+        self.value_proj = Linear(dim_size if not inputs else inputs, kv_heads*self.head_dim, bias, device, dtype)
+        self.out_proj   = Linear(dim_size, dim_size if not outputs else outputs, bias, device, dtype) if self.stride is None \
+            else Conv1d(dim_size, dim_size, 1, self.stride, -1, 1, 1, bias, 'zeros', device, dtype)
+        self.transpose  = Transpose() if self.stride is not None else None
+        self.rotary_embedding = RoPE(self.max_seq_len, dim_size * self.mult, heads, self.constant, device, dtype)
         self.softmax    = nn.Softmax(-1)
-        self.norm       = nn.RMSNorm(self.head_dim, eps, affine, device, dtype)
-        self.diff_lambda = AttentionLambda(heads, self.head_dim, layer_idx, differential, 0.0, 0.1, True, eps, device, dtype) if differential else None
-
-        self.k_cache = torch.zeros(1, max_seq_len, kv_heads, self.head_dim * self.mult, device=device, dtype=dtype)
-        self.v_cache = torch.zeros(1, max_seq_len, kv_heads, self.head_dim, device=device, dtype=dtype)
+        self.head_norm  = RMSNorm(self.head_dim, self.epsilon, self.affine, device, dtype) if self.normalize else None
+        # self.head_norm  = RMSNorm(self.head_dim, self.epsilon, False, device, dtype)
+        self.diff_lambda = AttentionLambda(
+            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, True, self.epsilon, device, dtype
+        ) if differential else None
 
         # STATES
         self.device = device
         self.dtype  = dtype
 
-    def adjust_cache_size(self, batch_size: int):
-        cache_size = self.k_cache.shape[0]
-        padding = max(0, batch_size - cache_size)
-        if padding > 0:
-            self.k_cache = torch.cat([self.k_cache, torch.zeros(padding, *self.k_cache.shape[1:], device=self.device, dtype=self.dtype)], 0)
-            self.v_cache = torch.cat([self.v_cache, torch.zeros(padding, *self.v_cache.shape[1:], device=self.device, dtype=self.dtype)], 0)
-
     def repeat_kv(self, tensor: Tensor):
-        batch_size, seq_len, kv_heads, head_dim = tensor.shape
+        genomes, batch_size, seq_len, kv_heads, head_dim = tensor.shape
         if self.q_kv_ratio == 1:
             return tensor
         else:
-            return tensor.unsqueeze(-2).expand(batch_size, seq_len, kv_heads, self.q_kv_ratio, head_dim).\
-                reshape(batch_size, seq_len, kv_heads * self.q_kv_ratio, head_dim)
+            return tensor.unsqueeze(-2).expand(genomes, batch_size, seq_len, kv_heads, self.q_kv_ratio, head_dim).\
+                contiguous().view(genomes, batch_size, seq_len, kv_heads * self.q_kv_ratio, head_dim)
 
-    def attention(self, query: Tensor, key: Tensor, value: Tensor, mask: bool, verbose: int = None):
+    def attention(self, query: Tensor, key: Tensor, value: Tensor, keys: Union[int, Iterable[int]], mask: bool, verbose: int = None):
         if self.differential:
             query   = query.view(*query.shape[:-1], self.att_coeff_num, -1)
             key     = key.view(*key.shape[:-1], self.att_coeff_num, -1)
         # Get the attention score (energy)
-        energy = torch.einsum("bqhd,bkhd->bhqk" if not self.differential else "bqhcd,bkhcd->bhcqk", [query, key])
-        # queries shape: (batch_size, query_len, heads, head_dim)
-        # key shape:     (batch_size, key_len, heads, head_dim)
-        # energy shape:  (batch_size, heads, query_len, key_len)
+        energy = torch.einsum("...qhd,...khd->...hqk" if not self.differential else "...qhcd,...khcd->...hcqk", [query, key])
+        # queries shape: (genomes, batch_size, query_len, heads, *coeffs, head_dim)
+        # key shape:     (genomes, batch_size, key_len, heads, *coeffs, head_dim)
+        # energy shape:  (genomes, batch_size, heads, query_len, *coeffs, key_len)
         if verbose:
-            print(f"\n{CM('Energy =>', Fore.LIGHTYELLOW_EX)}\n{energy}, \n\tdim = {energy.shape}")
+            print(get_tensor_info(energy, 'Energy', verbose))
 
         if mask:
             # Mask where the upper triangle (above the principal diagonal) is 1
@@ -538,115 +558,136 @@ class Attention(NeatModule):
             # Fill the upper triangle with -inf
             energy.masked_fill_(mask_, -torch.inf)
             if verbose and verbose >= 2 and not self.differential:
-                print(f"\n{CM('Mask =>', Fore.CYAN)}\n{mask_}, \n\tdim = {mask_.shape}")
-                print(f"\n{CM('Masked Energy =>', Fore.LIGHTYELLOW_EX)}\n{energy}, \n\tdim = {energy.shape}")
+                print(get_tensor_info(mask_, 'Mask', verbose))
+                print(get_tensor_info(energy, 'Masked Energy', verbose))
 
         # Get the softmax of the energy
         scores = self.softmax(energy / np.sqrt(self.head_dim))
 
         if self.differential:
-            lambdas: Tensor = self.diff_lambda()
+            lambdas: Tensor = self.diff_lambda(keys)
             if verbose and verbose >= 2:
-                print(f"\n{CM('Lambdas =>', Fore.LIGHTYELLOW_EX)}"
-                      f"\n{torch.round(lambdas, decimals=4)}\n\tdim = {lambdas.shape}")
-                print(f"\n{CM('Coeff Indices =>', Fore.LIGHTYELLOW_EX)}"
-                      f"\n{self.att_coeff_indices}\n\tdim = {self.att_coeff_indices.shape}")
+                print(get_tensor_info(torch.round(lambdas, decimals=4), 'Lambdas', verbose+2))
+                print(get_tensor_info(self.att_coeff_indices, 'Coeff Indices', verbose+2))
             scores = torch.select(scores, dim=-3, index=0) + torch.sum(
-                lambdas * torch.index_select(scores, dim=-3, index=self.att_coeff_indices), dim=-3)
+                torch.index_select(scores, dim=-3, index=self.att_coeff_indices) * lambdas, dim=-3
+            ) # * lambdas)
 
             if mask:
                 scores.masked_fill_(torch.ones_like(scores, dtype=torch.bool).triu(1), -torch.inf)
                 if verbose and verbose >= 2 and not self.differential:
-                    print(f"\n{CM('Differential Masked Energy =>', Fore.LIGHTCYAN_EX)}"
-                          f"\n{energy}\n\tdim = {energy.shape}")
+                    print(get_tensor_info(scores, 'Differential Masked Energy', verbose))
             scores = self.softmax(scores)
 
         if verbose:
-            print(f"\n{CM('Attention Scores =>', Fore.LIGHTYELLOW_EX)}"
-                  f"\n{torch.round(scores, decimals=4)}\n\tdim = {scores.shape}")
+            print(get_tensor_info(torch.round(scores, decimals=4), 'Attention Score', verbose))
 
         # Get the weighted sum of the values and reshape to remove heads
-        attention = self.norm(torch.einsum("bhqv,bvhd->bqhd", [scores, value]))
-        # scores shape:    (batch_size, heads, query_len, value_len)
-        # values shape:    (batch_size, value_len, heads, head_dim)
-        # attention shape: (batch_size, query_len, heads, head_dim) then concat last 2 dim
+        attention = torch.einsum("...hqv,...vhd->...qhd", [scores, value])
+        if self.head_norm is not None:
+            attention = self.head_norm(attention, keys=keys)
+        # scores shape:    (genomes, batch_size, heads, query_len, value_len)
+        # values shape:    (genomes, batch_size, value_len, heads, head_dim)
+        # attention shape: (genomes, batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
             attention = attention * (1 - self.diff_lambda.biases(attention, keys, 2))
 
         return scores, attention
 
-    def forward(self, tensor: Tensor, context: Tensor = None, pos_idx: int = None, no_caching=False, verbose: int = None, get=False):
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None,
+                pretext: Tensor = None, pos_idx: int = None, verbose: int = None, get=False):
+        if self.auto_single and pretext is None:
+            pretext = tensor.select(-1, -1).unsqueeze(-1)
         if pos_idx is not None:
             pos_idx = self.max_seq_len + pos_idx if pos_idx < 0 else pos_idx
             assert 0 < pos_idx < self.max_seq_len
         if verbose:
             print(f'\n{CM("Executing Self Attention", Fore.LIGHTBLUE_EX)}')
+            print(get_tensor_info(tensor, f'Input', verbose, Fore.LIGHTRED_EX))
+            if pretext is not None:
+                print(get_tensor_info(pretext, f'Pretext', verbose, Fore.LIGHTRED_EX))
+
+        # Get residue and pre-normalize
+        residue = tensor if pretext is None else pretext
+        if self.pre_norm is not None:
+            tensor = self.pre_norm(tensor, keys=keys)
+            if pretext is not None:
+                pretext = self.pre_norm(pretext, keys=keys)
 
         # Linearize Q, K, V
-        query: Tensor   = self.query_proj(tensor if context is None else context)
-        key: Tensor     = self.key_proj(tensor)
-        value: Tensor   = self.value_proj(tensor)
+        query: Tensor   = self.query_proj(tensor if pretext is None else pretext, keys=keys)
+        key: Tensor     = self.key_proj(tensor, keys=keys)
+        value: Tensor   = self.value_proj(tensor, keys=keys)
         if verbose:
             print(CM('Post Linearization =>'))
-            print(f"\n{CM('Query =>', Fore.LIGHTYELLOW_EX)}\n{CM(query, Fore.LIGHTRED_EX)}, \n\tdim = {query.shape}")
-            print(f"\n{CM('Key =>', Fore.LIGHTYELLOW_EX)}\n{CM(key, Fore.LIGHTGREEN_EX)}, \n\tdim = {key.shape}")
-            print(f"\n{CM('Value =>', Fore.LIGHTYELLOW_EX)}\n{CM(value, Fore.LIGHTBLUE_EX)}, \n\tdim = {value.shape}")
+            print(get_tensor_info(query, 'Query', verbose, Fore.LIGHTRED_EX))
+            print(get_tensor_info(key, 'Key', verbose, Fore.LIGHTGREEN_EX))
+            print(get_tensor_info(value, 'Value', verbose, Fore.LIGHTBLUE_EX))
 
         batch_size, q_seq_len = query.shape[:2]
 
         # Reshape Q, K, V for each rep head
-        query   = query.view(batch_size, -1, self.heads, self.head_dim*self.mult)
-        key     = key.view(batch_size, -1, self.kv_heads, self.head_dim*self.mult)
-        value   = value.view(batch_size, -1, self.kv_heads, self.head_dim)
+        g, b, s, d = query.shape
+        query   = query.view(g, b, s, self.heads, self.head_dim*self.mult)
+        key     = key.view(g, b, -1, self.kv_heads, self.head_dim*self.mult)
+        value   = value.view(g, b, -1, self.kv_heads, self.head_dim)
         if verbose:
-            print(f"\n{CM('Q after Reshaping =>', Fore.LIGHTYELLOW_EX)}\n{query}, \n\tdim = {query.shape}")
-            print(f"\n{CM('K after Reshaping =>', Fore.LIGHTYELLOW_EX)}\n{key}, \n\tdim = {key.shape}")
+            print(get_tensor_info(query, 'Q after Reshaping', verbose))
+            print(get_tensor_info(key, 'K after Reshaping', verbose))
 
-        # ROTARY EMBEDDING
+        # Apply Rotary Embeddings
         query = self.rotary_embedding(query, pos_idx, verbose)
-        key   = self.rotary_embedding(key, None, verbose)
+        key   = self.rotary_embedding(key, None)
         if verbose:
-            print(f"\n{CM('Q after Rotary Embedding =>', Fore.LIGHTYELLOW_EX)}\n{query}, \n\tdim = {query.shape}")
-            print(f"\n{CM('K after Rotary Embedding =>', Fore.LIGHTYELLOW_EX)}\n{key}, \n\tdim = {key.shape}")
-
-        # UPDATE CACHE
-        if pos_idx is not None and not no_caching:
-            # (batch_size, seq_len, kv_heads, head_dim)
-            if self.k_cache.shape[0] < batch_size:
-                self.adjust_cache_size(batch_size)
-
-            # SET
-            start, stop = max(0, pos_idx-1), pos_idx+q_seq_len
-            assert start >= 0 and stop <= self.max_seq_len
-            self.k_cache[:batch_size, start:stop] = key
-            self.v_cache[:batch_size, start:stop] = value
-
-            # GET
-            key   = self.k_cache[:batch_size, :stop]
-            value = self.v_cache[:batch_size, :stop]
+            print(get_tensor_info(query, 'Q after Rotary Embedding', verbose))
+            print(get_tensor_info(key, 'K after Rotary Embedding', verbose))
 
         # Duplicate K and V for kv heads num per query head
         key   = self.repeat_kv(key)
         value = self.repeat_kv(value)
         if verbose:
-            print(f"\n{CM('Duplicated K =>', Fore.LIGHTYELLOW_EX)}\n{key}, \n\tdim = {key.shape}")
-            print(f"\n{CM('Duplicated V =>', Fore.LIGHTYELLOW_EX)}\n{value}, \n\tdim = {value.shape}")
+            print(get_tensor_info(key, 'Duplicated K', verbose))
+            print(get_tensor_info(value, 'Duplicated V', verbose))
 
-        scores, attention = self.attention(query, key.contiguous(), value.contiguous(), self.causal_mask and context is None, verbose)
-        attention = attention.reshape(batch_size, -1, self.embed_size)
-        # out_view shape:  (batch_size, query_len, embed_size)
+        # Apply attention
+        attention_scores, attention = self.attention(
+            query, key.contiguous(), value.contiguous(), keys, self.causal_mask and pretext is None, verbose
+        )
+        attention = attention.reshape(g, b, s, self.dim_size)
+        # out_view shape:  (genomes, batch_size, *pixels, channels)
         if verbose:
-            print(f"\n{CM('Attented Values =>', Fore.LIGHTYELLOW_EX)}\n{attention}\n\tdim = {attention.shape}")
+            print(get_tensor_info(attention, 'Attented Values', verbose))
 
-        # Apply weights
-        tensor: Tensor = self.out_proj(attention)
+        # Apply output projection
+        if self.stride is None:
+            tensor: Tensor = self.out_proj(attention, keys=keys)
+        else:
+            tensor = self.transpose(self.out_proj(self.transpose(attention), keys=keys))
+        # Add the residue
+        if self.skip_connection:
+            tensor = tensor + residue
         if verbose:
-            print(f"\n{CM('Output Projection =>', Fore.LIGHTCYAN_EX)}\n{tensor}\n\tdim = {tensor.shape}")
+            print(get_tensor_info(tensor, 'Output Projection', verbose))
 
+        # Store attention for debugging
         if not get:
             return tensor
         else:
-            return tensor, (scores, attention)
+            return tensor, attention_scores
+
+    def extra_repr(self) -> str:
+        return (f"*** "
+                f"residual={self.skip_connection}, normalize={self.normalize}, "
+                f"auto_single={self.auto_single}. causal_mask={self.causal_mask}"
+                f"***")
+
+    # def __repr__(self):
+    #     return f"{self.__class__.__name__}({self.dim_size}, pixels={self.pixels}, kernel_size={self.kernel_size}, " \
+    #            f"bias={self.bias}{display('hd', self._heads)}{display('kv_hd', self._kv_heads)}" \
+    #            f"{display('diffs', self.att_coeff_num-1 if self.att_coeff_num else None)}" \
+    #            f"{display('pad', self.padding)}{display('pad_mode', self.padding_mode, self.padding)}" \
+    #            f"{display('pre_norm_ng', self.norm_groups)}{display('residual', self.skip_connection)}" \
+    #            f"{display('as', self.auto_single)}"
 
 
 class ConvSelfAttention(NeatModule):
@@ -817,7 +858,6 @@ class ConvSelfAttention(NeatModule):
             print(get_tensor_info(tensor, f'Input', verbose, Fore.LIGHTRED_EX))
             if pretext is not None:
                 print(get_tensor_info(pretext, f'Pretext', verbose, Fore.LIGHTRED_EX))
-
 
         # Get residue and pre-normalize
         residue = tensor if pretext is None else pretext
@@ -1141,34 +1181,39 @@ class ConvCrossAttention(NeatModule):
 # Gated Linear Units                            #
 # --------------------------------------------- #
 
-# TODO: Fix
 class SwiGLU(NeatModule):
-    def __init__(self, embed_size: int, fwd_exp: int = None, bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
+    def __init__(self, dim_size: int, bias=False,
+                 device: DEVICE = 'cpu', dtype: DTYPE = torch.float32, **options):
         super(SwiGLU, self).__init__()
-        if fwd_exp is None:
-            fwd_exp = 4
-        # hidden_size = 4 * embed_size
-        # hidden_size = int(2 * hidden_size / 3)
-        # if fwd_exp is not None:
-        #     hidden_size = int(fwd_exp * hidden_size)
-        # hidden_size = mult * ((hidden_size + mult - 1) // mult)
-        hidden_size = fwd_exp * embed_size
 
-        # ModifiedNEAT
-        self.w1 = Linear(embed_size, hidden_size, bias, device, dtype)
-        self.w2 = Linear(hidden_size, embed_size, bias, device, dtype)
-        self.w3 = Linear(embed_size, hidden_size, bias, device, dtype)
-        self.actv = nn.SiLU()
+        # ATTRIBUTES
+        self.dim_size       = dim_size
+        self.bias           = bias
+        self.epsilon        = manage_params(options, 'epsilon', 1e-8)
+        self.affine         = manage_params(options, 'affine', True)
+        self.normalize      = manage_params(options, 'normalize', False)
+        self.skip_connection = manage_params(options, ['skip_connection', 'residual'], False)
+        self.fwd_exp        = manage_params(options, ['fwd_exp', 'forward_expansion'], 2)
+
+        # BUILD
+        hidden_size = self.fwd_exp * dim_size
+        self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
+        self.inp_proj = Linear(dim_size, hidden_size, bias, device, dtype)
+        self.mul_proj = Linear(dim_size, hidden_size, bias, device, dtype)
+        self.out_proj = Linear(hidden_size, dim_size, bias, device, dtype)
+        self.activation = manage_params(options, ['actv', 'activation'], nn.SiLU())
+
+        # STATES
+        self.device = device
+        self.dtype = dtype
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None):
-        # (batch_size, seq_len, embed_size) -> (batch_size, seq_len, hidden_size)
-        swish = self.actv(self.w1(tensor, keys=keys))
-        # (batch_size, seq_len, embed_size) -> (batch_size, seq_len, hidden_size)
-        tensor_ = self.w3(tensor, keys=keys)
-        # (batch_size, seq_len, hidden_size) * (batch_size, seq_len, hidden_size) -> (batch_size, seq_len, hidden_size)
-        tensor = swish * tensor_
-        # (batch_size, seq_len, hidden_size) -> (batch_size, seq_len, embed_size / out)
-        tensor = self.w2(tensor, keys=keys)
+        residue = tensor
+        if self.pre_norm is not None:
+            tensor = self.pre_norm(tensor, keys=keys)
+        tensor = self.out_proj(self.activation(self.inp_proj(tensor, keys=keys)) * self.mul_proj(tensor, keys=keys), keys=keys)
+        if self.skip_connection:
+            tensor = tensor + residue
         return tensor
 
 
@@ -1238,103 +1283,127 @@ class ConvSwiGLU(NeatModule):
 
 class TransformerBlock(NeatModule):
     def __init__(
-            self, seq_len: int, embed_size: int, heads: int = None, kv_heads: int = None, fwd_exp=4, differential=True,
-            layer_idx: int = None, constant=10000.0, eps=1e-8, affine=True, causal_mask=True, dropout: int = None,
-            bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32,):
+            self, max_seq_len: int, dim_size: int, heads: int = None, kv_heads: int = None,
+            differential=False, layer_idx: int = None, causal_mask=True,
+            bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32, **options):
         super(TransformerBlock, self).__init__()
-        if dropout is None:
-            dropout = 0.0
-
-        # ModifiedNEAT
-        self.attention   = Attention(seq_len, embed_size, heads, kv_heads, differential, layer_idx,
-                                     constant, eps, affine, causal_mask, bias, device, dtype)
-        self.att_norm    = RMSNorm(embed_size, eps, affine, device, dtype)
-        self.feedforward = SwiGLU(embed_size, fwd_exp, bias, device, dtype)
-        self.ffd_norm    = RMSNorm(embed_size, eps, affine, device, dtype)
-        self.dropout     = nn.Dropout(dropout)
 
         # ATTRIBUTES
-        self.embed_size = embed_size
+        self.max_seq_len = max_seq_len
+        self.dim_size = dim_size
         self.heads      = heads
-        self.epsilon    = eps
-        self.head_dim   = embed_size // heads
+        self.kv_heads       = kv_heads
+        self.differential   = differential
+
+        # BUILD
+        # options['residual'] = True
+        self.self_attention = Attention(
+            max_seq_len, dim_size, heads, kv_heads, differential, layer_idx, causal_mask,
+            bias, device, dtype, **options
+        )
+        self.feedforward = SwiGLU(dim_size, bias, device, dtype, **options)
+        self.dropout = nn.Dropout(manage_params(options, 'dropout', 0))
 
         # STATES
-        self.attention_tensor: Tensor = None
-        self.attented_value: Tensor = None
+        self.self_attention_tensor: Tensor = None
+        # self.cross_attention_tensor: Tensor = None
         self.device: DEVICE = device
         self.dtype: DTYPE   = dtype
 
-    def forward(self, tensor: Tensor, context: Tensor = None, pos_idx: int = None,
-                keys: Union[int, Iterable[int]] = None, verbose: int = None, get=False):
-        # Normalize then get the attention
-        attention = self.attention(
-                self.att_norm(tensor, keys=keys), context=context, pos_idx=pos_idx, keys=keys, verbose=verbose, get=get)
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None,
+                pretext: Tensor = None, context: Tensor = None,
+                pos_idx: int = None, verbose: int = None, get=False):
+        # Normalize then get the self attention
+        attention = self.self_attention(
+                tensor, keys=keys, pretext=pretext, pos_idx=pos_idx, verbose=verbose, get=get
+        )
         if get:
-            attention, (self.attention_tensor, self.attented_value) = attention
-        # Apply residual connection then dropout
-        tensor      = self.dropout((tensor if context is None else context) + attention)
+            attention, self.self_attention_tensor = attention
+        # Apply dropout
+        tensor = self.dropout(attention)
+        # Normalize then get the cross attention
+        # if self.cross_attention is not None and context is not None:
+        #     attention = self.cross_attention(
+        #             tensor, keys=keys, context=context, pos_idx=pos_idx, verbose=verbose, get=get
+        #     )
+        #     if get:
+        #         attention, self.cross_attention_tensor = attention
+        #     # Apply dropout
+        #     tensor = self.dropout(attention)
         # Pass through feed forward
-        activation  = self.feedforward(self.ffd_norm(tensor, keys=keys), keys=keys)
-        # Apply residual connection
-        tensor      = self.dropout(tensor + activation)
+        activation = self.feedforward(tensor, keys=keys)
+        # Dropout
+        tensor = self.dropout(activation)
         if verbose:
-            print(f"\n{CM('Transformer Block Output =>', Fore.LIGHTYELLOW_EX)}\n{tensor}\n\tdim = {tensor.shape}")
+            print(get_tensor_info(tensor, f'{self.__class__.__name__} Output', verbose))
 
         return tensor
 
 
 class TransformerBase(NeatModule):
     def __init__(
-            self, seq_len: int, embed_size: int, layers: int, heads: int = None, kv_heads: int = None, fwd_exp=4,
-            differential=True, constant=10000.0, eps=1e-8, affine=True, causal_mask=True, dropout: int = None,
-            bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32,):
+            self, max_seq_len: int, dim_size: int, layers: int, heads: int = None, kv_heads: int = None,
+            differential: int = None, causal_mask=True,
+            bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32, **options):
         super(TransformerBase, self).__init__()
-        # ModifiedNEAT
+
+        # ATTRIBUTES
+        self.max_seq_len    = max_seq_len
+        self.dim_size       = dim_size
+        self.layer_num      = layers
+        self.heads          = heads
+        self.kv_heads       = kv_heads
+        self.differential   = differential
+        self.dropout        = manage_params(options, 'dropout', 0)
+        self.auto_single    = manage_params(options, 'auto_single', False)
+
+        # BUILD
+        options['auto_single'] = False
+        self.positional_encoding = BufferEncoding(max_seq_len, dim_size, bias, device, dtype)
         self.layers: list[TransformerBlock] = nn.ModuleList()
         for layer_idx in range(layers):
+            if layer_idx == layers-1:
+                if self.auto_single:
+                    options['auto_single'] = self.auto_single
+                    options['stride'] = None
             self.layers.append(
                 TransformerBlock(
-                    seq_len, embed_size, heads, kv_heads, fwd_exp, differential, layer_idx,
-                    constant, eps, affine, causal_mask, dropout, bias, device, dtype
+                    max_seq_len, dim_size, heads, kv_heads, differential, layer_idx,
+                    causal_mask, bias, device, dtype, **options
                 )
             )
 
-        # ATTRIBUTES
-        self.seq_len    = seq_len
-        self.embed_size = embed_size
-        self.heads      = heads
-        self.layer_num  = layers
-        self.fwd_exp    = fwd_exp
-        self.kv_heads   = kv_heads
-        self.dropout    = dropout
-
         # STATE
-        self.attention_tensors: list[Tensor] = None
-        self.attented_values: list[Tensor] = None
         self.device     = device
         self.dtype      = dtype
 
-    def forward(self, tensor: Tensor, context: Tensor = None, pos_idx: int = None,
-                keys: Union[int, Iterable[int]] = None, verbose: int = None, get=False, single=False):
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None,
+                pretext: Tensor = None, context: Tensor = None, pos_idx: int = None,
+                verbose: int = None, get=False, single=False):
         # Pass through the encoder blocks
         for layer_idx, layer in enumerate(self.layers):
-            single_fetch = single and layer_idx == len(self.layers) - 1
-            if not single:
-                set_context = context
-            elif single_fetch:
+            # Single mode is only when on final layer, pixels span 1 dimension and tensor has 3 dimensions only
+            single_fetch = (single or self.auto_single) and layer_idx == len(self.layers) - 1
+            # shape (batch_size, channels, *pixels)
+            # tensor = self.positional_encoding(tensor, keys=keys, offset=None, verbose=verbose)
+            if single_fetch:
+                assert tensor.ndim == 4
                 # Using last token index in sequence to get the next token
-                # shape (genomes, batch_size, seq_len, embed_size)
-                set_context = torch.select(tensor, -2, -1).unsqueeze(-2)
+                # shape (genomes, batch_size, seq_len, dim_size)
+                set_pretext = torch.select(tensor, -2, -1).unsqueeze(-2)
             else:
-                set_context = None
-            tensor = layer(tensor, context=set_context, pos_idx=pos_idx, keys=keys,
-                           verbose=verbose if layer_idx == 0 else False, get=get)
+                set_pretext = pretext
+                if set_pretext is not None:
+                    set_pretext = self.positional_encoding(tensor, keys=keys, offset=None, verbose=verbose)
+            tensor = layer(tensor, keys=keys, pretext=set_pretext, context=context, pos_idx=pos_idx,
+                           verbose=verbose, get=get)
 
         return tensor
 
     def get_attention(self):
-        return [(layer.attention_tensor, layer.attented_value) for layer in self.layers]
+        return [(
+            layer.self_attention_tensor, # layer.cross_attention_tensor
+        ) for layer in self.layers]
 
 
 class ConverBlock(NeatModule):
@@ -1457,12 +1526,12 @@ class ConverBase(NeatModule):
         # Pass through the encoder blocks
         for layer_idx, layer in enumerate(self.layers):
             # Single mode is only when on final layer, pixels span 1 dimension and tensor has 3 dimensions only
-            single_fetch = single and layer_idx == len(self.layers) - 1 and len(self.max_pixels) == 1 and tensor.ndim == 4
+            single_fetch = (single or self.auto_single) and layer_idx == len(self.layers) - 1 and len(self.max_pixels) == 1 and tensor.ndim == 4
             # shape (batch_size, channels, *pixels)
             tensor = self.positional_encoding(tensor, keys=keys, offset=None, verbose=verbose)
             if single_fetch:
                 # Using last token index in sequence to get the next token
-                set_pretext = torch.select(tensor, 3, -1).unsqueeze(-1)
+                set_pretext = torch.select(tensor, -1, -1).unsqueeze(-1)
             else:
                 set_pretext = pretext
                 if set_pretext is not None:

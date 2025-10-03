@@ -49,7 +49,7 @@ def _execute(parameter: GPUArray, init_type: int, mean: float, std: float, minim
     g_lim = parameter.shape[0]
     x_lim = 1 if parameter.ndim <= 1 else parameter.shape[1]
     y_lim = 1 if parameter.ndim <= 2 else parameter.shape[2]
-    s_g, s_x, s_y = cuda.gridsize(3)
+    s_g, s_x, s_y = parameter.shape # cuda.gridsize(3)
 
     # Linearized thread index
     rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
@@ -68,9 +68,10 @@ def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
         raise NotImplementedError(f"Unsupported NEAT Genome init type '{config.genome.init_type}'")
 
     for param in module.neat_parameters():
+        dtype = param.data.dtype if param.data.dtype != torch.bfloat16 else torch.float32
         # with cuda.defer_cleanup():
         # Clone the existing parameter
-        array = param.data.clone()
+        array = param.data.clone().to(dtype)
         original_shape = param.data.shape
         # In case dims are greater than 3, flatten the extra dimensions
         if array.ndim > 3:

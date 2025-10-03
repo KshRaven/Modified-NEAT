@@ -1,5 +1,5 @@
 
-from ModifiedNEAT.nn.modules.base import Sequential, Linear
+from ModifiedNEAT.nn.modules.base import Sequential, Linear, Polynomial
 from ModifiedNEAT.nn.modules.base import LayerNorm, RMSNorm, GroupNorm, BatchNorm
 from ModifiedNEAT.nn.modules.base import Conv1d, Conv2d, Conv3d, Identity, Transpose, Ignore
 

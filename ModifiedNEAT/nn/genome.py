@@ -366,6 +366,7 @@ NETWORK = Network.class_type.instance_type
     ('key', INT),
     # ('networks', types.DictType(INT, NETWORK)),
     ('fitness', optional(FLOAT)),
+    ('_actual', optional(FLOAT)),
     ('genus', INT)
 ])
 class Genome(object):
@@ -373,7 +374,12 @@ class Genome(object):
         self.key = key
         # self.networks: dict[int, Network] = Dict.empty(INT, NETWORK)
         self.fitness: float = None
+        self._actual: float = None
         self.genus = genus
+
+    @property
+    def actual_fitness(self):
+        return self.fitness if self._actual is None else self._actual
 
     def __str__(self):
         with objmode(res='unicode_type'):
