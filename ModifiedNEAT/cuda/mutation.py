@@ -21,15 +21,16 @@ GPUArray = Union[DeviceNDArray, cp.ndarray]
 @cuda.jit(device=True)
 def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: float, mutate_power: float,
                   replace_rate: float, init_type: str, mean: float, std: float, minimum: float, maximum: float,
-                  ssm: bool, add_param: float, delete_param: float,
+                  ssm: bool, add_param: float, delete_param: float, epsilon: float,
                   probabilities: tuple[GPUArray, ...], normals: GPUArray, rng_index: int):
     value = get_value(parameter, g, x, y)
 
+    zero_param = abs(value) <= epsilon
     if ssm:
         div = max(1, add_param + delete_param)
         r = prob(probabilities[0], rng_index)
         if r < (add_param / div):
-            if value == 0:
+            if zero_param:
                 initialize_genome(
                     parameter, g, x, y,
                     init_type, mean, std, minimum, maximum,
@@ -41,10 +42,10 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
             #         minimum, maximum
             #     )
         elif r < ((delete_param + add_param) / div):
-            set_value(parameter, g, x, y, 0.0)
+            set_value(parameter, g, x, y, epsilon)
     else:
         if prob(probabilities[0], rng_index) < add_param:
-            if value == 0:
+            if zero_param:
                 initialize_genome(
                     parameter, g, x, y,
                     init_type, mean, std, minimum, maximum,
@@ -56,7 +57,7 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
             #         minimum, maximum
             #     )
         elif prob(probabilities[1], rng_index) < delete_param:
-            set_value(parameter, g, x, y, 0.0)
+            set_value(parameter, g, x, y, epsilon)
 
     r = prob(probabilities[-1], rng_index)
     if r < mutate_rate:
@@ -80,7 +81,7 @@ def mutate(
         updates: GPUArray, children: GPUArray,
         mutate_rate: float, mutate_power: float,
         replace_rate: float, init_type: str, mean: float, std: float, minimum: float, maximum: float,
-        ssm: bool, add_param: float, delete_param: float,
+        ssm: bool, add_param: float, delete_param: float, epsilon: float,
         probabilities: tuple[GPUArray, ...], normals: GPUArray,
         # debugging: GPUArray
 ):
@@ -100,6 +101,6 @@ def mutate(
                 updates, genome_idx, x, y,
                 mutate_rate, mutate_power,
                 replace_rate, init_type, mean, std, minimum, maximum,
-                ssm, add_param, delete_param,
+                ssm, add_param, delete_param, epsilon,
                 probabilities, normals, rng_index
             )

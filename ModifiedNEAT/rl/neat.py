@@ -377,7 +377,7 @@ class NEAT(Algorithm):
                         params = torch.cat(params)
                         return torch.mean(params).cpu().item(), torch.std(params).cpu().item(), \
                                torch.max(params).cpu().item(), torch.min(params).cpu().item(), \
-                               torch.sum(params == 0).cpu().item() / params.numel()
+                               torch.sum(torch.abs(params) <= self.population.config.genome.param_epsilon).cpu().item() / params.numel()
                     except Exception:
                         return torch.nan, torch.nan, torch.nan, torch.nan, torch.nan
 
@@ -446,7 +446,7 @@ class NEAT(Algorithm):
                     creep_max = len([
                         key for key in self.prev_valid_keys
                         if key in valid_keys and buffer_sizes_secondary[key] == max_buffer_size
-                    ]) / len(valid_keys)
+                    ])
                 self.prev_valid_keys = valid_keys
                 extra = 'population/'
                 self.writer.add_scalar(extra+'best_genome', best_genome.key, self.updates_done)

@@ -26,14 +26,15 @@ class GenomeConfig(Configuration):
         self.weight_init_std        = 1.0
         self.weight_max_value       = +math.inf
         self.weight_min_value       = -math.inf
-        self.weight_mutate_power    = 1.0
-        self.weight_mutate_rate     = 0.60
-        self.weight_replace_rate    = 0.05
-        self.weight_add_prob        = 0.30
-        self.weight_del_prob        = 0.20
+        self.weight_mutate_power    = 0.5
+        self.weight_mutate_rate     = 0.50
+        self.weight_replace_rate    = 0.01
+        self.weight_add_prob        = 0.01
+        self.weight_del_prob        = 0.01
+        self.param_epsilon          = 1e-6
 
         self.compatibility_disjoint_coefficient = 1.0
-        self.compatibility_weight_coefficient   = 0.10
+        self.compatibility_weight_coefficient   = 0.1
 
         self.init_type = 'normal'
         self.single_structural_mutation = False

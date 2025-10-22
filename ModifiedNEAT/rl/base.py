@@ -433,16 +433,18 @@ class Algorithm(object):
                     raise ValueError(f"Number of rewards (scores) must be equal to number of episodes for key '{key}' "
                                      f"when parameter 'best' is enabled.")
                 scores = torch.mean(rewards_.view(rewards_.shape[0], -1), dim=-1)
+                episodes_ = torch.tensor(episodes_, device=scores.device, dtype=scores.dtype)
                 _, episode_ranking = torch.sort(scores, descending=False if order in [2, 4] else True) # Ensure the best is last
                 rewards_ = rewards_[episode_ranking]
+                episodes_ = episodes_[episode_ranking].tolist()
             assert key == c_key
             rewards_to_go = []
             idx = episodes_[-1]
             discounted_reward: Tensor = 0.
             ep_total = len(np.unique(episodes_))
-            ep_factors = list(range(ep_total))[::(-1 if order not in [1, 3, 5] else +1)]
+            ep_factors = list(range(ep_total))[::(-1 if order not in [1,] else +1)]
 
-            def get_ai(remaining_factors: list[int]):
+            def get_ai(remaining_factors: list[int]) -> int:
                 if len(remaining_factors) <= 0:
                     raise ValueError(f"No episodes rolled out or incorrect mapping")
                 if order not in [4, 5, 6] or len(remaining_factors) == 1:
@@ -451,7 +453,7 @@ class Algorithm(object):
                     ef = np.arange(len(remaining_factors))
                     ef_ = ef[::-1] + 1
                     try:
-                        return np.random.choice(ef, p=ef_ / np.cumsum(ef_).max() if order in [4, 5] else None)
+                        return np.random.choice(ef, p=(ef_ / np.cumsum(ef_).max()) if order in [4, 5] else None)
                     except Exception as e:
                         print(ef)
                         print(ef / np.cumsum(ef).max())

@@ -1,5 +1,6 @@
 
 from ModifiedNEAT.nn.genome import Genome, INT
+from ModifiedNEAT.config import Config
 
 from torch import Tensor
 from itertools import count
@@ -11,6 +12,8 @@ from typing import Union, Iterable, Any
 
 import torch
 import torch.nn as nn
+import numpy as np
+import cupy as cp
 
 LAYER_DEF = types.Tuple([INT, INT])
 
@@ -35,7 +38,8 @@ class NeatParameter(nn.Module):
         super(NeatParameter, self).__init__()
         if isinstance(shape, (int, float)):
             shape = [shape]
-        self.param_index = next(self.__indexer)
+        self.param_index: int = next(self.__indexer)
+        self._module_index: int | None = None  # Used to specify the module that a parameter is implemented TODO: Ensure all modules support this for debugging reasons. Though not necessary :)
         self.original_shape: tuple[int, ...] = tuple(shape)
 
         # BUILD
@@ -47,6 +51,19 @@ class NeatParameter(nn.Module):
 
         self.cd: CPUArray = None
         self.md: CPUArray = None
+
+    def get_attr_name(self, value):
+        for name, val in self.__dict__.items():
+            if val is value:
+                return name
+        return None
+
+    @property
+    def module_index(self):
+        if self._module_index is None:
+            raise ValueError(f"Module index has not been set. It is set every time .neat_parameters() is called.")
+        else:
+            return self._module_index
 
     def reset(self):
         # BUILD
@@ -192,6 +209,12 @@ class NeatModule(nn.Module):
         self.updated = False
         self.genus: int = None
 
+    def get_attr_name(self, value):
+        for name, val in vars(self).items():
+            if val is value:
+                return name
+        return None
+
     def neat_parameters(self):
         params: list[NeatParameter] = []
 
@@ -218,7 +241,16 @@ class NeatModule(nn.Module):
                             get(x)
                     else:
                         get(sub_item)
-        return sorted(list(set(params)), key=lambda p: p.param_index)
+
+        # Remove duplicate parameters and sort them by parameter index
+        params = sorted(list(set(params)), key=lambda p: p.param_index)
+
+        # TODO: For testing purpose update all neat parameters within the module with the module's index for debugging. Temporary!
+        for param in params:
+            if isinstance(param, NeatParameter) and param._module_index is None:
+                param._module_index = self.module_index
+
+        return params
 
     def neat_modules(self, extensive=True):
         modules: list[NeatModule] = []
@@ -413,7 +445,7 @@ class Model(NeatModule):
     def get_action(self, state: Tensor, keys: Union[int, Iterable[int]] = None) -> tuple[Tensor, Tensor]:
         raise NotImplementedError(f"No 'get_action' method")
 
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, Iterable[int]] = None) -> [Tensor, Union[Tensor, None]]:
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, Iterable[int]] = None) -> Union[Tensor, Union[Tensor, None]]:
         raise NotImplementedError(f"No 'evaluate_action' method")
 
     def get_policy(self, state: Tensor, keys: Union[int, Iterable[int]] = None, **options) -> Tensor:
@@ -454,3 +486,24 @@ class Model(NeatModule):
                 if i < len(self.params)-1:
                     params += ", "
             return f"{self.__class__.__name__}[NeatModule]({params})"
+
+
+def check_for_illegal_zeros(config: Config, array: Union[CPUArray, GPUArray], param: NeatParameter, modules: Union[NeatModule, list[NeatModule], dict[Any, NeatModule]]):
+    array_has_zeros = (np.any(array == 0.0) if isinstance(array, CPUArray) else cp.any(array == 0.0).get()).item()
+    if config.genome.weight_del_prob == 0.0 and array_has_zeros:
+        # NOTE: By this point the module_index of parameters should be set.
+        error = f"Illegal zero value has been encountered when parameter epsilon or deletion has been enabled!"
+        # Attempt to find modules it belongs to
+        if isinstance(modules, NeatModule):
+            modules = [modules]
+        if isinstance(modules, dict):
+            modules = list(modules.values())
+        for module in modules:
+            for m in module.neat_modules():
+                if param.module_index is not None and param.module_index == m.module_index:
+                    pn = m.get_attr_name(param)
+                    param_name = f"'{pn}' " if pn is not None else ""
+                    error += (f"\n\tModule {m.__class__.__name__} (module_index={m.module_index}) "
+                              f"with parameter {param_name}"
+                              f"of shape {param.shape}")
+        raise ValueError(error)

@@ -48,21 +48,24 @@ class BaseModel(Model):
 
         # Build
         self.projection = mn.Sequential(*[
-            mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
+            # mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
+            mn.Linear(inputs, dim_size, True, device, dtype),
             *sum([
                 [
-                    mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+                    # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
                     activation,
-                    mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
+                    # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
+                    mn.Linear(dim_size, dim_size, bias, device, dtype),
                 ]
                 for _ in range(layers)
             ], []),
         ])
         self.pol_proj = mn.Sequential(*[
             # mn.Linear(dim_size, dim_size, bias, device, dtype),
-            mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+            # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
             activation,
-            mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype)
+            # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
+            mn.Linear(dim_size, 2*outputs, True, device, dtype),
         ])
 
     def extra_repr(self) -> str:
@@ -86,7 +89,7 @@ class BaseModel(Model):
         log_prob    = dist.log_prob(action)
         return action, log_prob
 
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None) -> [Tensor, Union[Tensor, None]]:
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None) -> Union[Tensor, Union[Tensor, None]]:
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = torch.distributions.Normal(mean, std)
@@ -115,26 +118,26 @@ def fix(value: float, default: float = 1):
 
 
 # GAME SETTINGS
-PIPE_Y_VELOCITY = 0
-FULL_STATES = False
+PIPE_Y_VELOCITY = 3
+FULL_STATES = True
 DELAY = 0
 
 # AutoEncoder properties
 MAX_SEQ_LEN     = 16
 A_INPUTS        = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
-A_OUTPUTS       = 4
+A_OUTPUTS       = 64
 A_OFFSET        = 0
-DIM_SIZE        = 96
+DIM_SIZE        = 64
 KERNEL_SIZE     = 3
 STRIDE          = 1
 S_LAYERS        = 0
 T_LAYERS        = 3
 F_LAYERS        = 0
 HEADS           = 1
-KV_HEADS        = 1
+KV_HEADS        = None
 DIFFERENTIAL    = False
 BIAS            = False
-PROBABILISTIC   = False
+PROBABILISTIC   = True
 SAVE_NAME = f"ae_ml{MAX_SEQ_LEN}-i{A_INPUTS}-o{A_OUTPUTS}-d{DIM_SIZE}-k{KERNEL_SIZE}-s{STRIDE}-"\
             f"sl{S_LAYERS}-tl{T_LAYERS}-fl{F_LAYERS}-h{HEADS}-kv{KV_HEADS}-"\
             f"diff{DIFFERENTIAL}-b{BIAS}-prob{PROBABILISTIC}-off{A_OFFSET}"
@@ -142,7 +145,8 @@ SAVE_NAME = f"ae_ml{MAX_SEQ_LEN}-i{A_INPUTS}-o{A_OUTPUTS}-d{DIM_SIZE}-k{KERNEL_S
 
 AUTOENCODER = AutoEncoder(
     MAX_SEQ_LEN, A_INPUTS, DIM_SIZE, KERNEL_SIZE, S_LAYERS, T_LAYERS, F_LAYERS, HEADS, KV_HEADS,
-    DIFFERENTIAL, BIAS, DEVICE, DTYPE, outputs=A_OUTPUTS, stride=STRIDE, probabilistic=PROBABILISTIC,
+    DIFFERENTIAL, BIAS, DEVICE, DTYPE,
+    outputs=A_OUTPUTS, stride=STRIDE, probabilistic=PROBABILISTIC, out_bias=False,
 )
 AUTOENCODER.load(SAVE_NAME, None, 'autoencoders', 'flappy-bird\\test', True)
 AUTOENCODER.eval()
@@ -154,21 +158,21 @@ GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
 OUTPUTS             = 1
-EMBED_SIZE          = 8
+EMBED_SIZE          = 64
 COEFFICIENTS        = 1
-LAYERS              = 1
+LAYERS              = 2
 ENABLE_BIAS         = True
 PROBABILISTIC       = False
-MEMORY_SIZE         = 3
-GAMMA               = np.exp(np.log(0.33) / 256)
-ALPHA               = fix(np.exp(np.log(1.25) / (MEMORY_SIZE - 1)), 1.0)
-ALPHA_ORDER         = 2
+MEMORY_SIZE         = 10
+GAMMA               = np.exp(np.log(0.33) / 128)
+ALPHA               = fix(np.exp(np.log(1.50) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA_ORDER         = 0
 REW_NORM            = 2
 LOSS_REG            = 0.
 ACTIVATION          = nn.Tanh()
 CLIP_MIN            = -5
 CLIP_MAX            = -0
-DISTRIBUTION        = 'normal'
+DISTRIBUTION        = 'mult_var_normal'
 
 MODEL0 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, ACTIVATION, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
 MODEL1 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, nn.ReLU(), PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
@@ -185,22 +189,23 @@ INIT_GEN: int = None
 RUNS = 1
 GOAL = 20
 STEPS = GOAL * 100 * RUNS
-EPOCHS = 150
+EPOCHS = 100
 
 print(f"creating config")
 config = neat.Config()
 
-config.genome.init_type = 'normal'
+config.genome.init_type                 = 'normal'
 config.genome.weight_init_mean          = 0.0
 config.genome.weight_init_std           = 1.0
 config.genome.weight_min_value          = -np.inf
 config.genome.weight_max_value          = +np.inf
-config.genome.weight_mutate_power       = 3e-1
+config.genome.weight_mutate_power       = 1e-1
 config.genome.weight_mutate_rate        = 0.50
-config.genome.weight_replace_rate       = 0.10
+config.genome.weight_replace_rate       = 0.00
 config.genome.weight_add_prob           = 0.00
 config.genome.weight_del_prob           = 0.00
 config.genome.single_structural_mutation = False
+config.genome.param_epsilon             = 1e-9
 config.reproduction.min_species_size    = GENOMES
 config.reproduction.purge               = 1
 config.reproduction.clone_threshold     = 0.05
@@ -210,8 +215,8 @@ config.reproduction.elitism             = 30
 config.species.compatibility_threshold  = np.inf
 config.stagnation.max_stagnation        = 1
 config.stagnation.species_elitism       = 2
-config.reproduction.darwin_multiplier   = 0.50
-config.reproduction.cross_multiplier    = 0.90
+config.reproduction.darwin_multiplier   = 0.30
+config.reproduction.cross_multiplier    = 0.50
 config.reproduction.preserve_elite      = False
 config.save()
 config.load(2)
@@ -460,14 +465,14 @@ def run():
         print(f"starting evaluation: population={len(population.genomes)}")
         # trainer.load(name='flappy_bird', file_no=None)
         try:
-            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', 2)
+            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', 3)
         except KeyboardInterrupt:
             pass
     else:
         population.load_dict(name='flappy_bird', file_no=None)
 
     env = Game(
-        population.size, goal=GOAL, seq_len=SEQ_LEN,
+        population.size, goal=50, seq_len=SEQ_LEN,
         height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
         delay=DELAY,

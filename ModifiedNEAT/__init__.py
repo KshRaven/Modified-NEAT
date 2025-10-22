@@ -23,3 +23,4 @@ from .population import Population
 from .reproduction import Reproduction
 from .species import Species, SpeciesSet
 from .stagnation import Stagnation
+from .rl import NEAT

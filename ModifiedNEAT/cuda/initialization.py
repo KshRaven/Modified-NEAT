@@ -1,5 +1,5 @@
 
-from ModifiedNEAT.nn.base import NeatModule
+from ModifiedNEAT.nn.base import NeatModule, check_for_illegal_zeros
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.cuda.functional import calc_grid, get_rng_states, clamp, normal, uniform
 from ModifiedNEAT.util.fancy_text import CM, Fore
@@ -82,7 +82,7 @@ def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
         # Convert param to numba cuda array
         array = cp.asarray(array)
         # Get kernel dims
-        kernel_shape = calc_grid(*array.shape[:3], tpb=tpb)
+        kernel_shape = calc_grid(*array.shape, tpb=tpb)
         # Get rng states for each element in the param
         rng_states, threads_total = get_rng_states(kernel_shape, config.general.seed, get_normal=True, use_cuda=True)
         # if verbose: # and verbose >= 4:
@@ -91,6 +91,12 @@ def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
         _execute[*kernel_shape](
             array, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,
             config.genome.weight_min_value, config.genome.weight_max_value, rng_states)
+
+        # try:
+        #     check_for_illegal_zeros(config, array, param, module)
+        # except Exception as e:
+        #     pass
+        #     raise e
 
         # Copy data back to parameter
         param.data.copy_(torch.from_dlpack(array.reshape(original_shape)))
