@@ -147,7 +147,22 @@ class NEAT(Algorithm):
             if genome.key in available_keys:
                 genome.fitness = true_scores[genome.key]
             else:
-                genome.fitness = -np.inf
+                genome.fitness = 0.0 # -np.inf
+
+        # Normalize between species members considering genomes that were ignored
+        upper_limit = 1.0 + self.pol_reg
+        for specie in self.population.species_set.species.values():
+            fitnesses = np.array([genome.fitness for genome in specie.members.values()])
+            inf_fitnesses = np.isinf(fitnesses)
+            if np.any(inf_fitnesses):
+                raise ValueError(f"Cannot have an inf fitness value; 0.0 < fitness < [1.0, 2.0]")
+            if np.any((fitnesses < 0) | (fitnesses > upper_limit)):
+                raise ValueError(f"Cannot have a fitness value outside of [0.0, <upper_limit>]")
+            minimum, maximum = np.min(fitnesses).item(), np.max(fitnesses).item()
+            difference = maximum - minimum
+            for genome in specie.members.values():
+                genome.fitness = upper_limit if difference == 0.0 else \
+                    upper_limit * (genome.fitness - minimum) / (maximum - minimum)
 
         criterion = self.population.config.general.fitness_criterion
         if criterion == 'max':
@@ -285,7 +300,7 @@ class NEAT(Algorithm):
                             [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
                             for u_idx in np.unique(full_mapping[key])
                         ]
-                    ])
+                    ]).item()
                     for key in valid_keys
                 }
 
