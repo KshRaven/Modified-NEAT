@@ -1,0 +1,31 @@
+Metadata-Version: 2.4
+Name: ModifiedNEAT
+Version: 0.4.17
+Summary: Modified version of python NEAT algorithm that uses PyTorch modules
+Home-page: https://github.com/KshRaven/Modified-NEAT.git
+Author: Bradley Odimmasi
+Author-email: bodimmasi@students.uonbi.ac.ke
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: cuda-python
+Requires-Dist: cuda-toolkit
+Requires-Dist: numba
+Requires-Dist: numba-cuda[cu13]
+Requires-Dist: numpy
+Requires-Dist: cupy-cuda13x
+Requires-Dist: matplotlib
+Requires-Dist: colorama
+Requires-Dist: tensorboard
+Requires-Dist: torch
+Requires-Dist: gymnasium
+Requires-Dist: pygame
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

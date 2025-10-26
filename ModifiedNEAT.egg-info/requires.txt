@@ -1,0 +1,12 @@
+cuda-python
+cuda-toolkit
+numba
+numba-cuda[cu13]
+numpy
+cupy-cuda13x
+matplotlib
+colorama
+tensorboard
+torch
+gymnasium
+pygame
