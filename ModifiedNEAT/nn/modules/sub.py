@@ -211,41 +211,59 @@ Timeseries
 
 
 class BufferEmbedding(NeatModule):
-    def __init__(self, inputs: int, embed_size: int, bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
+    def __init__(self, features: int, embed_size: int, bias=False, type='continuous',
+                 device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
         super(BufferEmbedding, self).__init__()
-        # ModifiedNEAT
-        self.embedding  = Linear(inputs, embed_size, bias, device, dtype)
+        # BUILD
+        if type == 'continuous':
+            self.embedding = Linear(features, embed_size, bias, device, dtype)
+        elif type == 'discrete':
+            raise NotImplementedError(f"nn.Embedding not yet implemented for NEAT modules")
+            self.padding_idx: int | None = manage_params(options, 'padding_idx', None)
+            self.embedding = Embedding(features, embed_size, padding_idx=self.padding_idx, device=device, dtype=dtype)
+        else:
+            raise NotImplementedError(f"Unsupported embedding type: '{type}'")
 
         # ATTRIBUTES
-        self.input_dim  = inputs
+        self.input_dim  = features
         self.embed_size = embed_size
+        self.type       = type
 
         # STATES
-        self.device: DEVICE = device
-        self.dtype: DTYPE   = dtype
+        self.device = device
+        self.dtype  = dtype
 
     def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, verbose: int = None):
-        # Expand input to embedding space; [batch_size, sequence, features] to [batch_size, sequence, embed_size]
+        # Expand input to embedding space; [batch_size, sequence, *features] to [batch_size, sequence, embed_size]
         # print(f"forward={self.embedding.weights.data.shape, tensor.shape}")
         tensor = self.embedding(tensor, keys=keys)
         if verbose:
-            print(f"\nEmbedded tensor =>\n{tensor}\n\tdim = {tensor.shape}")
+            print(get_tensor_info(tensor, "Embedded Tensor", verbose))
 
         return tensor
 
 
 class BufferEncoding(NeatModule):
-    def __init__(self, max_seq_len: int, embed_size: int, bias=True, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
+    def __init__(self, max_seq_len: int, embed_size: int, bias=True, type='discrete',
+                 device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
         super(BufferEncoding, self).__init__()
         # BUILD
         assert max_seq_len >= 1
-        self.positions      = torch.arange(max_seq_len, device=device, dtype=dtype).\
-                                  unsqueeze(0).unsqueeze(1).unsqueeze(-1)
-        if max_seq_len > 1:
-            self.positions /= (max_seq_len-1)
+        if type == 'continuous':
+            self.positions = torch.arange(max_seq_len, device=device, dtype=dtype).unsqueeze(0).unsqueeze(1).unsqueeze(-1)
+            if max_seq_len > 1:
+                self.positions /= (max_seq_len - 1)
+        elif type == 'discrete':
+            self.positions = torch.arange(max_seq_len, device=device, dtype=torch.int32).unsqueeze(0).unsqueeze(1)
+        else:
+            raise NotImplementedError(f"Unsupported encoding type: '{type}'")
         # shape(genomes, batch_size, seq_len, features)
         self.selector       = torch.arange(max_seq_len, device=device, dtype=torch.long)
-        self.encoding       = Linear(1, embed_size, bias, device, dtype)
+        if type == 'continuous':
+            self.encoding = Linear(1, embed_size, bias, device, dtype)
+        elif type == 'discrete':
+            raise NotImplementedError(f"nn.Embedding not yet implemented for NEAT modules")
+            self.encoding = Embedding(max_seq_len, embed_size, device=device, dtype=dtype)
         # self.activation     = nn.SiLU()
 
         # ATTRIBUTES
@@ -348,9 +366,10 @@ class RoPE(NeatModule):
     def __init__(self, max_seq_len: int, embed_size: int, heads: int, constant: int = 10000,
                  device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
         super(RoPE, self).__init__()
-        # ModifiedNEAT - [genomes, batch_size, seq_len, head_dim / 2], EMBEDDING - [seq_len, head_dim / 2]
+        # BUILD - [genomes, batch_size, seq_len, head_dim / 2], EMBEDDING - [seq_len, head_dim / 2]
+        self.conv_dtype = dtype if any([td == dtype for td in [torch.float32, torch.float64]]) else torch.float32
         self.complex_frequencies = self._generate_encoding(max_seq_len, embed_size // heads, constant, 0)
-        self.complex_frequencies = self.complex_frequencies.to(device=device).unsqueeze(0).unsqueeze(0).unsqueeze(-2)
+        self.complex_frequencies = self.complex_frequencies.to(device=device).unsqueeze(0).unsqueeze(1).unsqueeze(-2)
         # EMBEDDING - [genomes, 1, sequence, embed_size]
         self.select = torch.arange(max_seq_len, device=device, dtype=torch.int32)
 
@@ -387,7 +406,7 @@ class RoPE(NeatModule):
     def forward(self, tensor: Tensor, pos_idx: int = None, verbose: int = None):
         seq_len = tensor.shape[-3]
         # [genomes, batch_size, sequence, heads, head_dim] -> [genomes, batch_size, sequence, heads, head_dim/2, 2]
-        complex_tensor = torch.view_as_complex(tensor.view(*tensor.shape[:-1], -1, 2))
+        complex_tensor = torch.view_as_complex(tensor.view(*tensor.shape[:-1], -1, 2).to(self.conv_dtype))
         # [genomes, batch_size, sequence, heads, head_dim/2] * [1, 1, sequence, 1, head_dim/2] = [genomes, batch_size, sequence, heads, head_dim/2]
         complex_frequencies = self.complex_frequencies
         if seq_len > 1:
@@ -395,7 +414,7 @@ class RoPE(NeatModule):
         else:
             if pos_idx is None:
                 pos_idx = 0
-            complex_frequencies = torch.index_select(complex_frequencies, -3, self.select[pos_idx:pos_idx+seq_len])
+            complex_frequencies = torch.index_select(complex_frequencies, -3, self.select[pos_idx:pos_idx+1])
         try:
             rotated_tensor = complex_tensor * complex_frequencies
         except Exception as e:
@@ -404,7 +423,7 @@ class RoPE(NeatModule):
             print(get_tensor_info(complex_frequencies, 'Complex Frequencies Debugging', verbose))
             raise e
         # [genomes, batch_size, sequence, heads, head_dim / 2] -> [genomes, batch_size, sequence, heads, head_dim / 2, 2]
-        split_tensor = torch.view_as_real(rotated_tensor)
+        split_tensor = torch.view_as_real(rotated_tensor).to(self.dtype)
         # [records, sequence, heads, head_dim / 2, 2] -> [records, sequence, heads, head_dim]
         # [records, sequence, heads, head_dim] -> [records, sequence, embed_size]
         tensor = split_tensor.reshape(*tensor.shape).type_as(tensor)
@@ -419,24 +438,38 @@ class RoPE(NeatModule):
 
 
 class AttentionLambda(NeatModule):
-    def __init__(self, heads: int, head_dim: int, layer_idx: int = None, lambdas=1, init_mean=0., init_std=0.1,
-                 affine=True, epsilon=1e-8, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
-        super(AttentionLambda, self).__init__(heads=heads, head_dim=head_dim, lambdas=lambdas, affine=affine)
+    def __init__(self, heads: int, head_dim: int, layer_idx: int = None, lambdas=1, init_mean=0., init_std=0.5,
+                 max_gain=10.0, affine=True, epsilon=1e-8, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
+        self.u_lim = 0.8
+        self.l_lim = 0.2
+        super(AttentionLambda, self).__init__(
+            heads=heads, head_dim=head_dim, coeffs=lambdas,
+            base_limits=(self.u_lim, self.l_lim), base_affine=affine
+        )
         if layer_idx is None:
             layer_idx = 0
 
-        # ModifiedNEAT
+        self.heads = heads
+        self.head_dim = head_dim
+        self.layer_idx = layer_idx
+        self.lambdas = lambdas
+        self.max_gain = max_gain
+        self.base_affine = affine
+
+        # BUILD
         self.q1 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
         self.q2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
         self.k1 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
         self.k2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
-        self.init = 0.8 - 0.6 * np.exp(-0.3 * layer_idx) if not affine else \
-            NeatParameter((heads,), requires_grad=False, device=device, dtype=dtype)
-        self.exponents = (torch.arange(lambdas, device=device, dtype=dtype) + 1).unsqueeze(0).unsqueeze(0)
+        self.range = abs(self.u_lim - self.l_lim)
+        self.init = self.u_lim - (self.range * np.exp(-0.3 * layer_idx)) if not affine else \
+            NeatParameter((heads,), requires_grad=False, device=device, dtype=dtype).unsqueeze(2)
+        self.exponents = (torch.arange(lambdas, device=device, dtype=dtype) + 1).unsqueeze(0).unsqueeze(1)
         self.multipliers = torch.pow(-1, self.exponents)
-        self.eps = epsilon
+        self.epsilon = epsilon
+
         self.mean = init_mean
-        self.std = init_std
+        self.std  = init_std
 
         # Register a hook to modify gradients
         for param in self.neat_parameters():
@@ -445,8 +478,21 @@ class AttentionLambda(NeatModule):
         self.min_val = init_mean - init_std*2
         self.max_val = init_mean + init_std*2
 
-    def biases(self, tensor, keys, offset=None):
-        return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, offset=offset, keys=keys)
+    def extra_repr(self):
+        return f"heads={self.heads}, head_dim={self.head_dim}, coeffs={self.lambdas}, " \
+               f"base_limits={(self.u_lim, self.l_lim)}, base_affine={self.base_affine}"
+
+    @property
+    def init_affine(self):
+        if isinstance(self.init, NeatParameter):
+            return self.l_lim + (self.range * torch.sigmoid(self.init))
+        else:
+            return self.init
+
+    def post_attention_shift(self, keys: Union[int, list[int], None], offset: int | None = None):
+        # TODO: Fix the parameterized implementation of init
+        # return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, offset=offset, keys=keys)
+        return self.init if not isinstance(self.init, NeatParameter) else self.init_affine[keys].unsqueeze(0).unsqueeze(0)
 
     def update_limit(self):
         for param in self.neat_parameters():
@@ -457,13 +503,16 @@ class AttentionLambda(NeatModule):
         # query:     (batch_size, q_len, heads, head_dim)
         # key:       (batch_size, k_len, heads, head_dim)
         # attention: (batch_size, heads, q_len, k_len)
-        q1 = self.q1[keys] # F.tanh(self.q1[keys], self.min_val, self.max_val)
-        k1 = self.k1[keys] # F.tanh(self.k1[keys], self.min_val, self.max_val)
-        q2 = self.q2[keys] # F.tanh(self.q2[keys], self.min_val, self.max_val)
-        k2 = self.k2[keys] # F.tanh(self.k2[keys], self.min_val, self.max_val)
-        base = torch.exp(torch.sum(q1 * k1, -2)) - torch.exp(torch.sum(q2 * k2, -2))
+        # TODO: Might want to verify the need of clamping the parameters
+        q1 = self.q1[keys] # * self.std # F.tanh(self.q1[keys], self.min_val, self.max_val)
+        k1 = self.k1[keys] # * self.std # F.tanh(self.k1[keys], self.min_val, self.max_val)
+        q2 = self.q2[keys] # * self.std # F.tanh(self.q2[keys], self.min_val, self.max_val)
+        k2 = self.k2[keys] # * self.std # F.tanh(self.k2[keys], self.min_val, self.max_val)
+        gain = torch.exp(torch.sum(q1 * k1, -2)) - torch.exp(torch.sum(q2 * k2, -2))
+        gain = torch.sigmoid(gain) * self.max_gain
         return (
-            (base + self.biases(base, keys, 0)) * self.multipliers # ** self.exponents * self.multipliers
+            # (base + self.biases(base, keys, 0)) * self.multipliers # ** self.exponents * self.multipliers
+            ((gain + self.init_affine) ** self.exponents) * self.multipliers
         ).unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
         # Returns shape (genomes, batch_size, heads, lambdas, query_len, key_len)
 
@@ -493,7 +542,7 @@ class Attention(NeatModule):
         self.epsilon        = manage_params(options, ['eps', 'epsilon'], 1e-9)
         self.affine         = manage_params(options, 'affine', True)
         self.skip_connection = manage_params(options, ['skip_connection', 'residual'], True)
-        self.normalize      = manage_params(options, 'normalize', False)
+        self.normalize      = manage_params(options, 'normalize', True)
         self.stride         = manage_params(options, 'stride', None)
         inputs: int         = manage_params(options, 'inputs', None)
         outputs: int        = manage_params(options, 'outputs', None)
@@ -525,7 +574,7 @@ class Attention(NeatModule):
         self.head_norm  = RMSNorm(self.head_dim, self.epsilon, self.affine, device, dtype) if self.normalize else None
         # self.head_norm  = RMSNorm(self.head_dim, self.epsilon, False, device, dtype)
         self.diff_lambda = AttentionLambda(
-            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, True, self.epsilon, device, dtype
+            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, 2.0, True, self.epsilon, device, dtype
         ) if differential else None
 
         # STATES
@@ -538,7 +587,7 @@ class Attention(NeatModule):
             return tensor
         else:
             return tensor.unsqueeze(-2).expand(genomes, batch_size, seq_len, kv_heads, self.q_kv_ratio, head_dim).\
-                contiguous().view(genomes, batch_size, seq_len, kv_heads * self.q_kv_ratio, head_dim)
+                reshape(genomes, batch_size, seq_len, kv_heads * self.q_kv_ratio, head_dim)
 
     def attention(self, query: Tensor, key: Tensor, value: Tensor, keys: Union[int, Iterable[int]], mask: bool, verbose: int = None):
         if self.differential:
@@ -548,36 +597,36 @@ class Attention(NeatModule):
         energy = torch.einsum("...qhd,...khd->...hqk" if not self.differential else "...qhcd,...khcd->...hcqk", [query, key])
         # queries shape: (genomes, batch_size, query_len, heads, *coeffs, head_dim)
         # key shape:     (genomes, batch_size, key_len, heads, *coeffs, head_dim)
-        # energy shape:  (genomes, batch_size, heads, query_len, *coeffs, key_len)
+        # energy shape:  (genomes, batch_size, heads, *coeffs, query_len, key_len)
         if verbose:
             print(get_tensor_info(energy, 'Energy', verbose))
 
-        if mask:
-            # Mask where the upper triangle (above the principal diagonal) is 1
-            mask_ = torch.ones_like(energy, dtype=torch.bool).triu(1)
-            # Fill the upper triangle with -inf
-            energy.masked_fill_(mask_, -torch.inf)
-            if verbose and verbose >= 2 and not self.differential:
-                print(get_tensor_info(mask_, 'Mask', verbose))
-                print(get_tensor_info(energy, 'Masked Energy', verbose))
-
-        # Get the softmax of the energy
-        scores = self.softmax(energy / np.sqrt(self.head_dim))
-
-        if self.differential:
+        if not self.differential:
+            if mask:
+                # Mask where the upper triangle (above the principal diagonal) is 1
+                mask_ = torch.ones_like(energy, dtype=torch.bool).triu(1)
+                # Fill the upper triangle with -inf
+                energy.masked_fill_(mask_, -torch.inf)
+                if verbose and verbose >= 2:
+                    print(get_tensor_info(mask_, 'Mask', verbose))
+                    print(get_tensor_info(energy, 'Masked Energy', verbose))
+        else:
             lambdas: Tensor = self.diff_lambda(keys)
             if verbose and verbose >= 2:
                 print(get_tensor_info(torch.round(lambdas, decimals=4), 'Lambdas', verbose+2))
                 print(get_tensor_info(self.att_coeff_indices, 'Coeff Indices', verbose+2))
-            scores = torch.select(scores, dim=-3, index=0) + torch.sum(
-                torch.index_select(scores, dim=-3, index=self.att_coeff_indices) * lambdas, dim=-3
-            ) # * lambdas)
+            # Index '-3' is the lambdas' coefficients dimension
+            energy = torch.select(energy, dim=-3, index=0) + torch.sum(
+                torch.index_select(energy, dim=-3, index=self.att_coeff_indices) * lambdas, dim=-3
+            )
 
             if mask:
-                scores.masked_fill_(torch.ones_like(scores, dtype=torch.bool).triu(1), -torch.inf)
-                if verbose and verbose >= 2 and not self.differential:
-                    print(get_tensor_info(scores, 'Differential Masked Energy', verbose))
-            scores = self.softmax(scores)
+                energy.masked_fill_(torch.ones_like(energy, dtype=torch.bool).triu(1), -torch.inf)
+                if verbose and verbose >= 2:
+                    print(get_tensor_info(energy, 'Differential Masked Energy', verbose))
+
+        # Get the softmax of the energy
+        scores = self.softmax(energy / np.sqrt(self.head_dim))
 
         if verbose:
             print(get_tensor_info(torch.round(scores, decimals=4), 'Attention Score', verbose))
@@ -590,7 +639,8 @@ class Attention(NeatModule):
         # values shape:    (genomes, batch_size, value_len, heads, head_dim)
         # attention shape: (genomes, batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
-            attention = attention * (1 - self.diff_lambda.biases(attention, keys, 2))
+            # attention = attention * (1 - self.diff_lambda.biases(attention, keys, 2))
+            attention = attention * (1 - self.diff_lambda.post_attention_shift())
 
         return scores, attention
 
@@ -600,7 +650,7 @@ class Attention(NeatModule):
             pretext = tensor.select(-1, -1).unsqueeze(-1)
         if pos_idx is not None:
             pos_idx = self.max_seq_len + pos_idx if pos_idx < 0 else pos_idx
-            assert 0 < pos_idx < self.max_seq_len
+            assert 0 <= pos_idx < self.max_seq_len
         if verbose:
             print(f'\n{CM("Executing Self Attention", Fore.LIGHTBLUE_EX)}')
             print(get_tensor_info(tensor, f'Input', verbose, Fore.LIGHTRED_EX))
@@ -624,7 +674,7 @@ class Attention(NeatModule):
             print(get_tensor_info(key, 'Key', verbose, Fore.LIGHTGREEN_EX))
             print(get_tensor_info(value, 'Value', verbose, Fore.LIGHTBLUE_EX))
 
-        batch_size, q_seq_len = query.shape[:2]
+        # batch_size, q_seq_len = query.shape[:2]
 
         # Reshape Q, K, V for each rep head
         g, b, s, d = query.shape
@@ -651,10 +701,10 @@ class Attention(NeatModule):
 
         # Apply attention
         attention_scores, attention = self.attention(
-            query, key.contiguous(), value.contiguous(), keys, self.causal_mask and pretext is None, verbose
+            query, key, value, keys, self.causal_mask and pretext is None, verbose
         )
         attention = attention.reshape(g, b, s, self.dim_size)
-        # out_view shape:  (genomes, batch_size, *pixels, channels)
+        # out_view shape:  (genomes, batch_size, seq_len, channels)
         if verbose:
             print(get_tensor_info(attention, 'Attented Values', verbose))
 
@@ -1182,8 +1232,7 @@ class ConvCrossAttention(NeatModule):
 # --------------------------------------------- #
 
 class SwiGLU(NeatModule):
-    def __init__(self, dim_size: int, bias=False,
-                 device: DEVICE = 'cpu', dtype: DTYPE = torch.float32, **options):
+    def __init__(self, dim_size: int, bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32, **options):
         super(SwiGLU, self).__init__()
 
         # ATTRIBUTES
@@ -1194,13 +1243,14 @@ class SwiGLU(NeatModule):
         self.normalize      = manage_params(options, 'normalize', False)
         self.skip_connection = manage_params(options, ['skip_connection', 'residual'], False)
         self.fwd_exp        = manage_params(options, ['fwd_exp', 'forward_expansion'], 2)
+        self.out_bias       = manage_params(options, 'out_bias', bias)
 
         # BUILD
         hidden_size = self.fwd_exp * dim_size
         self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
         self.inp_proj = Linear(dim_size, hidden_size, bias, device, dtype)
         self.mul_proj = Linear(dim_size, hidden_size, bias, device, dtype)
-        self.out_proj = Linear(hidden_size, dim_size, bias, device, dtype)
+        self.out_proj = Linear(hidden_size, dim_size, self.out_bias, device, dtype)
         self.activation = manage_params(options, ['actv', 'activation'], nn.SiLU())
 
         # STATES
@@ -1215,6 +1265,11 @@ class SwiGLU(NeatModule):
         if self.skip_connection:
             tensor = tensor + residue
         return tensor
+
+    def extra_repr(self) -> str:
+        return (f"*** "
+                f"residual={self.skip_connection}, normalize={self.normalize}, "
+                f"***")
 
 
 class ConvSwiGLU(NeatModule):
@@ -1359,7 +1414,6 @@ class TransformerBase(NeatModule):
 
         # BUILD
         options['auto_single'] = False
-        self.positional_encoding = BufferEncoding(max_seq_len, dim_size, bias, device, dtype)
         self.layers: list[TransformerBlock] = nn.ModuleList()
         for layer_idx in range(layers):
             if layer_idx == layers-1:
@@ -1384,7 +1438,7 @@ class TransformerBase(NeatModule):
         for layer_idx, layer in enumerate(self.layers):
             # Single mode is only when on final layer, pixels span 1 dimension and tensor has 3 dimensions only
             single_fetch = (single or self.auto_single) and layer_idx == len(self.layers) - 1
-            # shape (batch_size, channels, *pixels)
+            # shape (genomes, batch_size, seq_len, dim_size)
             # tensor = self.positional_encoding(tensor, keys=keys, offset=None, verbose=verbose)
             if single_fetch:
                 assert tensor.ndim == 4
@@ -1393,9 +1447,10 @@ class TransformerBase(NeatModule):
                 set_pretext = torch.select(tensor, -2, -1).unsqueeze(-2)
             else:
                 set_pretext = pretext
-                if set_pretext is not None:
-                    set_pretext = self.positional_encoding(tensor, keys=keys, offset=None, verbose=verbose)
-            tensor = layer(tensor, keys=keys, pretext=set_pretext, context=context, pos_idx=pos_idx,
+                # if set_pretext is not None:
+                #     set_pretext = self.positional_encoding(tensor, keys=keys, offset=None, verbose=verbose)
+            tensor = layer(tensor, keys=keys, pretext=set_pretext, context=context,
+                           pos_idx=pos_idx if not single_fetch else tensor.shape[-2]-1,
                            verbose=verbose, get=get)
 
         return tensor

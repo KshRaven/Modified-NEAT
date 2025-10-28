@@ -1,3 +1,4 @@
+from sympy.abc import epsilon
 
 from game import Game
 from ModifiedNEAT.util.fancy_text import CM, Fore
@@ -25,22 +26,24 @@ import warnings
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
 
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE  = torch.float32
 
 
 class BaseModel(Model):
-    def __init__(self, inputs: int, outputs: int, dim_size: int, layers: int, coefficients=1, activation=nn.SiLU(),
-                 probabilistic=False, bias=True, device: torch.device = 'cpu', dtype: torch.device = torch.float32, **options):
+    def __init__(self, max_seq_len: int, inputs: int, outputs: int, dim_size: int, layers: int,
+                 heads: int, kv_heads: int | None = None, differential: int | bool = False,
+                 activation: mn.NeatModule = nn.SiLU(), probabilistic=False, bias=True,
+                 device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options):
         super().__init__()
         # Attributes
+        self.max_seq_len    = max_seq_len
         self.inputs         = inputs
         self.outputs        = outputs
         self.dim_size       = dim_size
         self.layers         = layers
         self.distribution   = options.get('distribution', 'normal')
         self.stride         = 1
-        self.coefficients   = coefficients
         self.probabilistic  = probabilistic
         self.clip_min       = options.get('clip_min', -4)
         self.clip_max       = options.get('clip_max', 0)
@@ -48,23 +51,16 @@ class BaseModel(Model):
 
         # Build
         self.projection = mn.Sequential(*[
-            # mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
-            mn.Linear(inputs, dim_size, True, device, dtype),
-            *sum([
-                [
-                    # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
-                    activation,
-                    # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
-                    mn.Linear(dim_size, dim_size, bias, device, dtype),
-                ]
-                for _ in range(layers)
-            ], []),
+            mn.BufferEmbedding(inputs, dim_size, True, 'continuous', device, dtype),
+            # mn.BufferEncoding(max_seq_len, dim_size, True, 'continuous', device, dtype),
         ])
+        self.transformer = mn.TransformerBase(
+            max_seq_len, dim_size, layers, heads, kv_heads, differential, True, bias, device, dtype,
+            residual=True, normalize=True, epsilon=1e-9,
+        )
         self.pol_proj = mn.Sequential(*[
-            # mn.Linear(dim_size, dim_size, bias, device, dtype),
             # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
             activation,
-            # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
             mn.Linear(dim_size, 2*outputs, True, device, dtype),
         ])
 
@@ -81,8 +77,11 @@ class BaseModel(Model):
         std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
         return mean, std
 
+    def _get(self, tensor: Tensor, keys: int | list[int] | None = None, verbose: int | bool = False):
+        return self.transformer(self.projection(tensor, keys=keys), keys=keys, single=True, verbose=verbose).squeeze(-2)
+
     def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
-        latent      = self.projection(state, keys=keys)
+        latent      = self._get(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = torch.distributions.Normal(mean, std)
         action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)
@@ -90,7 +89,7 @@ class BaseModel(Model):
         return action, log_prob
 
     def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None) -> Union[Tensor, Union[Tensor, None]]:
-        latent      = self.projection(state, keys=keys)
+        latent      = self._get(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = torch.distributions.Normal(mean, std)
         log_prob    = dist.log_prob(action)
@@ -98,14 +97,14 @@ class BaseModel(Model):
         return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        latent      = self.projection(state, keys=keys)
+        latent      = self._get(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = torch.distributions.Normal(mean, std)
         action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)
         return action
 
     # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
-    #     latent      = self.projection(state, keys=keys)
+    #     latent      = self._get(state, keys=keys)
     #     value       = self.val_proj(latent, keys=keys)
     #     return value
 
@@ -133,41 +132,44 @@ STRIDE          = 1
 S_LAYERS        = 0
 T_LAYERS        = 3
 F_LAYERS        = 0
-HEADS           = 1
-KV_HEADS        = None
-DIFFERENTIAL    = False
-BIAS            = False
-PROBABILISTIC   = True
+A_HEADS         = 1
+A_KV_HEADS      = None
+A_DIFFERENTIAL  = False
+A_BIAS          = False
+A_PROBABILISTIC = True
 SAVE_NAME = f"ae_ml{MAX_SEQ_LEN}-i{A_INPUTS}-o{A_OUTPUTS}-d{DIM_SIZE}-k{KERNEL_SIZE}-s{STRIDE}-"\
-            f"sl{S_LAYERS}-tl{T_LAYERS}-fl{F_LAYERS}-h{HEADS}-kv{KV_HEADS}-"\
-            f"diff{DIFFERENTIAL}-b{BIAS}-prob{PROBABILISTIC}-off{A_OFFSET}"
+            f"sl{S_LAYERS}-tl{T_LAYERS}-fl{F_LAYERS}-h{A_HEADS}-kv{A_KV_HEADS}-"\
+            f"diff{A_DIFFERENTIAL}-b{A_BIAS}-prob{A_PROBABILISTIC}-off{A_OFFSET}"
 
 
 AUTOENCODER = AutoEncoder(
-    MAX_SEQ_LEN, A_INPUTS, DIM_SIZE, KERNEL_SIZE, S_LAYERS, T_LAYERS, F_LAYERS, HEADS, KV_HEADS,
-    DIFFERENTIAL, BIAS, DEVICE, DTYPE,
-    outputs=A_OUTPUTS, stride=STRIDE, probabilistic=PROBABILISTIC, out_bias=False,
+    MAX_SEQ_LEN, A_INPUTS, DIM_SIZE, KERNEL_SIZE, S_LAYERS, T_LAYERS, F_LAYERS, A_HEADS, A_KV_HEADS,
+    A_DIFFERENTIAL, A_BIAS, DEVICE, DTYPE,
+    outputs=A_OUTPUTS, stride=STRIDE, probabilistic=A_PROBABILISTIC, out_bias=False,
 )
 AUTOENCODER.load(SAVE_NAME, None, 'autoencoders', 'flappy-bird\\test', True)
 AUTOENCODER.eval()
 AUTOENCODER.requires_grad_(False)
-AUTOENCODER.single_mode(True)
+AUTOENCODER.single_mode(False)
 
 
 # Model properties
+REDUCED             = False
 GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
-INPUTS              = A_OUTPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
+INPUTS              = A_OUTPUTS if REDUCED else (3 if not FULL_STATES else 5 + (2 if PIPE_Y_VELOCITY != 0 else 0))
 OUTPUTS             = 1
-EMBED_SIZE          = 64
-COEFFICIENTS        = 1
-LAYERS              = 8
+EMBED_SIZE          = 32
+LAYERS              = 1
+HEADS               = 1
+KV_HEADS            = None
 ENABLE_BIAS         = True
+DIFFERENTIAL        = False
 PROBABILISTIC       = False
 MEMORY_SIZE         = 10
 GAMMA               = np.exp(np.log(0.33) / 128)
-ALPHA               = fix(np.exp(np.log(1.50) / (MEMORY_SIZE - 1)), 1.0)
-ALPHA_ORDER         = 2
+ALPHA               = fix(np.exp(np.log(1.05) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA_ORDER         = 0
 REW_NORM            = 2
 LOSS_REG            = 0.
 ACTIVATION          = nn.Tanh()
@@ -175,9 +177,12 @@ CLIP_MIN            = -5
 CLIP_MAX            = -0
 DISTRIBUTION        = 'mult_var_normal'
 
-MODEL0 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, ACTIVATION, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
-MODEL1 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, nn.ReLU(), PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
-MODEL2 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, nn.SiLU(), PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
+MODEL0 = BaseModel(MAX_SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS, DIFFERENTIAL, ACTIVATION,
+                   PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
+MODEL1 = BaseModel(MAX_SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS, DIFFERENTIAL, nn.ReLU(),
+                   PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
+MODEL2 = BaseModel(MAX_SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS, DIFFERENTIAL, nn.SiLU(),
+                   PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
 
 # GAME SETTINGS
 SPAWN_WIDTH = 200
@@ -240,7 +245,7 @@ def evaluate(population: neat.Population, **options):
     start = 0
     run_step = 0
     game_step = 0
-    DEBUG_STEP = SEQ_LEN - 1
+    DEBUG_STEP = 2 # SEQ_LEN - 1
     MODEL0.train()
     while not terminate:
         env = Game(
@@ -262,11 +267,14 @@ def evaluate(population: neat.Population, **options):
         done = False
         while not done:
             with torch.no_grad():
+                DEBUG_DATA = step == DEBUG_STEP and population.generation == INIT_GEN
+                if DEBUG_DATA:
+                    print(f"\nstates =>\n{states}\n\tshape = {states.shape}")
                 # Get Inputs ~ send bird location, top pipe location and bottom pipe location
                 # and determine from network whether to jump or not
                 # states = AUTOENCODER(states.to(DEVICE, DTYPE), single=False)[:, -1 - DELAY]
-                states = AUTOENCODER(states.to(DEVICE, DTYPE))
-                DEBUG_DATA = step == DEBUG_STEP and population.generation == INIT_GEN
+                states = states.to(DEVICE, DTYPE)
+                # states = AUTOENCODER(states.to(DEVICE, DTYPE), single=False)
                 if DEBUG_DATA:
                     print(f"\nobservations =>\n{states}\n\tshape = {states.shape}")
 
@@ -452,7 +460,7 @@ def run():
             device=DEVICE, dtype=DTYPE,
             log_sub_dir='flappy_bird\\',
             log_name=f"{unix_to_datetime_file(clock.time())}_"
-                     f"e{EMBED_SIZE}-c{COEFFICIENTS}-m{SEQ_LEN}-l{LAYERS}-b{int(ENABLE_BIAS)}-h{HEADS}-"
+                     f"e{EMBED_SIZE}-m{SEQ_LEN}-l{LAYERS}-b{int(ENABLE_BIAS)}-h{HEADS}-kv{KV_HEADS}-"
                      f"prob{int(PROBABILISTIC)}-"
                      f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
                      f"rn{REW_NORM}-p{round(LOSS_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
@@ -488,7 +496,8 @@ def run():
         ts = clock.perf_counter()
         while not done:
             # states = AUTOENCODER(states.to(DEVICE, DTYPE), single=False)[:, [-1 - DELAY]]
-            states = AUTOENCODER(states.to(DEVICE, DTYPE)).unsqueeze(1)
+            states = states.to(DEVICE, DTYPE).unsqueeze(1)
+            # states = AUTOENCODER(states.to(DEVICE, DTYPE), single=False).unsqueeze(1)
             # Get actions
             with torch.no_grad():
                 observations0, observations1, observations2 = torch.split(

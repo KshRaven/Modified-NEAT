@@ -434,28 +434,35 @@ def update_children(
             probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)
             # ------------------------------ Run crossover using sources ------------------------------ #
             equal_params = check_param_compatibility(param_group)
-            filled = cp.zeros(array_update.shape + (sources.shape[-1],), bool)
-            updates_total = 0
-            for genus_, source_ in zip(genus_mapping.keys(), array_sources):
-                if config.reproduction.cross_threshold == 0.0 and genus_ != genus:
-                    continue
-                updates_total += 1
-                crossover[*kernel_shape](
-                    genus_, source_, array_update, sources, genera, filled, probabilities, equal_params
-                )
 
-            # There shouldn't be any zero values when epsilon or weight deletion is enabled for parameters
-            try:
-                check_for_illegal_zeros(config, array_update, genus_param, modules)
-            except Exception as e:
-                print(f"updates total = {updates_total} for param_index = {genus_param.param_index}")
-                print(f"indices = {cp.where(cp.any(array_update == 0, axis=(1, 2)))[0].get().tolist()[:20]}")
-                print(f"zeros total = {cp.sum(cp.abs(array_update) == 0).get().item()}")
-                print(f"sources = {[s.shape for s in array_sources]}")
-                print(f"update = {array_update.shape}, probabilities = {probabilities.shape}")
-                print(f"genus = {genus}, kernel shape = {kernel_shape}")
-                pass
-                raise e
+            attempts = 3
+            while attempts > 0:
+                attempts -= 1
+                filled = cp.zeros(array_update.shape + (sources.shape[-1],), bool)
+                updates_total = 0
+                for genus_, source_ in zip(genus_mapping.keys(), array_sources):
+                    if config.reproduction.cross_threshold == 0.0 and genus_ != genus:
+                        continue
+                    updates_total += 1
+                    crossover[*kernel_shape](
+                        genus_, source_, array_update, sources, genera, filled, probabilities, equal_params
+                    )
+
+                # There shouldn't be any zero values when epsilon or weight deletion is enabled for parameters
+                try:
+                    check_for_illegal_zeros(config, array_update, genus_param, modules)
+                except Exception as e:
+                    if attempts > 0:
+                        continue
+                    print(f"updates total = {updates_total} for param_index = {genus_param.param_index}")
+                    print(f"indices = {cp.where(cp.any(array_update == 0, axis=(1, 2)))[0].get().tolist()[:20]}")
+                    print(f"zeros total = {cp.sum(cp.abs(array_update) == 0).get().item()}")
+                    print(f"sources = {[s.shape for s in array_sources]}")
+                    print(f"update = {array_update.shape}, probabilities = {probabilities.shape}")
+                    print(f"genus = {genus}, kernel shape = {kernel_shape}")
+                    pass
+                    raise e
+                break
 
             if verbose and verbose >= 4:
                 genus_param.cd = array_update.copy().get()
