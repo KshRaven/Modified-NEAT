@@ -457,7 +457,9 @@ class NEAT(Algorithm):
                     creep = creep_max = 0.0
                 else:
                     creep = len([key for key in self.prev_valid_keys if key in valid_keys]) / len(valid_keys)
-                    max_buffer_size = max(buffer_sizes_secondary.values())
+                    max_buffer_size = self.secondary.max_size() # max(buffer_sizes_secondary.values())
+                    if verbose:
+                        print(f"max_buffer_size = {max_buffer_size}")
                     creep_max = len([
                         key for key in self.prev_valid_keys
                         if key in valid_keys and buffer_sizes_secondary[key] == max_buffer_size
@@ -516,8 +518,9 @@ class NEAT(Algorithm):
                     s.step()
 
             if epoch_done == epochs - 1:
-                self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self,
-                                    terminate_skip=True)
+                self.population.run(
+                    evaluation_function, 1, verbose=verbose, skip=True, trainer=self, terminate_skip=True
+                )
 
             epoch_done += 1
 

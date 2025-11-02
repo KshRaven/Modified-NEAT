@@ -88,7 +88,7 @@ class SpeciesSet:
         self.species: dict[int, Species] = Dict.empty(INT, SPECIES)
         self.genome_to_species: dict[int, int] = Dict.empty(INT, INT)
         self.distances_cache = GenomeDistanceCache()
-        self.last_ct: int = None
+        self.last_ct: tuple[float, float] | None = None
 
     def reset_genome_mapping(self):
         self.genome_to_species = Dict.empty(INT, INT)

@@ -56,7 +56,7 @@ class BaseModel(Model):
         ])
         self.transformer = mn.TransformerBase(
             max_seq_len, dim_size, layers, heads, kv_heads, differential, True, bias, device, dtype,
-            residual=True, normalize=True, epsilon=1e-9,
+            residual=True, normalize=True, epsilon=1e-9, fwd_exp=1, activation=activation,
         )
         self.pol_proj = mn.Sequential(*[
             # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
@@ -70,7 +70,7 @@ class BaseModel(Model):
     def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
         return self.get_policy(state, keys=keys, **kwargs)
 
-    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
+    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
         mean_std        = self.pol_proj(latent, keys=keys)
         mean, log_std   = torch.chunk(mean_std, 2, -1)
         mean            = F.sigmoid(mean) * 6 + -3
@@ -83,15 +83,15 @@ class BaseModel(Model):
     def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
         latent      = self._get(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
+        dist        = self.dist(mean, std)
         action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)
         log_prob    = dist.log_prob(action)
         return action, log_prob
 
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None) -> Union[Tensor, Union[Tensor, None]]:
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None):
         latent      = self._get(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
+        dist        = self.dist(mean, std)
         log_prob    = dist.log_prob(action)
         entropy     = dist.entropy()
         return log_prob, entropy
@@ -159,21 +159,21 @@ GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS if REDUCED else (3 if not FULL_STATES else 5 + (2 if PIPE_Y_VELOCITY != 0 else 0))
 OUTPUTS             = 1
-EMBED_SIZE          = 32
+EMBED_SIZE          = 48
 LAYERS              = 1
 HEADS               = 1
 KV_HEADS            = None
 ENABLE_BIAS         = True
 DIFFERENTIAL        = False
-PROBABILISTIC       = False
+PROBABILISTIC       = True
 MEMORY_SIZE         = 10
 GAMMA               = np.exp(np.log(0.33) / 128)
-ALPHA               = fix(np.exp(np.log(1.05) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(1.20) / (MEMORY_SIZE - 1)), 1.0)
 ALPHA_ORDER         = 0
 REW_NORM            = 2
 LOSS_REG            = 0.
 ACTIVATION          = nn.Tanh()
-CLIP_MIN            = -5
+CLIP_MIN            = -2
 CLIP_MAX            = -0
 DISTRIBUTION        = 'mult_var_normal'
 
@@ -195,7 +195,7 @@ INIT_GEN: int = None
 RUNS = 1
 GOAL = 20
 STEPS = GOAL * 100 * RUNS
-EPOCHS = 100
+EPOCHS = 150
 
 print(f"creating config")
 config = neat.Config()

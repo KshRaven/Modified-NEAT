@@ -445,7 +445,7 @@ class Model(NeatModule):
     def get_action(self, state: Tensor, keys: Union[int, Iterable[int]] = None) -> tuple[Tensor, Tensor]:
         raise NotImplementedError(f"No 'get_action' method")
 
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, Iterable[int]] = None) -> Union[Tensor, Union[Tensor, None]]:
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, Iterable[int]] = None) -> tuple[Tensor, Union[Tensor, None]]:
         raise NotImplementedError(f"No 'evaluate_action' method")
 
     def get_policy(self, state: Tensor, keys: Union[int, Iterable[int]] = None, **options) -> Tensor:
