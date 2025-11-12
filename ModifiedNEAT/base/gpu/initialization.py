@@ -1,7 +1,7 @@
 
-from ModifiedNEAT.nn.base import NeatModule, check_for_illegal_zeros
+from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.config import Config
-from ModifiedNEAT.cuda.functional import calc_grid, get_rng_states, clamp, normal, uniform
+from ModifiedNEAT.base.gpu.functional import calc_grid, get_rng_states, clamp, normal, uniform
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
 from numba import cuda
@@ -79,7 +79,7 @@ def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
         elif array.ndim < 3:
             for _ in range(3-array.ndim):
                 array = array.unsqueeze(-1)
-        # Convert param to numba cuda array
+        # Convert param to numba gpu array
         array = cp.asarray(array)
         # Get kernel dims
         kernel_shape = calc_grid(*array.shape, tpb=tpb)

@@ -1,6 +1,6 @@
 
-from ModifiedNEAT.cuda.functional import clamp, prob, get_value, set_value, normal
-from ModifiedNEAT.cuda.initialization import initialize_genome
+from ModifiedNEAT.base.gpu.functional import clamp, prob, get_value, set_value, normal
+from ModifiedNEAT.base.gpu.initialization import initialize_genome
 
 from numba import cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray
