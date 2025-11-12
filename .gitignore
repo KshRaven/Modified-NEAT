@@ -1,8 +1,6 @@
-/ModifiedNEAT/testing/
+
 /venv/
 /storage/
-/ModifiedNEAT/cuda/testing/
-build
-.idea
+/.idea/
 /build/
 /ModifiedNEAT.egg-info/

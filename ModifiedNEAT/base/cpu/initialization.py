@@ -1,6 +1,5 @@
-import numpy as np
 
-from ModifiedNEAT.nn.base import NeatModule
+from ModifiedNEAT.nn import NeatModule
 from ModifiedNEAT.config import Config
 from .functional import calc_grid, get_rng_states, clamp, normal, uniform
 from ModifiedNEAT.util.fancy_text import CM, Fore
@@ -8,6 +7,7 @@ from ModifiedNEAT.util.fancy_text import CM, Fore
 from numba import njit, prange
 from numpy import ndarray as CPUArray
 
+import numpy as np
 import torch
 import time as clock
 import gc
@@ -18,17 +18,17 @@ def initialize_genome(parameter: CPUArray, g: int, x: int, y: int, init_type: in
                       norm_min: float, norm_max: float, rng_states: CPUArray, rng_index: int):
     uni_min = max(norm_min, (mean - (2 * std)))
     uni_max = min(norm_max, (mean + (2 * std)))
-    for index, value in np.ndenumerate(parameter):
-        if init_type == 0:
-            parameter[index] = clamp(
-                normal(rng_states, rng_index, mean, std),
-                norm_min, norm_max
-            )
-        elif init_type == 1:
-            parameter[g, x, y] = uniform(rng_states, rng_index, uni_min, uni_max)
+    # for index, value in np.ndenumerate(parameter):
+    if init_type == 0:
+        parameter[g, x, y] = clamp(
+            normal(rng_states, rng_index, mean, std),
+            norm_min, norm_max
+        )
+    elif init_type == 1:
+        parameter[g, x, y] = uniform(rng_states, rng_index, uni_min, uni_max)
 
 
-@njit
+@njit(parallel=True)
 def _execute(parameter: CPUArray, init_type: int, mean: float, std: float, minimum: float, maximum: float, rng_states):
     if parameter.ndim != 3:
         raise ValueError(f"Expected a 3D array, got {parameter.ndim}")
@@ -46,7 +46,12 @@ def _execute(parameter: CPUArray, init_type: int, mean: float, std: float, minim
                 rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
                 if genome_idx < g_lim and x < x_lim and y < y_lim:
-                    initialize_genome(parameter, genome_idx, x, y, init_type, mean, std, minimum, maximum, rng_states, rng_index)
+                    initialize_genome(
+                        parameter, genome_idx, x, y, init_type, mean, std, minimum, maximum, rng_states, rng_index
+                    )
+                    pass
+                else:
+                    raise ValueError("Out of bounds")
 
 
 def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):

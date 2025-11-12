@@ -1,13 +1,13 @@
 
-from ModifiedNEAT.nn.base import Model, NeatModule
-from ModifiedNEAT.nn.modules import SequenceEncoding, BufferEncoding, BufferEmbedding, TransformerBase
-from ModifiedNEAT.nn.modules import Sequential, Linear, Transpose, Ignore
-from ModifiedNEAT.nn.modules import Conv1d, Conv2d, Conv3d, ResidualBlock, ConverBase
-from ModifiedNEAT.nn.modules import LayerNorm, RMSNorm, GroupNorm, BatchNorm
-from ModifiedNEAT.nn.modules.base import get_conv
-from ModifiedNEAT.nn.modules.util import get_tensor_info
-from ModifiedNEAT.util.qol import manage_params
-from ModifiedNEAT.util.fancy_text import CM, Fore
+from ..base import Model, NeatModule
+from . import SequenceEncoding, BufferEncoding, BufferEmbedding, TransformerBase
+from . import Sequential, Linear, Transpose, Ignore
+from . import Conv1d, Conv2d, Conv3d, ResidualBlock, ConverBase
+from . import LayerNorm, RMSNorm, GroupNorm, BatchNorm
+from .base import get_conv
+from .util import get_tensor_info
+from ...util.qol import manage_params
+from ...util.fancy_text import CM, Fore
 
 from torch import Tensor
 from typing import Union, Iterable

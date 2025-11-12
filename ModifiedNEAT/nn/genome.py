@@ -373,8 +373,8 @@ class Genome(object):
     def __init__(self, key: int, genus: int):
         self.key = key
         # self.networks: dict[int, Network] = Dict.empty(INT, NETWORK)
-        self.fitness: float = None
-        self._actual: float = None
+        self.fitness: float | None = None
+        self._actual: float | None = None
         self.genus = genus
 
     @property

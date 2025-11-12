@@ -1,26 +1,25 @@
 
-from . import cuda
-from . import config
-from . import nn
-from . import optim
-from . import reproduction
-from . import reporter
-from . import rl
-from . import util
-from . import population
-from . import species
-from . import config
-from . import stagnation
-from . import multiprocessing
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.base import cuda_is_available, set_device, device, initialize, reproduce, speciate
+# from ModifiedNEAT.base.gpu import SEED, set_seed TODO: Sort out
+from ModifiedNEAT.nn import modules, activations, NeatModule, NeatParameter, Model
+from ModifiedNEAT.nn import Genome # TODO: Remove -> , Network, Connection
+from ModifiedNEAT.reporter import BaseReporter, ReporterSet, StdOutReporter
+from ModifiedNEAT.population import Population
+from ModifiedNEAT.reproduction import Reproduction
+from ModifiedNEAT.species import Species, SpeciesSet
+from ModifiedNEAT.stagnation import Stagnation
+from ModifiedNEAT.rl import NEAT
 
-from .cuda import initialize, reproduce, speciate, functional
-from .config import Config
-from .cuda.functional import SEED, set_seed
-from .nn import modules, activations, NeatModule, NeatParameter, Model
-from .nn import Genome, Network, Connection
-from .reporter import BaseReporter, ReporterSet, StdOutReporter
-from .population import Population
-from .reproduction import Reproduction
-from .species import Species, SpeciesSet
-from .stagnation import Stagnation
-from .rl import NEAT
+from ModifiedNEAT import config
+from ModifiedNEAT import nn
+from ModifiedNEAT import base
+from ModifiedNEAT import optim
+from ModifiedNEAT import reproduction
+from ModifiedNEAT import reporter
+from ModifiedNEAT import rl
+from ModifiedNEAT import util
+from ModifiedNEAT import population
+from ModifiedNEAT import species
+from ModifiedNEAT import stagnation
+from ModifiedNEAT import multproc

@@ -5,15 +5,13 @@ from ModifiedNEAT.nn.genome import Genome, FLOAT, INT
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.species import SpeciesSet, Species, SPECIES
 from ModifiedNEAT.stagnation import Stagnation
-from ModifiedNEAT.util.datetime import eta, clock
+from ModifiedNEAT.util.datetime import clock
 from ModifiedNEAT.util.qol import Indexer
-from ModifiedNEAT.cuda import initialize
+from ModifiedNEAT.base import initialize
 
-from numba import types, typeof, njit, optional, prange, cuda
+from numba import types, njit, prange
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
-from numba.experimental import jitclass
 from numba.typed import List, Dict
-from numpy import ndarray as CPUArray
 
 import numpy as np
 

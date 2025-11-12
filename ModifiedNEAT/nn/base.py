@@ -15,8 +15,6 @@ import torch.nn as nn
 import numpy as np
 import cupy as cp
 
-LAYER_DEF = types.Tuple([INT, INT])
-
 
 def _addindent(s_, numSpaces):
     s = s_.split("\n")
@@ -125,7 +123,7 @@ class NeatParameter(nn.Module):
         if isinstance(params, DeviceNDArray):
             params = params.copy_to_host()
         if isinstance(params, CPUArray):
-            params = torch.tensor(params, self.device, self.dtype)
+            params = torch.tensor(params, device=self.device, dtype=self.dtype)
         elif isinstance(params, GPUArray):
             params = torch.from_dlpack(params).to(self.device, self.dtype)
 

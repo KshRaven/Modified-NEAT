@@ -3,7 +3,7 @@ import warnings
 
 warnings.filterwarnings(action="ignore", category=UserWarning)
 
-from ModifiedNEAT.multiprocessing import ModelWrapper, Processor, verbose
+from ModifiedNEAT.multproc import ModelWrapper, Processor, verbose
 from ModifiedNEAT import nn as mn
 from ModifiedNEAT import Population, Config
 
@@ -17,7 +17,7 @@ from numba.core.errors import NumbaPerformanceWarning
 warnings.filterwarnings(action="ignore", category=NumbaPerformanceWarning)
 
 
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'gpu' if torch.cuda.is_available() else 'cpu'
 DTYPE = torch.float64
 
 

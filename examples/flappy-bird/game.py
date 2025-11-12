@@ -689,7 +689,7 @@ class Game(Env):
                 self.birds.score[self.birds.dead] -= 2000
                 self.generation += 1
 
-            reward = self.get_reward()
+            reward = self.get_reward().clone()
 
             return state, reward, self.terminated, self.terminated, {}
         else:
@@ -699,10 +699,10 @@ class Game(Env):
         if not self.window.initialized:
             self.window.initialize()
         if self.window.initialize:
-            if not testing and self.steps % 20 == 0: # and self.steps % 30 == 0:
-                pygame.display.quit()
-                self.window.initialize()
-                pass
+            # if not testing and self.steps % 20 == 0: # and self.steps % 30 == 0:
+            #     pygame.display.quit()
+            #     self.window.initialize()
+            #     pass
 
             if self.tick_value is not None:
                 self.tick(self.tick_value)
@@ -712,7 +712,7 @@ class Game(Env):
             # Draw pipes
             self.pipes.render()
 
-            # Draw cuda
+            # Draw gpu
             self.floor.render()
 
             # Draw birds or debug

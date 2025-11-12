@@ -7,8 +7,8 @@ from ModifiedNEAT.species import SpeciesSet, load_species, GENOME, SPECIES
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.reporter.reporters import StdOutReporter
 from ModifiedNEAT.reproduction import Reproduction
-from ModifiedNEAT.cuda.reproduction import reproduce
-from ModifiedNEAT.cuda.speciation import speciate
+from ModifiedNEAT.base import reproduce
+from ModifiedNEAT.base import speciate
 from ModifiedNEAT.util.qol import manage_params, Indexer
 from ModifiedNEAT.util.storage import save, load
 # from ModifiedNEAT.util.fancy_text import CM, Fore
@@ -18,7 +18,6 @@ from ModifiedNEAT.util.replay import ReplayBuffer
 from typing import Union, Iterable, Any
 from numba import njit
 from numba.typed import List, Dict
-from itertools import count
 
 import numpy as np
 import torch
@@ -101,7 +100,7 @@ class Population(object):
         self.best_genomes: dict[int, Union[Genome, None]] = {self.genus: None}
         self.rankings: dict[int, dict[int, Genome]] = {self.genus: {}}
         self.legends: dict[int, list[Genome]] = {self.genus: []} # List.empty_list(GENOME)
-        self.survival_rate: float = None
+        self.survival_rate: float | None = None
         self.loop_idx: int = 0
         self._skipped = False
 
@@ -165,6 +164,9 @@ class Population(object):
         return res
 
     def get_mapping(self, consolidated=False, grouped=False):
+        """
+        Mapping of keys / group of keys to an index, for each genus or entire population
+        """
         mapping = tuple([m.mapping for m in self.modules.values()])
         if len(mapping) == 1:
             mapping = mapping[0]

@@ -1,8 +1,8 @@
 
-from ModifiedNEAT.nn.modules.base import *
-from ModifiedNEAT.nn.modules.util import get_tensor_info
-from ModifiedNEAT.util.fancy_text import CM, Fore
-from ModifiedNEAT.util.qol import manage_params
+from .base import *
+from .util import get_tensor_info
+from ...util.fancy_text import CM, Fore
+from ...util.qol import manage_params
 
 from torch import Tensor, device as DEVICE, dtype as DTYPE
 from typing import Union, Iterable

@@ -3,11 +3,10 @@ from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.nn.genome import Genome, INT
 from ModifiedNEAT.species import Species, SpeciesSet, GenomeDistanceCache, get_ct
-from ModifiedNEAT.cuda.functional import get_value, calc_grid
+from .functional import calc_grid
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
-from numba import types, njit, prange, cuda
-from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
+from numba import types, njit, prange
 from numba.typed import List, Dict
 from numpy import ndarray as CPUArray
 from typing import Union
@@ -15,7 +14,6 @@ from torch import Tensor
 
 import torch
 import numpy as np
-import cupy as cp
 import time as clock
 import gc
 
@@ -27,34 +25,8 @@ _Index  = Union[int, tuple[int]]
 _Number = Union[float, int]
 
 
-# @jitclass([])
-# class atomic:
-#     def __init__(self):
-#         pass
-#
-#     @staticmethod
-#     def add(array: gpu_array, index: _Index, value: _Number) -> None:
-#         atomic_add(array, index, value)
-#
-#     @staticmethod
-#     def sub(array: gpu_array, index: _Index, value: _Number) -> None:
-#         atomic_sub(array, index, value)
-
-
-@cuda.jit(device=True) # , cache=True)
-def atomic_add(array: GPUArray, index: _Index, value: _Number) -> None:
-    # cuda.atomic.add(array, index, value)
-    array[index] += value
-
-
-@cuda.jit(device=True) # , cache=True)
-def atomic_sub(array: GPUArray, index: _Index, value: _Number) -> None:
-    # cuda.atomic.sub(array, index, value)
-    array[index] -= value
-
-
-@cuda.jit(device=True)
-def calc_distance(parameter: GPUArray, total_distance: GPUArray,
+@njit
+def calc_distance(parameter: CPUArray, total_distance: CPUArray,
                   genome0: int, genome1: int, x: int,
                   compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     """
@@ -81,20 +53,28 @@ def calc_distance(parameter: GPUArray, total_distance: GPUArray,
     # if size != 0:
     current_distance = current_distance / size
 
-    atomic_add(total_distance, (genome0, genome1), current_distance)
+    total_distance[genome0, genome1] += current_distance
 
 
-@cuda.jit
-def get_distance(parameter: GPUArray, total_distance: GPUArray,
+@njit(parallel=True)
+def get_distance(parameter: CPUArray, total_distance: CPUArray,
                  compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
-    # select one genome
-    x, genome0, genome1 = cuda.grid(3)
+    if parameter.ndim != 2:
+        raise ValueError(f"Expected a 2D array, got {parameter.ndim}")
+
     g_lim = total_distance.shape[0]
     x_lim = parameter.shape[1]
-    if genome0 < g_lim and genome1 < g_lim and x < x_lim:
-        calc_distance(parameter, total_distance, genome0, genome1, x,
-                      compatibility_weight_coefficient, compatibility_disjoint_coefficient)
-        # cuda.syncthreads()
+
+    for x in prange(x_lim):
+        for genome0 in range(g_lim):
+            for genome1 in range(g_lim):
+                if genome0 < g_lim and genome1 < g_lim and x < x_lim:
+                    calc_distance(
+                        parameter, total_distance, genome0, genome1, x,
+                        compatibility_weight_coefficient, compatibility_disjoint_coefficient
+                    )
+                else:
+                    raise ValueError("Out of bounds")
 
 
 @njit(nogil=True)
@@ -119,10 +99,10 @@ def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArra
 
 
 def update_distances_cache(config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,
-                           tpb=10, verbose: int = None) -> float:
-    total_distance = cp.zeros((module.genome_num, module.genome_num), genome_cache.total_distance.dtype)
+                           tpb=10, verbose: int = None):
+    total_distance = np.zeros((module.genome_num, module.genome_num), genome_cache.total_distance.dtype)
 
-    def reshape(tensor: Union[Tensor, cp.ndarray], required_ndim: int):
+    def reshape(tensor: Union[Tensor, CPUArray], required_ndim: int):
         original_shape: tuple[int, ...] = tensor.shape
         if tensor.ndim > required_ndim:
             tensor = tensor.reshape(*tensor.shape[:required_ndim-1], -1)
@@ -130,43 +110,39 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
             for _ in range(required_ndim-tensor.ndim):
                 if isinstance(tensor, Tensor):
                     tensor = tensor.unsqueeze(-1)
-                elif isinstance(tensor, cp.ndarray):
-                    tensor = cp.expand_dims(tensor, -1)
+                elif isinstance(tensor, CPUArray):
+                    tensor = np.expand_dims(tensor, -1)
                 else:
                     raise ValueError(f"Unsupported dtype = {type(tensor)}")
         return tensor, original_shape
 
     ts = clock.perf_counter()
     for param in module.neat_parameters():
-        # with cuda.defer_cleanup():
-        genome_num = len(module.mapping)
         dtype = param.data.dtype if param.data.dtype != torch.bfloat16 else torch.float32
-        array = cp.asarray(reshape(param.data.clone().to(dtype), 2)[0])
-        axes = array.shape[1:]
-        kernel_shape = calc_grid(*axes, genome_num, genome_num, tpb=tpb)
-        # if verbose:
-        #     print(param.dtype, param.device, kernel_shape, array.shape, param.data.shape)
+        array = np.asarray(reshape(param.data.clone().to(dtype), 2)[0])
 
-        get_distance[*kernel_shape](
-            array, total_distance,
-            config.genome.compatibility_weight_coefficient,
-            config.genome.compatibility_disjoint_coefficient
-        )
+        try:
+            get_distance(
+                array, total_distance,
+                config.genome.compatibility_weight_coefficient,
+                config.genome.compatibility_disjoint_coefficient
+            )
+        except Exception as e:
+            print(param.dtype, param.device, array.shape, param.data.shape)
+            raise e
 
-        # # Remove data from GPU
-        # del array
+        # Release memory
+        del array
 
     if verbose and verbose >= 2:
         print(f"{CM('Ran distance kernel', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
 
-    total_distance = total_distance.get()
     h, m = update_dict(genome_cache.distances, total_distance, Dict(module.mapping.items()))
     genome_cache.total_distance = total_distance
     genome_cache.hits += h
     genome_cache.misses += m
 
     # Remove GPU data
-    cp.get_default_memory_pool().free_all_blocks()
     gc.collect()
 
 
@@ -174,7 +150,7 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
 def _get_representatives(species_dict: dict[int, Species], population: dict[int, Genome], unspeciated: list[int],
                          representatives: dict[int, int], members: dict[int, list[int]],
                          distance_cache: GenomeDistanceCache):
-    def gamma(candidates_: list[tuple[int, Genome]]):
+    def gamma(candidates_: list[tuple[float, Genome]]):
         if len(candidates_) > 0:
             candidate = candidates_[0] # (distance, genome)
             for x in range(1, len(candidates_)):
@@ -183,7 +159,7 @@ def _get_representatives(species_dict: dict[int, Species], population: dict[int,
                     candidate = comp
             return candidate
         else:
-            raise ValueError(f"empty list")
+            raise ValueError(f"Empty list")
 
     # Loop through each existing species
     mapping = List(species_dict.keys())
@@ -362,8 +338,8 @@ def speciate(config: Config, genera: list[int], modules: dict[int, NeatModule],
         distances.extend(distances_cache.list())
 
     distances = [x for x in distances if not any([np.isnan(x), np.isinf(x), x is None])]
-    gd_mean = np.mean(distances)
-    gd_std = np.std(distances)
+    gd_mean = np.mean(distances).item()
+    gd_std = np.std(distances).item()
     species_set.last_ct = (gd_mean, gd_std)
     if verbose:
         species_set.reporters.info(

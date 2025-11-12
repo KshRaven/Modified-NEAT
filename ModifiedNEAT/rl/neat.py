@@ -94,6 +94,8 @@ class NEAT(Algorithm):
             else:
                 return tensor
 
+        observations, actions, rewards = observations.clone(), actions.clone(), rewards.clone()
+
         filled = False
         if self.steps_done < self.steps_limit:
             # Loop through all environments

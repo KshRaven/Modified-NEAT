@@ -1,0 +1,43 @@
+<<NEAT CONFIGURATION>>
+
+[GENERAL CONFIG]
+fitness_criterion                        = max ~ str
+fitness_threshold                        = inf ~ float
+pop_size                                 = 100 ~ int
+reset_on_extinction                      = True ~ bool
+seed                                     = 768908 ~ int
+
+[GENOME CONFIG]
+weight_init_mean                         = 0.0 ~ float
+weight_init_std                          = 2.0 ~ float
+weight_max_value                         = inf ~ float
+weight_min_value                         = -inf ~ float
+weight_mutate_power                      = 1.0 ~ float
+weight_mutate_rate                       = 0.5 ~ float
+weight_replace_rate                      = 0.0 ~ float
+weight_add_prob                          = 0.01 ~ float
+weight_del_prob                          = 0.01 ~ float
+param_epsilon                            = 1e-09 ~ float
+compatibility_disjoint_coefficient       = 1.0 ~ float
+compatibility_weight_coefficient         = 0.1 ~ float
+init_type                                = normal ~ str
+single_structural_mutation               = False ~ bool
+
+[SPECIES CONFIG]
+compatibility_threshold                  = inf ~ float
+
+[STAGNATION CONFIG]
+species_fitness_func                     = max ~ str
+max_stagnation                           = 1 ~ int
+species_elitism                          = 2 ~ int
+
+[REPRODUCTION CONFIG]
+elitism                                  = 30 ~ int
+clone_threshold                          = 0.05 ~ float
+survival_threshold                       = 0.2 ~ float
+cross_threshold                          = 0.0 ~ float
+cross_multiplier                         = 0.5 ~ float
+darwin_multiplier                        = 0.5 ~ float
+min_species_size                         = 100 ~ int
+purge                                    = 1 ~ int
+preserve_elite                           = False ~ bool

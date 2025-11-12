@@ -3,7 +3,7 @@
 # from torch import Tensor
 import torch
 import torch.multiprocessing as mp
-# from multiprocessing import Manager
+# from multproc import Manager
 from torch.nn import Module
 from typing import Union
 import warnings

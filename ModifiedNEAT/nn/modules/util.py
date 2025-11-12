@@ -1,5 +1,5 @@
 
-from ModifiedNEAT.util.fancy_text import CM, Fore
+from ...util.fancy_text import CM, Fore
 
 import torch
 import torch.nn as nn

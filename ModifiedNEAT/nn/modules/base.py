@@ -1,6 +1,6 @@
 
-from ModifiedNEAT.nn.base import NeatModule, NeatParameter, _addindent
-from ModifiedNEAT.util.fancy_text import CM, Fore
+from ..base import NeatModule, NeatParameter, _addindent
+from ...util.fancy_text import CM, Fore
 
 from torch import Tensor
 from typing import Union, Iterable, Any
@@ -46,7 +46,7 @@ def has_parameter(method, param_name: str):
 # ---------- Base ----------
 
 class Sequential(NeatModule):
-    def __init__(self, *modules: NeatModule):
+    def __init__(self, *modules: NeatModule | nn.Module):
         super(Sequential, self).__init__()
         self.modules_list = nn.ModuleList(modules)
 

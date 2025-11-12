@@ -30,7 +30,7 @@ for trial_idx in range(TRIES):
         print(CM(e, Fore.LIGHTRED_EX))
         errored = True
     if trial_idx == TRIES-1 or errored:
-        # Define possible cuda directories
+        # Define possible gpu directories
         directories = ["./home", "C:/Users/Default/AppData/Local"]
         # Check which directory exists
         PROJECT_DIR = "./root"

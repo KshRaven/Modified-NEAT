@@ -5,24 +5,21 @@ from ModifiedNEAT.config import Config
 from ModifiedNEAT.species import Species, SpeciesSet, FLOAT, INT, SPECIES
 from ModifiedNEAT.stagnation import Stagnation
 from ModifiedNEAT.reporter.base import ReporterSet
-from ModifiedNEAT.cuda.functional import calc_grid, prob, get_rng_states, get_value, set_value
-from ModifiedNEAT.cuda.mutation import mutate
+from .functional import calc_grid, prob, get_rng_states
+from .mutation import mutate
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
-from numba import njit, types, prange, cuda
+from numba import njit, types, prange
 from numba.typed import List, Dict
-from numba.cuda.cudadrv.devicearray import DeviceNDArray
 from torch import Tensor
 from typing import Union
+from numpy import ndarray as CPUArray
 
 import torch
 import numpy as np
-import cupy as cp
 import time as clock
 import gc
 import math
-
-GPUArray = Union[DeviceNDArray, cp.ndarray]
 
 NP_FLOAT = types.float64
 GENOME   = Genome.class_type.instance_type
@@ -43,7 +40,7 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
         af = adjusted_fitness[idx]
         ps = previous_sizes[idx]
         if af_sum > 0:
-            s = max(min_species_size, af / af_sum * pop_size)
+            s = max(float(min_species_size), af / af_sum * pop_size)
         else:
             s = min_species_size
 
@@ -262,69 +259,76 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
     return available_gid
 
 
-@cuda.jit(device=True)
-def _crossover(value1: float, value2: float, states: GPUArray, index: int):
+@njit
+def _crossover(value1: float, value2: float, states: CPUArray, index: int):
     if prob(states, index) >= 0.5:
         return value1
     else:
         return value2
 
 
-@cuda.jit() # debug=True, opt=False)
-def crossover(genus: int, source: GPUArray, updates: GPUArray, parents: GPUArray, genera: GPUArray, filled: GPUArray,
-              probabilities: GPUArray, equal_sources: bool):
-    genome_idx, x, y = cuda.grid(3)
+@njit(parallel=True)
+def crossover(genus: int, source: CPUArray, updates: CPUArray, parents: CPUArray, genera: CPUArray, filled: CPUArray,
+              probabilities: CPUArray, equal_sources: bool):
+    if updates.ndim != 3:
+        raise ValueError(f"Expected a 3D array, got {updates.ndim}")
+
+    s_g, s_x, s_y = updates.shape # cuda.gridsize(3)
     # Parameter shape (genomes, *spatial_dims)
     g_lim = updates.shape[0]
     x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
     y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
-    s_g, s_x, s_y = updates.shape # cuda.gridsize(3)
 
-    # Linearized thread index
-    rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+    for genome_idx in prange(s_g):
+        for x in prange(s_x):
+            for y in prange(s_y):
+                # Linearized thread index
+                rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
-    if genome_idx < g_lim and x < x_lim and y < y_lim:
-        parent0, parent1, parent_   = parents[genome_idx]
-        genus0, genus1, genus_      = genera[genome_idx]
-        filled0, filled1, filled_   = filled[genome_idx, x, y]
-        if equal_sources or (genus0 == genus1 == genus):
-            # For elite genomes or clones
-            if (parent0 == parent1) and (genus == genus0 == genus1):
-                value = get_value(source, parent0, x, y)
-                filled[genome_idx, x, y, :2] = True
-            # For child crossover
-            else:
-                already_filled = filled0 or filled1
+                if genome_idx < g_lim and x < x_lim and y < y_lim:
+                    parent0, parent1, parent_   = parents[genome_idx]
+                    genus0, genus1, genus_      = genera[genome_idx]
+                    filled0, filled1, filled_   = filled[genome_idx, x, y]
+                    if equal_sources or (genus0 == genus1 == genus):
+                        # For elite genomes or clones
+                        if (parent0 == parent1) and (genus == genus0 == genus1):
+                            value = source[parent0, x, y]
+                            filled[genome_idx, x, y, :2] = True
+                        # For child crossover
+                        else:
+                            already_filled = filled0 or filled1
 
-                # If not filled, fill from current available source
-                value = get_value(updates, genome_idx, x, y) # Get value in case param has been filled from another source
-                if not already_filled:
-                    if genus == genus0:
-                        value = get_value(source, parent0, x, y)
-                        filled[genome_idx, x, y, 0] = filled0 = True
-                    elif genus == genus1:
-                        value = get_value(source, parent1, x, y)
-                        filled[genome_idx, x, y, 1] = filled1 = True
+                            # If not filled, fill from current available source
+                            value = updates[genome_idx, x, y].item() # Get value in case param has been filled from another source
+                            if not already_filled:
+                                if genus == genus0:
+                                    value = source[parent0, x, y]
+                                    filled[genome_idx, x, y, 0] = filled0 = True
+                                elif genus == genus1:
+                                    value = source[parent1, x, y]
+                                    filled[genome_idx, x, y, 1] = filled1 = True
 
-                # Crossover when both parents' values are available
-                if genus == genus0 and not filled0 and filled1:
-                    value_c = get_value(source, parent0, x, y)
-                    value = _crossover(value, value_c, probabilities, rng_index)
-                    filled[genome_idx, x, y, 0] = True
-                if genus == genus1 and not filled1 and filled0:
-                    value_c = get_value(source, parent1, x, y)
-                    value = _crossover(value, value_c, probabilities, rng_index)
-                    filled[genome_idx, x, y, 1] = True
-        else:
-            # Emergency fill on unmatched param groups
-            if not filled_ and genus == genus_:
-                # TODO: Should random emergency parents be used instead of random cloning?
-                value = get_value(source, parent_, x, y)
-                filled[genome_idx, x, y, 2] = True
-            else:
-                value = get_value(updates, genome_idx, x, y)
+                            # Crossover when both parents' values are available
+                            if genus == genus0 and not filled0 and filled1:
+                                value_c = source[parent0, x, y].item()
+                                value = _crossover(value, value_c, probabilities, rng_index)
+                                filled[genome_idx, x, y, 0] = True
+                            if genus == genus1 and not filled1 and filled0:
+                                value_c = source[parent1, x, y].item()
+                                value = _crossover(value, value_c, probabilities, rng_index)
+                                filled[genome_idx, x, y, 1] = True
+                    else:
+                        # Emergency fill on unmatched param groups
+                        if not filled_ and genus == genus_:
+                            # TODO: Should random emergency parents be used instead of random cloning?
+                            value = source[parent_, x, y]
+                            filled[genome_idx, x, y, 2] = True
+                        else:
+                            value = updates[genome_idx, x, y]
 
-        set_value(updates, genome_idx, x, y, value)
+                    updates[genome_idx, x, y] = value
+                else:
+                    raise ValueError("Out of bounds")
 
 
 def update_children(
@@ -370,9 +374,9 @@ def update_children(
         print(genus_mapping)
         print(f"Current genus = {genus}")
         raise e
-    sources = cp.array([list(g) for g in sources.values()])
-    genera  = cp.array([list(m) for m in genera.values()])
-    child_filter = cp.array([
+    sources = np.array([list(g) for g in sources.values()])
+    genera  = np.array([list(m) for m in genera.values()])
+    child_filter = np.array([
         True if gid not in old_population else False for gid in new_population.keys()
     ])
     max_pop_size = max(len(old_population), len(new_population))
@@ -394,7 +398,7 @@ def update_children(
 
         return True
 
-    def reshape(tensor: Union[Tensor, cp.ndarray]):
+    def reshape(tensor: Union[Tensor, CPUArray]):
         original_shape: tuple[int, ...] = tensor.shape
         if tensor.ndim > 3:
             tensor = tensor.reshape(*tensor.shape[:2], -1)
@@ -402,8 +406,8 @@ def update_children(
             for _ in range(3-tensor.ndim):
                 if isinstance(tensor, Tensor):
                     tensor = tensor.unsqueeze(-1)
-                elif isinstance(tensor, cp.ndarray):
-                    tensor = cp.expand_dims(tensor, -1)
+                elif isinstance(tensor, CPUArray):
+                    tensor = np.expand_dims(tensor, -1)
                 else:
                     raise ValueError(f"Unsupported dtype = {type(tensor)}")
         return tensor, original_shape
@@ -424,27 +428,27 @@ def update_children(
             # ------------------------------ Sending data to GPU ------------------------------ #
             # TODO: Re-enable this if necessary after testing if it raises error in crossover
             # ctype = cp.float32 if genus_param.dtype == torch.float32 else cp.float64
-            array_update, original_shape = reshape(cp.zeros((len(new_population), *genus_param.original_shape),)) # ctype))
-            array_sources = tuple([cp.asarray(reshape(p.data.clone().to(dtype))[0]) for p in param_group])
+            array_update, original_shape = reshape(np.zeros((len(new_population), *genus_param.original_shape),)) # ctype))
+            array_sources = tuple([np.asarray(reshape(p.data.clone().to(dtype))[0]) for p in param_group])
             # ------------------------------ Define crossover kernel and randomizer values ------------------------------ #
             genome_num = len(new_population)
             kernel_shape = calc_grid(genome_num, *array_update.shape[1:3], tpb=tpb)
             # if verbose and verbose >= 3:
             #     print(param.dtype, param.device, kernel_shape, as_shape, au_shape, array_source.shape, array_update.shape)
-            probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)
+            probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False)
             # ------------------------------ Run crossover using sources ------------------------------ #
             equal_params = check_param_compatibility(param_group)
 
             attempts = 3
             while attempts > 0:
                 attempts -= 1
-                filled = cp.zeros(array_update.shape + (sources.shape[-1],), bool)
+                filled = np.zeros(array_update.shape + (sources.shape[-1],), bool)
                 updates_total = 0
                 for genus_, source_ in zip(genus_mapping.keys(), array_sources):
                     if config.reproduction.cross_threshold == 0.0 and genus_ != genus:
                         continue
                     updates_total += 1
-                    crossover[*kernel_shape](
+                    crossover(
                         genus_, source_, array_update, sources, genera, filled, probabilities, equal_params
                     )
 
@@ -455,8 +459,8 @@ def update_children(
                     if attempts > 0:
                         continue
                     print(f"updates total = {updates_total} for param_index = {genus_param.param_index}")
-                    print(f"indices = {cp.where(cp.any(array_update == 0, axis=(1, 2)))[0].get().tolist()[:20]}")
-                    print(f"zeros total = {cp.sum(cp.abs(array_update) == 0).get().item()}")
+                    print(f"indices = {np.where(np.any(array_update == 0, axis=(1, 2)))[0].tolist()[:20]}")
+                    print(f"zeros total = {np.sum(np.abs(array_update) == 0).item()}")
                     print(f"sources = {[s.shape for s in array_sources]}")
                     print(f"update = {array_update.shape}, probabilities = {probabilities.shape}")
                     print(f"genus = {genus}, kernel shape = {kernel_shape}")
@@ -465,17 +469,17 @@ def update_children(
                 break
 
             if verbose and verbose >= 4:
-                genus_param.cd = array_update.copy().get()
+                genus_param.cd = array_update.copy()
             # ------------------------------ Remove data from GPU ------------------------------ #
             del array_sources
             # ------------------------------ Define mutation kernel and randomizer values ------------------------------ #
-            probabilities = cp.stack([
-                get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)[0]
+            probabilities = np.stack([
+                get_rng_states(kernel_shape, seed, get_normal=False)[0]
                 for _ in range(2 if config.genome.single_structural_mutation else 3)
             ], axis=0)
-            normals = get_rng_states(kernel_shape, seed, get_normal=True, use_cuda=True)[0]
+            normals = get_rng_states(kernel_shape, seed, get_normal=True)[0]
             # ------------------------------ Run mutation using configuration ------------------------------ #
-            mutate[*kernel_shape](
+            mutate(
                 array_update, child_filter, config.genome.weight_mutate_rate, config.genome.weight_mutate_power,
                 config.genome.weight_replace_rate, init_type,
                 config.genome.weight_init_mean, config.genome.weight_init_std,
@@ -485,20 +489,19 @@ def update_children(
                 probabilities, normals,
             )
             epsilon = config.genome.param_epsilon
-            zero_values = cp.abs(array_update) < epsilon
+            zero_values = np.abs(array_update) < epsilon
             array_update[zero_values & (array_update >= 0)] = epsilon
             array_update[zero_values & (array_update < 0)] = -epsilon
             if verbose and verbose >= 4:
-                genus_param.md = array_update.copy().get() - genus_param.cd
+                genus_param.md = array_update.copy() - genus_param.cd
             # ------------------------------ Update parameters ------------------------------ #
             update = array_update.reshape(*original_shape)
             genus_param.update(new_population, update, True)
             # ------------------------------ Remove data from GPU ------------------------------ #
             del probabilities, normals, array_update, update, filled, zero_values
 
-        # Remove GPU data
+        # Free memory
         del sources, child_filter
-        cp.get_default_memory_pool().free_all_blocks()
         gc.collect()
     else:
         # TODO: Work on this section
@@ -547,7 +550,7 @@ def reproduce(
         fitness_range = max(1.0, max_fitness - min_fitness)
         for specie in remaining_species:
             # Compute adjusted fitness.
-            mean_fitness = np.mean([m.fitness for m in specie.members.values()])
+            mean_fitness = np.mean([m.fitness for m in specie.members.values()]).item()
             adj_fitness = (mean_fitness - min_fitness) / fitness_range
             specie.adjusted_fitness = adj_fitness
 

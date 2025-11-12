@@ -1,167 +1,410 @@
 # https://neat-python.readthedocs.io/en/latest/xor_example.html
+
 from PongGame import Game
-import pygame
-import neat
+
+import ModifiedNEAT as neat
+import ModifiedNEAT.nn as mn
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import os
-import time
-import pickle
+import warnings
+import random
+import math
+import numpy as np
+
+from torch import Tensor
+from typing import Union
+from numba.core.errors import NumbaPerformanceWarning
+
+warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
+
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DTYPE  = torch.float32
+neat.util.storage.set_storage_location("../../storage/")
 
 
-class PongGame:
-    def __init__(self, window, width, height):
-        self.game = Game(window, width, height)
-        self.ball = self.game.ball
-        self.left_paddle = self.game.left_paddle
-        self.right_paddle = self.game.right_paddle
+# class PongGame:
+#     def __init__(self, window, width, height):
+#         self.game = Game(window, width, height)
+#         self.ball = self.game.ball
+#         self.left_paddle = self.game.left_paddle
+#         self.right_paddle = self.game.right_paddle
+#
+#     def test_ai(self, net):
+#         """
+#         Test the AI against a human player by passing a NEAT neural network
+#         """
+#         clock = pygame.time.Clock()
+#         run = True
+#         while run:
+#             clock.tick(60)
+#             game_info = self.game.loop()
+#
+#             for event in pygame.event.get():
+#                 if event.type == pygame.QUIT:
+#                     run = False
+#                     break
+#
+#             output = net.activate((self.right_paddle.y, abs(
+#                 self.right_paddle.x - self.ball.x), self.ball.y))
+#             decision = output.index(max(output))
+#
+#             if decision == 1:  # AI moves up
+#                 self.game.move_paddle(left=False, up=True)
+#             elif decision == 2:  # AI moves down
+#                 self.game.move_paddle(left=False, up=False)
+#
+#             keys = pygame.key.get_pressed()
+#             if keys[pygame.K_w]:
+#                 self.game.move_paddle(left=True, up=True)
+#             elif keys[pygame.K_s]:
+#                 self.game.move_paddle(left=True, up=False)
+#
+#             self.game.draw(draw_score=True)
+#             pygame.display.update()
+#
+#     def train_ai(self, model: mn.Model, genome1, genome2, draw=False):
+#         """
+#         Train the AI by passing two NEAT neural networks and the NEAt config object.
+#         These AI's will play against eachother to determine their fitness.
+#         """
+#         run = True
+#         start_time = time.time()
+#
+#         self.genome1 = genome1
+#         self.genome2 = genome2
+#
+#         max_hits = 50
+#
+#         while run:
+#             for event in pygame.event.get():
+#                 if event.type == pygame.QUIT:
+#                     return True
+#
+#             game_info = self.game.loop()
+#
+#             self.move_ai_paddles(model)
+#
+#             if draw:
+#                 self.game.draw(draw_score=False, draw_hits=True)
+#
+#             pygame.display.update()
+#
+#             duration = time.time() - start_time
+#             if game_info.left_score == 1 or game_info.right_score == 1 or game_info.left_hits >= max_hits:
+#                 self.calculate_fitness(game_info, duration)
+#                 break
+#
+#         return False
+#
+#     def move_ai_paddles(self, model: mn.Model):
+#         """
+#         Determine where to move the left and the right paddle based on the two
+#         neural networks that control them.
+#         """
+#         players = [(self.genome1, self.left_paddle, True), (self.genome2, self.right_paddle, False)]
+#         for (genome, paddle, left) in players:
+#             inputs = torch.tensor(
+#                 [paddle.y, abs(paddle.x - self.ball.x), self.ball.y],
+#                 device=DEVICE, dtype=DTYPE
+#             ).unsqueeze(0).unsqueeze(1)
+#             # inputs: shape(genomes, batch_size, features)
+#             outputs = model.get_policy(inputs, keys=genome.key)
+#             outputs = outputs.squeeze(0).squeeze(1)
+#             # outputs: shape(logits)
+#             decision = outputs.argmax(-1).item()
+#
+#             valid = True
+#             if decision == 0:  # Don't move
+#                 genome.fitness -= 0.01  # we want to discourage this
+#             elif decision == 1:  # Move up
+#                 valid = self.game.move_paddle(left=left, up=True)
+#             else:  # Move down
+#                 valid = self.game.move_paddle(left=left, up=False)
+#
+#             if not valid:  # If the movement makes the paddle go off the screen punish the AI
+#                 genome.fitness -= 1
+#
+#     def calculate_fitness(self, game_info, duration):
+#         self.genome1.fitness += game_info.left_hits + duration
+#         self.genome2.fitness += game_info.right_hits + duration
 
-    def test_ai(self, net):
-        """
-        Test the AI against a human player by passing a NEAT neural network
-        """
-        clock = pygame.time.Clock()
-        run = True
-        while run:
-            clock.tick(60)
-            game_info = self.game.loop()
 
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    run = False
-                    break
+class BaseModel(mn.Model):
+    def __init__(self, inputs: int, outputs: int, dim_size: int, layers: int, coefficients=1, activation: nn.Module = nn.SiLU(),
+                 probabilistic=False, bias=True, device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options):
+        super().__init__()
+        # Attributes
+        self.inputs         = inputs
+        self.outputs        = outputs
+        self.dim_size       = dim_size
+        self.layers         = layers
+        self.distribution   = options.get('distribution', 'normal')
+        self.stride         = 1
+        self.coefficients   = coefficients
+        self.probabilistic  = probabilistic
+        self.clip_min       = options.get('clip_min', -2)
+        self.clip_max       = options.get('clip_max', -0)
+        self.clip_range     = self.clip_max - self.clip_min
 
-            output = net.activate((self.right_paddle.y, abs(
-                self.right_paddle.x - self.ball.x), self.ball.y))
-            decision = output.index(max(output))
+        # Build
+        self.projection = mn.Sequential(*[
+            # mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
+            mn.Linear(inputs, dim_size, True, device, dtype),
+            *sum([
+                [
+                    # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+                    activation,
+                    # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
+                    mn.Linear(dim_size, dim_size, bias, device, dtype),
+                ]
+                for _ in range(layers)
+            ], []),
+        ])
+        self.pol_proj = mn.Sequential(*[
+            # mn.Linear(dim_size, dim_size, bias, device, dtype),
+            # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+            activation,
+            # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
+            mn.Linear(dim_size, 2*outputs, True, device, dtype),
+        ])
 
-            if decision == 1:  # AI moves up
-                self.game.move_paddle(left=False, up=True)
-            elif decision == 2:  # AI moves down
-                self.game.move_paddle(left=False, up=False)
+    def extra_repr(self) -> str:
+        return f"probabilistic={self.probabilistic}, distro='{self.distribution}'"
 
-            keys = pygame.key.get_pressed()
-            if keys[pygame.K_w]:
-                self.game.move_paddle(left=True, up=True)
-            elif keys[pygame.K_s]:
-                self.game.move_paddle(left=True, up=False)
+    def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
+        return self.get_policy(state, keys=keys, **kwargs)
 
-            self.game.draw(draw_score=True)
-            pygame.display.update()
+    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
+        mean_std        = self.pol_proj(latent, keys=keys)
+        mean, log_std   = torch.chunk(mean_std, 2, -1)
+        mean            = F.sigmoid(mean) * 6 + -3
+        std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
+        return mean, std
 
-    def train_ai(self, genome1, genome2, config, draw=False):
-        """
-        Train the AI by passing two NEAT neural networks and the NEAt config object.
-        These AI's will play against eachother to determine their fitness.
-        """
-        run = True
-        start_time = time.time()
+    def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
+        latent      = self.projection(state, keys=keys)
+        mean, std   = self.get_mean_std(latent, keys=keys)
+        dist        = torch.distributions.Normal(mean, std)
+        action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)
+        log_prob    = dist.log_prob(action)
+        return action, log_prob
 
-        net1 = neat.nn.FeedForwardNetwork.create(genome1, config)
-        net2 = neat.nn.FeedForwardNetwork.create(genome2, config)
-        self.genome1 = genome1
-        self.genome2 = genome2
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None):
+        latent      = self.projection(state, keys=keys)
+        mean, std   = self.get_mean_std(latent, keys=keys)
+        dist        = torch.distributions.Normal(mean, std)
+        log_prob    = dist.log_prob(action)
+        entropy     = dist.entropy()
+        return log_prob, entropy
 
-        max_hits = 50
+    def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
+        latent      = self.projection(state, keys=keys)
+        mean, std   = self.get_mean_std(latent, keys=keys)
+        dist        = torch.distributions.Normal(mean, std)
+        action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)
+        return action
 
-        while run:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    return True
-
-            game_info = self.game.loop()
-
-            self.move_ai_paddles(net1, net2)
-
-            if draw:
-                self.game.draw(draw_score=False, draw_hits=True)
-
-            pygame.display.update()
-
-            duration = time.time() - start_time
-            if game_info.left_score == 1 or game_info.right_score == 1 or game_info.left_hits >= max_hits:
-                self.calculate_fitness(game_info, duration)
-                break
-
-        return False
-
-    def move_ai_paddles(self, net1, net2):
-        """
-        Determine where to move the left and the right paddle based on the two 
-        neural networks that control them. 
-        """
-        players = [(self.genome1, net1, self.left_paddle, True), (self.genome2, net2, self.right_paddle, False)]
-        for (genome, net, paddle, left) in players:
-            output = net.activate(
-                (paddle.y, abs(paddle.x - self.ball.x), self.ball.y))
-            decision = output.index(max(output))
-
-            valid = True
-            if decision == 0:  # Don't move
-                genome.fitness -= 0.01  # we want to discourage this
-            elif decision == 1:  # Move up
-                valid = self.game.move_paddle(left=left, up=True)
-            else:  # Move down
-                valid = self.game.move_paddle(left=left, up=False)
-
-            if not valid:  # If the movement makes the paddle go off the screen punish the AI
-                genome.fitness -= 1
-
-    def calculate_fitness(self, game_info, duration):
-        self.genome1.fitness += game_info.left_hits + duration
-        self.genome2.fitness += game_info.right_hits + duration
+    # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
+    #     latent      = self.projection(state, keys=keys)
+    #     value       = self.val_proj(latent, keys=keys)
+    #     return value
 
 
-def eval_genomes(genomes, config):
+ENV: Game | None = None
+MODEL: BaseModel | None = None
+FILE_NO: int | None = None
+INIT_GEN: int = 0
+
+
+def eval_genomes(population: neat.Population):
     """
-    Run each genome against eachother one time to determine the fitness.
+    Run each genome against each other one time to determine the fitness.
     """
-    width, height = 700, 500
-    win = pygame.display.set_mode((width, height))
-    pygame.display.set_caption("Pong")
+    global ENV, MODEL, FILE_NO
+    mapping: dict[int, int] = population.get_mapping(consolidated=True)
+    _mapping = list(mapping.items())
+    # random.shuffle(_mapping)
+    mapping = dict(_mapping)
+    keys = list(mapping.keys())
+    # genomes = list(population.genomes.items())
+    # global MODEL
+    # width, height = 700, 500
+    # win = pygame.display.set_mode((width, height))
+    # pygame.display.set_caption("Pong")
 
-    for i, (genome_id1, genome1) in enumerate(genomes):
-        print(round(i/len(genomes) * 100), end=" ")
-        genome1.fitness = 0
-        for genome_id2, genome2 in genomes[min(i+1, len(genomes) - 1):]:
-            genome2.fitness = 0 if genome2.fitness == None else genome2.fitness
-            pong = PongGame(win, width, height)
+    print(f"started generation {population.generation}")
+    stack = []
+    with torch.no_grad():
+        states = ENV.reset(keys=keys)[0]
+        done = False
+        step = 0
+        DEBUG_STEP = 10
+        ENV.render()
+        while not done:
+            DEBUG = step == DEBUG_STEP and population.generation == INIT_GEN
+            states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+            if DEBUG:
+                print(f"states => \n{states} \n\tshape = {states.shape}")
+            actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
+            if DEBUG:
+                print(f"actions => \n{actions} \n\tshape = {actions.shape}")
+            next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
+            rewards = torch.tensor(rewards, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+            if DEBUG:
+                print(f"rewards => \n{rewards} \n\tshape = {rewards.shape}")
+            stack.append(rewards[..., 0])
+            states = next_states
+            if step % 10 == 0:
+                pass
+            ENV.render()
+            if population.generation % 20 == 0:
+                ENV.clock.tick(40)
+            print(f"\rLives = {ENV.players.lives.mean().item()}, "
+                  f"Hits={(ENV.players.hits + ENV.players.scores).max().item()}, "
+                  f"Alive={ENV.players.active_total}, "
+                  f"Fitness={ENV.players.fitness.mean().item():.4f}"
+                  , end='')
+            step += 1
+    print("\ndone with env")
 
-            force_quit = pong.train_ai(genome1, genome2, config, draw=True)
-            if force_quit:
-                quit()
+    scores = torch.mean(torch.stack(stack, dim=0), dim=0)
+    for key, index in mapping.items():
+        genome = population.genomes[key]
+        genome.fitness = scores[index].item()
+
+    _, FILE_NO = population.save_dict(
+        name='original', directory='pong', file_no=FILE_NO, replace=population.generation != INIT_GEN
+    )
 
 
-def run_neat(config):
-    #p = neat.Checkpointer.restore_checkpoint('neat-checkpoint-85')
-    p = neat.Population(config)
-    p.add_reporter(neat.StdOutReporter(True))
-    stats = neat.StatisticsReporter()
-    p.add_reporter(stats)
-    p.add_reporter(neat.Checkpointer(1))
-
-    winner = p.run(eval_genomes, 50)
-    with open("best.pickle", "wb") as f:
-        pickle.dump(winner, f)
+def run_neat(population: neat.Population, epochs: int):
+    population.run(eval_genomes, epochs, verbose=None)
 
 
-def test_best_network(config):
-    with open("best.pickle", "rb") as f:
-        winner = pickle.load(f)
-    winner_net = neat.nn.FeedForwardNetwork.create(winner, config)
+def test_best_network(set_keys: tuple[int, int] = None):
+    print("\n\n---------- RUNNING TEST ON PONG ----------")
+    ENV.goal = 150
+    ENV.players.lives_total = 9
 
-    width, height = 700, 500
-    win = pygame.display.set_mode((width, height))
-    pygame.display.set_caption("Pong")
-    pong = PongGame(win, width, height)
-    pong.test_ai(winner_net)
+    for i in range(20):
+        if set_keys is None:
+            genomes = list(POPULATION.genomes.values())
+            def sort_key(genome: neat.Genome):
+                fitness = genome.fitness
+                return fitness if fitness is not None else -math.inf, genome.key
+            ranking = sorted(genomes, key=sort_key, reverse=True)[:10]
+            probs = [g.fitness for g in ranking if g.fitness is not None]
+            if len(probs) >= 2:
+                probs = np.array(probs)
+                try:
+                    probs = (probs - probs.min()) / (probs.max() - probs.min())
+                    probs = probs / probs.sum()
+                except Exception:
+                    probs = None
+            else:
+                probs = None
+            key0, key1 = [g.key for g in np.random.choice(ranking, size=2, replace=False, p=probs)]
+        else:
+            probs = None
+            key0, key1 = set_keys
+
+        print(f"Running on Genomes '{key0}' and Genomes '{key1}'")
+        keys = [key0, key1]
+        if probs is None:
+            random.shuffle(keys)
+        print(f"Starting test no {i}")
+        with torch.no_grad():
+
+            states = ENV.reset(keys=keys)[0]
+            done = False
+            ENV.render()
+            while not done:
+                states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
+                next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
+                states = next_states
+                ENV.render()
+                ENV.clock.tick(160)
+                print(f"\rLives = {ENV.players.lives.mean().item()}, "
+                      f"Hits={(ENV.players.hits + ENV.players.scores).max().item()}, "
+                      f"Alive={ENV.players.active_total}, "
+                      f"Fitness={ENV.players.fitness.mean().item():.4f}"
+                      , end='')
+            scores = {key: ENV.players.scores[index].item() for index, key in enumerate(keys)}
+            hits = {key: ENV.players.hits[index].item() for index, key in enumerate(keys)}
+            print(
+                f"\nDone with test:"
+                f"\n\tScore -> {scores}"
+                f"\n\tHits -> {hits}"
+            )
 
 
 if __name__ == '__main__':
     local_dir = os.path.dirname(__file__)
     config_path = os.path.join(local_dir, 'config.txt')
 
-    config = neat.Config(neat.DefaultGenome, neat.DefaultReproduction,
-                         neat.DefaultSpeciesSet, neat.DefaultStagnation,
-                         config_path)
+    GENOMES = 100
+    WINDOW = (800, 600)
+    PADDLE = (10, 40)
+    GOAL = 100
+    LIVES = 10
+    ENV = Game(WINDOW, GOAL, 3, LIVES, paddle_shape=PADDLE)
 
-    run_neat(config)
-    test_best_network(config)
+    CONFIG = neat.Config('original', 'pong')
+    CONFIG.genome.init_type                 = 'normal'
+    CONFIG.genome.weight_init_mean          = 0.0
+    CONFIG.genome.weight_init_std           = 2.0
+    CONFIG.genome.weight_min_value          = -math.inf
+    CONFIG.genome.weight_max_value          = +math.inf
+    CONFIG.genome.weight_mutate_power       = 2e-1
+    CONFIG.genome.weight_mutate_rate        = 0.50
+    CONFIG.genome.weight_replace_rate       = 0.00
+    CONFIG.genome.weight_add_prob           = 0.00
+    CONFIG.genome.weight_del_prob           = 0.00
+    CONFIG.genome.single_structural_mutation = False
+    CONFIG.genome.param_epsilon             = 1e-6
+    CONFIG.reproduction.min_species_size    = GENOMES
+    CONFIG.reproduction.purge               = 1
+    CONFIG.reproduction.clone_threshold     = 0.05
+    CONFIG.reproduction.survival_threshold  = 0.20
+    CONFIG.reproduction.cross_threshold     = 0.00
+    CONFIG.reproduction.elitism             = 30
+    CONFIG.species.compatibility_threshold  = math.inf
+    CONFIG.stagnation.max_stagnation        = 1
+    CONFIG.stagnation.species_elitism       = 2
+    CONFIG.reproduction.darwin_multiplier   = 0.50
+    CONFIG.reproduction.cross_multiplier    = 0.50
+    CONFIG.reproduction.preserve_elite      = False
+
+    CONFIG.save()
+    CONFIG.load(verbose=2)
+    print(CONFIG)
+
+    INPUTS          = 3
+    OUTPUTS         = 3
+    EMBED_SIZE      = 64
+    LAYERS          = 3
+    COEFFICIENTS    = 1
+    ACTIVATION      = nn.SiLU()
+    BIAS            = True
+    PROBABILISTIC   = False
+    CLIP_MIN        = -2
+    CLIP_MAX        = 0
+
+    MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
+                      ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE,
+                      clip_min=CLIP_MIN, clip_max=CLIP_MAX)
+    print(MODEL)
+
+    POPULATION = neat.Population(GENOMES, MODEL, CONFIG, init_rep=True)
+    print(POPULATION)
+
+    POPULATION.load_dict(name='original', directory='pong', file_no=FILE_NO)
+    INIT_GEN = POPULATION.generation
+
+    EPOCHS = 200
+
+    # run_neat(POPULATION, EPOCHS)
+    test_best_network(set_keys=None)

@@ -1,9 +1,14 @@
 
-from ModifiedNEAT.nn.modules.base import Sequential, Linear, Polynomial
-from ModifiedNEAT.nn.modules.base import LayerNorm, RMSNorm, GroupNorm, BatchNorm
-from ModifiedNEAT.nn.modules.base import Conv1d, Conv2d, Conv3d, Identity, Transpose, Ignore
+from .base import Sequential, Linear, Polynomial
+from .base import LayerNorm, RMSNorm, GroupNorm, BatchNorm
+from .base import Conv1d, Conv2d, Conv3d
+from .base import Identity, Transpose, Ignore
 
-from ModifiedNEAT.nn.modules.sub import Attention, ConvSelfAttention, ConvCrossAttention, ConverBase, ConvSwiGLU
-from ModifiedNEAT.nn.modules.sub import BufferEmbedding, BufferEncoding, TransformerBase, ResidualBlock, SequenceEncoding
+from .sub import BufferEmbedding, BufferEncoding, SequenceEncoding
+from .sub import ResidualBlock
+from .sub import Attention, SwiGLU, TransformerBase
+from .sub import ConvSelfAttention, ConvCrossAttention, ConverBase, ConvSwiGLU
 
-from ModifiedNEAT.nn.modules.main import Transformer, Conver, Reformer
+from .main import Transformer, Conver, Reformer
+
+from .util import get_tensor_info, model_size, model_params

@@ -32,7 +32,7 @@ import multiprocessing as mp
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
 
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'gpu' if torch.cuda.is_available() else 'cpu'
 DTYPE  = torch.float32
 
 
@@ -718,7 +718,7 @@ class Game(Env):
             # Draw pipes
             self.pipes.render()
 
-            # Draw cuda
+            # Draw gpu
             self.floor.render()
 
             # Draw birds or debug

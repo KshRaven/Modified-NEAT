@@ -5,8 +5,9 @@ from ModifiedNEAT.config import Config
 from ModifiedNEAT.species import Species, SpeciesSet, FLOAT, INT, SPECIES
 from ModifiedNEAT.stagnation import Stagnation
 from ModifiedNEAT.reporter.base import ReporterSet
-from ModifiedNEAT.cuda.functional import calc_grid, prob, get_rng_states, get_value, set_value
-from ModifiedNEAT.cuda.mutation import mutate
+from ModifiedNEAT.base.gpu.functional import calc_grid, prob, get_rng_states, get_value, set_value
+from ModifiedNEAT.base.gpu.mutation import mutate
+from ModifiedNEAT.base.cpu.reproduction import crossover as  crossover_cpu
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
 from numba import njit, types, prange, cuda
@@ -413,6 +414,7 @@ def update_children(
     equal_param_num = all([len(c) == len(genera_parameters[0]) for c in genera_parameters])
 
     valid_perc = np.count_nonzero([check_param_compatibility(pg) for pg in pgs])
+    gpu_fails = 0
     if verbose and verbose >= 2:
         print(f"{CM('Valid Count', Fore.CYAN)} = {valid_perc} / {len(pgs)}")
     if equal_param_num:
@@ -437,16 +439,26 @@ def update_children(
 
             attempts = 3
             while attempts > 0:
-                attempts -= 1
                 filled = cp.zeros(array_update.shape + (sources.shape[-1],), bool)
                 updates_total = 0
                 for genus_, source_ in zip(genus_mapping.keys(), array_sources):
                     if config.reproduction.cross_threshold == 0.0 and genus_ != genus:
                         continue
                     updates_total += 1
-                    crossover[*kernel_shape](
-                        genus_, source_, array_update, sources, genera, filled, probabilities, equal_params
-                    )
+                    if attempts > 2:
+                        crossover[*kernel_shape](
+                            genus_, source_, array_update, sources, genera, filled, probabilities, equal_params
+                        )
+                    else:
+                        if attempts == 2:
+                            gpu_fails += 1
+                        array_update, filled = array_update.get(), filled.get()
+                        crossover_cpu(
+                            genus_, source_.get(), array_update, sources.get(), genera.get(), filled,
+                            probabilities.get(), equal_params
+                        )
+                        array_update, filled = cp.asarray(array_update), cp.asarray(filled)
+                attempts -= 1
 
                 # There shouldn't be any zero values when epsilon or weight deletion is enabled for parameters
                 try:

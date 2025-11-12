@@ -25,7 +25,7 @@ import warnings
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
 
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'gpu' if torch.cuda.is_available() else 'cpu'
 DTYPE  = torch.float32
 
 
@@ -127,11 +127,11 @@ MAX_SEQ_LEN     = 16
 A_INPUTS        = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
 A_OUTPUTS       = 4
 A_OFFSET        = 0
-DIM_SIZE        = 64
+DIM_SIZE        = 32
 KERNEL_SIZE     = 3
 STRIDE          = 1
 S_LAYERS        = 0
-T_LAYERS        = 3
+T_LAYERS        = 2
 F_LAYERS        = 0
 HEADS           = 1
 KV_HEADS        = None
@@ -159,21 +159,21 @@ GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
 OUTPUTS             = 1
-EMBED_SIZE          = 64
+EMBED_SIZE          = 32
 COEFFICIENTS        = 1
-LAYERS              = 8
+LAYERS              = 2
 ENABLE_BIAS         = True
 PROBABILISTIC       = False
 MEMORY_SIZE         = 10
 GAMMA               = np.exp(np.log(0.33) / 128)
-ALPHA               = fix(np.exp(np.log(1.50) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(1.20) / (MEMORY_SIZE - 1)), 1.0)
 ALPHA_ORDER         = 2
 REW_NORM            = 2
 LOSS_REG            = 0.
 ACTIVATION          = nn.Tanh()
 CLIP_MIN            = -5
 CLIP_MAX            = -0
-DISTRIBUTION        = 'mult_var_normal'
+DISTRIBUTION        = 'normal'
 
 MODEL0 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, ACTIVATION, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
 MODEL1 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, nn.ReLU(), PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)

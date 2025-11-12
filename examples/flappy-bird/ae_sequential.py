@@ -1,4 +1,3 @@
-from sympy.abc import epsilon
 
 from game import Game
 from ModifiedNEAT.util.fancy_text import CM, Fore
@@ -26,8 +25,10 @@ import warnings
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device('gpu' if torch.cuda.is_available() else 'cpu')
 DTYPE  = torch.float32
+neat.set_device(DEVICE)
+print(f"NEAT is using device '{neat.device()}'")
 
 
 class BaseModel(Model):
@@ -73,7 +74,7 @@ class BaseModel(Model):
     def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
         mean_std        = self.pol_proj(latent, keys=keys)
         mean, log_std   = torch.chunk(mean_std, 2, -1)
-        mean            = F.sigmoid(mean) * 6 + -3
+        mean            = F.sigmoid(mean) * 4 + -2
         std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
         return mean, std
 
@@ -126,11 +127,11 @@ MAX_SEQ_LEN     = 16
 A_INPUTS        = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
 A_OUTPUTS       = 4
 A_OFFSET        = 0
-DIM_SIZE        = 64
+DIM_SIZE        = 32
 KERNEL_SIZE     = 3
 STRIDE          = 1
 S_LAYERS        = 0
-T_LAYERS        = 3
+T_LAYERS        = 2
 F_LAYERS        = 0
 A_HEADS         = 1
 A_KV_HEADS      = None
@@ -159,23 +160,23 @@ GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS if REDUCED else (3 if not FULL_STATES else 5 + (2 if PIPE_Y_VELOCITY != 0 else 0))
 OUTPUTS             = 1
-EMBED_SIZE          = 48
+EMBED_SIZE          = 32
 LAYERS              = 1
 HEADS               = 1
 KV_HEADS            = None
 ENABLE_BIAS         = True
 DIFFERENTIAL        = False
-PROBABILISTIC       = True
+PROBABILISTIC       = False
 MEMORY_SIZE         = 10
 GAMMA               = np.exp(np.log(0.33) / 128)
-ALPHA               = fix(np.exp(np.log(1.20) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(1.15) / (MEMORY_SIZE - 1)), 1.0)
 ALPHA_ORDER         = 0
 REW_NORM            = 2
 LOSS_REG            = 0.
 ACTIVATION          = nn.Tanh()
 CLIP_MIN            = -2
 CLIP_MAX            = -0
-DISTRIBUTION        = 'mult_var_normal'
+DISTRIBUTION        = 'normal'
 
 MODEL0 = BaseModel(MAX_SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS, DIFFERENTIAL, ACTIVATION,
                    PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
@@ -356,7 +357,7 @@ def evaluate(population: neat.Population, **options):
                 terminate = trainer.update(states, actions, rewards, done, done)
 
                 alive = round(env.birds.active_num)
-                max_score = round(rewards.max().item(), 2)
+                max_score = round(rewards.clone().max().item(), 2)
                 if alive > 0:
                     best_index = torch.argmax(env.birds.score).cpu().item()
                     if best_index in reverse_mapping0:
@@ -373,7 +374,7 @@ def evaluate(population: neat.Population, **options):
                       f"bl={trainer.primary.max_size()}", end='')
 
                 # Render display
-                if population.generation % 10 == 0:
+                if population.generation % 5 == 0:
                     env.render()
 
                 states = next_states

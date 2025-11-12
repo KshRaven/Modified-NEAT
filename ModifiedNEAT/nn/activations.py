@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 
+# TODO: Refactor the modules below since PyTorch uses radians instead of degrees
 class Sigmoid(nn.Module):
     def __init__(self, multiplier: Union[float, None] = 5, limit=True):
         super(Sigmoid, self).__init__()
