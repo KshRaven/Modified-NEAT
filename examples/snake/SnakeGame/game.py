@@ -144,8 +144,8 @@ class Game(Env):
             if actions.ndim == 2:
                 if actions.shape[1] == 3:
                     actions = actions.argmax(axis=-1)
-                elif actions.shape[1] == 1:
-                    actions = np.floor(actions[..., 0] * 3).clip(min=0, max=2).astype(int)
+                # elif actions.shape[1] == 1:
+                #     actions = np.floor(actions[..., 0] * 3).clip(min=0, max=2).astype(int)
                 else:
                     raise ValueError(f"Unsupported shape '{actions.shape}'")
             elif actions.ndim == 1:
@@ -156,11 +156,11 @@ class Game(Env):
             # Get the next state to be used
             raw_states = self.grid.move(actions, self.convolutional)
             states: CPUArray = np.expand_dims(raw_states, axis=1) if self.convolutional else np.stack(raw_states, axis=-1)
+            # Restart any games that have sufficient lives to continue
+            self.players.restart()
 
             # Calculate rewards
-            current_rewards = self.players.fitness.copy()
-            rewards = current_rewards - self.previous_rewards
-            self.previous_rewards = current_rewards
+            rewards = self.players.fitness - self.players.prev_fitness
             rewards = np.expand_dims(rewards, -1)
 
             # Check env status before restarting and games to avoid full reset
@@ -173,10 +173,6 @@ class Game(Env):
                     done = True
             if done:
                 self.terminated = True
-
-            # Restart any games that have sufficient lives to continue
-            self.grid.restart()
-            self.players.restart()
 
             return states, rewards, done, done, {}
         else:

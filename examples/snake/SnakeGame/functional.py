@@ -22,6 +22,6 @@ class Direction(Enum):
 
 class GridEnum(Enum):
     Empty       = 0
-    Boundary    = 1
-    Food        = 2
-    SnakeHead   = 3
+    Boundary    = 25
+    Food        = 100
+    SnakeHead   = 200

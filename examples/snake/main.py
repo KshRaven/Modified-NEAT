@@ -16,19 +16,37 @@ import numpy as np
 import time as clock
 
 from torch import Tensor
-from typing import Union
+from typing import Union, Iterable
 from numba.core.errors import NumbaPerformanceWarning
 
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE  = torch.float32
-neat.set_device('cuda')
+neat.set_device(DEVICE)
 neat.util.storage.set_storage_location("../../storage/")
 
 
+CONVOLUTIONAL = True
+
+
+class Permute(nn.Module):
+    def __init__(self, dims: int | Iterable[int]):
+        super(Permute, self).__init__()
+        if not isinstance(dims, Iterable):
+            dims = [dims]
+        self.dims = tuple(dims)
+
+    def forward(self, input: Tensor) -> Tensor:
+        extra = tuple(range(max(0, input.ndim-len(self.dims))))
+        return input.permute(extra+self.dims)
+
+    def extra_repr(self):
+        return f"dims={self.dims}"
+
+
 class BaseModel(mn.Model):
-    def __init__(self, inputs: int, outputs: int, dim_size: int, kernel_size: int, layers: int,
+    def __init__(self, inputs: int, outputs: int, dim_size: int, kernel_size: int, fc_size: int, layers: int,
                  coefficients=1, activation: nn.Module = nn.SiLU(), probabilistic=False,
                  bias=True, device: torch.device = 'cpu', dtype: torch.dtype = torch.float32,
                  **options):
@@ -48,26 +66,29 @@ class BaseModel(mn.Model):
 
         # Build
         self.projection = mn.Sequential(*[
-            mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
-            # mn.Conv2d(inputs, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
+            # mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
+            mn.Conv2d(inputs, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
             *sum([
                 [
                     # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+                    mn.GroupNorm(1, dim_size, bias=False, device=device, dtype=dtype),
                     activation,
-                    mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
-                    # mn.Conv2d(dim_size, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
+                    # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
+                    mn.Conv2d(dim_size, dim_size, kernel_size, padding=-1, bias=bias, device=device, dtype=dtype),
                 ]
                 for _ in range(layers)
             ], []),
         ])
         self.pol_proj = mn.Sequential(*[
-            # nn.Flatten(-3, -1),
-            # nn.AdaptiveAvgPool1d(dim_size),
+            mn.GroupNorm(1, dim_size, bias=False, device=device, dtype=dtype),
+            activation,
+            Permute([-2, -1, -3]),
+            nn.Flatten(-3, -1),
+            nn.AdaptiveAvgPool1d(fc_size),
             # mn.Linear(dim_size, dim_size, bias, device, dtype),
             # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
-            activation,
             # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
-            mn.Linear(dim_size, outputs*(2 if self.distribution != 'discrete' else 1), True, device, dtype),
+            mn.Linear(fc_size, outputs*(2 if self.distribution != 'discrete' else 1), True, device, dtype),
         ])
 
     def extra_repr(self) -> str:
@@ -80,23 +101,25 @@ class BaseModel(mn.Model):
         mean_std        = self.pol_proj(latent, keys=keys)
         if self.distribution != 'discrete':
             mean, log_std   = torch.chunk(mean_std, 2, -1)
-            mean            = F.sigmoid(mean) * 4 + -2
-            std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
+            # mean            = F.sigmoid(mean) * 4 + -2
+            # std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
+            std = torch.exp(log_std)
         else:
             mean = mean_std
             std = None
         return mean, std
 
     def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
+        state = (state - 0.5) * 2
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = self.dist(mean, std)
-        action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)\
-            if self.distribution != 'discrete' else dist.sample()
+        action      = (dist.sample() if self.probabilistic else mean) if self.distribution != 'discrete' else dist.sample()
         log_prob    = dist.log_prob(action)
         return action, log_prob
 
     def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None):
+        state = (state - 0.5) * 2
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = self.dist(mean, std)
@@ -105,14 +128,14 @@ class BaseModel(mn.Model):
         return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        squeeze = state.ndim == 2
+        state = (state - 0.5) * 2
+        squeeze = state.ndim == 4 if CONVOLUTIONAL else 2
         if squeeze:
             state = state.unsqueeze(1)
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = self.dist(mean, std)
-        action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)\
-            if self.distribution != 'discrete' else dist.sample()
+        action      = (dist.sample() if options.get('normal', self.probabilistic) else mean) if self.distribution != 'discrete' else dist.sample()
         if squeeze:
             action = action.squeeze(1)
         return action
@@ -172,7 +195,7 @@ def eval_genomes(population: neat.Population, **options):
             print(f"\r"
                   f"Frames = {ENV.players.frames_done.max().item()}, "
                   f"Lives = {ENV.players.lives.mean().item()}, "
-                  f"Scores={ENV.players.scores.max().item()}, "
+                  f"Scores={ENV.players.true_scores.max().item()}, "
                   f"Alive={ENV.players.active_total}, "
                   f"Fitness={ENV.players.fitness.mean().item():.4f}"
                   , end='')
@@ -244,9 +267,11 @@ def test_best_network(set_key: int = None):
                 next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
                 states = next_states
                 ENV.render()
-                ENV.clock.tick(60)
-                print(f"\rLives = {ENV.players.lives.mean().item()}, "
-                      f"Scores={ENV.players.scores.max().item()}, "
+                ENV.clock.tick(10)
+                print(f"\r"
+                      f"Frames = {ENV.players.frames_done.max().item()}, "
+                      f"Lives = {ENV.players.lives.mean().item()}, "
+                      f"Scores={ENV.players.true_scores.max().item()}, "
                       f"Alive={ENV.players.active_total}, "
                       f"Fitness={ENV.players.fitness.mean().item():.4f}"
                       , end='')
@@ -269,10 +294,11 @@ if __name__ == '__main__':
     config_path = os.path.join(local_dir, 'config.txt')
 
     GENOMES = 100
-    WINDOW  = (20, 20)
+    WINDOW  = (15, 15)
     GOAL    = 1000
-    LIVES   = 1
-    ENV     = Game(WINDOW, GOAL, 3, LIVES, init_len=4, blob=25, state_type='continuous')
+    LIVES   = 3
+    ENV     = Game(WINDOW, GOAL, 3, LIVES, init_len=4, blob=30,
+                   state_type='grid' if CONVOLUTIONAL else 'continuous')
 
     CONFIG = neat.Config('original', 'snake')
     CONFIG.genome.init_type                 = 'normal'
@@ -304,20 +330,21 @@ if __name__ == '__main__':
     CONFIG.load(verbose=2)
     print(CONFIG)
 
-    INPUTS          = 7 # 1
-    OUTPUTS         = 1
-    EMBED_SIZE      = 64
+    INPUTS          = 1 if CONVOLUTIONAL else 7
+    OUTPUTS         = 3
+    EMBED_SIZE      = 32
     KERNEL_SIZE     = 3
-    LAYERS          = 2
+    FC_SIZE         = 512
+    LAYERS          = 3
     COEFFICIENTS    = 1
-    ACTIVATION      = nn.Tanh()
-    BIAS            = True
+    ACTIVATION      = nn.SiLU()
+    BIAS            = False
     PROBABILISTIC   = True
     CLIP_MIN        = -1
     CLIP_MAX        = 0.3
     DISTRIBUTION    = 'normal'
 
-    MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, KERNEL_SIZE, LAYERS, COEFFICIENTS,
+    MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, KERNEL_SIZE, FC_SIZE, LAYERS, COEFFICIENTS,
                       ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE,
                       clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
     print(MODEL)
@@ -332,16 +359,15 @@ if __name__ == '__main__':
     EPOCHS          = 200
     MEMORY_SIZE     = 5
     GAMMA           = math.exp(math.log(0.33) / 256)
-    ALPHA           = fix(np.exp(np.log(1.01) / (MEMORY_SIZE - 1)), 1.0)
-    ALPHA_ORDER     = 2
+    ALPHA           = fix(np.exp(np.log(1.25) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA_ORDER     = 0
     REW_NORM        = 2
 
-    # run_neat(POPULATION, EPOCHS)
     TRAINER = neat.NEAT(
         POPULATION,
         schedulers=[
             # neat.optim.scheduler.RandomAnnealing(config, 1e-1, 1e-0, 5, ['weight_init_std', 'weight_mutate_power'], True),
-            # neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_mutate_rate', True, True),
+            neat.optim.scheduler.CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
             # neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_replace_rate', True, True),
             # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_add_prob', True, True),
             # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_del_prob', True, True),
@@ -357,6 +383,6 @@ if __name__ == '__main__':
         max_episodes=MEMORY_SIZE,
     )
 
-    TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 2)
+    # TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 2)
 
     test_best_network(set_key=None)

@@ -216,9 +216,9 @@ class Grid(object):
         for i in prange(self.INIT_LEN):
             pos_x, pos_y = int(self.init_x - (self.factor_x * (i+1))), int(self.init_y - (self.factor_y * (i+1)))
             if complete:
-                self.grid[:, pos_x, pos_y] = GridEnum.SnakeHead.value + 1 + i
+                self.grid[:, pos_x, pos_y] = GridEnum.SnakeHead.value + 50 + i
             else:
-                self.grid[restart, pos_x, pos_y] = GridEnum.SnakeHead.value + 1 + i
+                self.grid[restart, pos_x, pos_y] = GridEnum.SnakeHead.value + 50 + i
         if self.food_locations is None:
             self.food_locations = get_free_positions(self.empty)
             random.shuffle(self.food_locations)
@@ -229,12 +229,14 @@ class Grid(object):
 
     def get_body_mask(self, index: int) -> CPUArray[tuple[int, int, int], bool]:
         if index < 0:
-            index = np.max(self.grid, axis=(1, 2)) + 1 + index
-            # if np.any(index < GridEnum.SnakeHead.value):
-            #     raise ValueError(f"A player has a snake with no body")
+            index = GridEnum.SnakeHead.value + 50 + self.snake_length + index
+            index[index == (GridEnum.SnakeHead.value + 50 - 1)] = GridEnum.SnakeHead.value
             index = index[:, None, None]
         else:
-            index = GridEnum.SnakeHead.value + index
+            index = GridEnum.SnakeHead.value + (0 if index == 0 else 50 - 1) + index
+        # TODO: Might want to add check to ensure limits of negative indices
+        if np.any(index < GridEnum.SnakeHead.value):
+            raise ValueError(f"A player has a snake with no body or index not within limits")
         return self.grid == index
 
     def move(self, action: CPUArray[tuple[int], int], convolutional=True):
@@ -246,21 +248,23 @@ class Grid(object):
         self.direction[self.direction == -1] = 3
         self.direction[self.direction == +4] = 0
         new_head_positions = get_new_positions(head_positions, self.direction)
-        active = self.players.active & (~self.players.completed)
-        set_positions(grid, new_head_positions, GridEnum.SnakeHead.value, active, validation=False) # Move Head
+        # TODO: Make the snake move even when inactive
+        # active = self.players.active & (~self.players.completed)
+        set_positions(grid, new_head_positions, GridEnum.SnakeHead.value, None, validation=False) # Move Head. NOTE: active -> None
 
         food_mask = prev_grid == GridEnum.Food.value
-        food_collision = check_collision(grid, food_mask, GridEnum.SnakeHead.value)
-        _active = active[:, None, None]
-        old_body_mask = (prev_grid >= GridEnum.SnakeHead.value) & _active
+        food_collision = check_collision(grid, food_mask, GridEnum.SnakeHead.value) # NOTE: The check only counts collisions so having 2 head locations won't raise error
+        # _active = active[:, None, None]
+        old_body_mask = (prev_grid >= GridEnum.SnakeHead.value) # & _active
         grid[old_body_mask] += 1 # Move the rest of the body
-        grid[tail & (~food_collision)[:, None, None] & _active] = GridEnum.Empty.value # Extend snake on eating food
+        grid[head] = GridEnum.SnakeHead.value + 50 # Ensure first body part location
+        grid[tail & (~food_collision)[:, None, None]] = GridEnum.Empty.value # Extend snake on eating food. & _active
         self.snake_length[food_collision] += 1
         self.hiatus[food_collision] = 0
         self.hiatus[~food_collision] += 1
         old_body_mask[tail] = False # The tail has moved so snake can't collide with it
         body_collision = check_collision(grid, old_body_mask, GridEnum.SnakeHead.value)
-        boundary_mask = self.boundary_mask & _active
+        boundary_mask = self.boundary_mask # & _active
         wall_collision = check_collision(grid, boundary_mask, GridEnum.SnakeHead.value)
         self._set_food(food_collision) # Place new food when eaten
         new_food_positions = get_positions(grid == GridEnum.Food.value)
@@ -273,6 +277,9 @@ class Grid(object):
                             distances, self.hiatus, moved_closer
                             ) # , True)
 
+        # TODO: Restart immediately after player update because of getting the next state
+        self.restart()
+
         if not convolutional:
             dist_x, dist_y = get_distance(new_head_positions, new_food_positions, True)
             dist_x[np.isnan(dist_x)] = self.width
@@ -282,27 +289,30 @@ class Grid(object):
             scalars = [dist_x, dist_y, dir_x, dir_y]
 
             danger = []
-            not_just_died = ~(wall_collision | body_collision)
-            active &= not_just_died
-            _active = active[:, None, None]
+            # just_died = wall_collision | body_collision
+            # not_just_died = ~just_died
+            # active &= not_just_died
+            # _active = active[:, None, None]
+            pseudo_body_mask = (grid >= GridEnum.SnakeHead.value) # & _active
             for t in range(3):
                 temp_grid = grid.copy()
                 direction = self.direction.copy() - (t-1)
                 direction[direction == -1] = 3
                 direction[direction == +4] = 0
                 pseudo_head_positions = get_new_positions(new_head_positions, direction)
-                set_positions(temp_grid, pseudo_head_positions, GridEnum.SnakeHead.value, active, validation=False)
-                pseudo_body_mask = (grid >= GridEnum.SnakeHead.value) & _active
+                set_positions(temp_grid, pseudo_head_positions, GridEnum.SnakeHead.value, None, validation=False) # NOTE: active -> not_just_died -> None
                 temp_grid[pseudo_body_mask] += 1
                 pseudo_body_mask[self.get_body_mask(-1)] = False
                 _body_collision = check_collision(temp_grid, pseudo_body_mask, GridEnum.SnakeHead.value)
                 _wall_collision = check_collision(temp_grid, boundary_mask, GridEnum.SnakeHead.value)
-                danger.append((_body_collision | _wall_collision).astype(float))
+                dir_danger = (_body_collision | _wall_collision).astype(float)
+                # dir_danger[just_died] = -1
+                danger.append(dir_danger)
 
             result = scalars + danger
             return result
         else:
-            return self.grid
+            return (self.grid - GridEnum.Food.value) / GridEnum.Food.value * 2
 
 
 if __name__ == "__main__":

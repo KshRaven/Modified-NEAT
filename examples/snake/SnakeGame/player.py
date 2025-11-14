@@ -15,10 +15,12 @@ INF_MIN = FLOAT(-np.finfo(np.float32).max.item())
     ('lives_total', INT),
     ('lives', COUNTER_1D),
     ('scores', COUNTER_1D),
+    ('true_scores', COUNTER_1D),
     ('disqualified', MASK_1D),
     ('completed', MASK_1D),
     ('frames_done', COUNTER_1D),
     ('fitness', ARRAY_1D),
+    ('prev_fitness', ARRAY_1D),
     ('max_hiatus', INT),
 ])
 class Players(object):
@@ -27,25 +29,30 @@ class Players(object):
         self.lives_total = lives
         self.lives = np.full((self.total,), self.lives_total, dtype=INT)
         self.scores = np.full((self.total,), 0, dtype=INT)
+        self.true_scores = np.full((self.total,), 0, dtype=INT)
         self.disqualified = np.full((self.total,), False, dtype=BOOL)
         self.completed = np.full((self.total,), False, dtype=BOOL)
         self.frames_done = np.full((self.total,), 0, dtype=INT)
         self.fitness = np.full((self.total,), 0, dtype=FLOAT)
+        self.prev_fitness = np.full((self.total,), 0, dtype=FLOAT)
         self.max_hiatus = max_hiatus
 
     def reset(self, total: int | list[int]):
         self.total = total
         self.lives = np.full((self.total,), self.lives_total, dtype=INT)
         self.scores = np.full((self.total,), 0, dtype=INT)
+        self.true_scores = np.full((self.total,), 0, dtype=INT)
         self.disqualified = np.full((self.total,), False, dtype=BOOL)
         self.completed = np.full((self.total,), False, dtype=BOOL)
         self.frames_done = np.full((self.total,), 0, dtype=INT)
         self.fitness = np.full((self.total,), 0, dtype=FLOAT)
+        self.prev_fitness = np.full((self.total,), 0, dtype=FLOAT)
 
     def restart(self):
         self.scores[self.disqualified] = 0
         self.frames_done[self.disqualified] = 0
         self.fitness[self.disqualified] = 0
+        self.prev_fitness[self.disqualified] = 0
         self.disqualified[self.disqualified] = False
 
     @property
@@ -68,22 +75,26 @@ class Players(object):
         self.lives[died] -= 1
         self.lives = np.clip(self.lives, 0, self.lives_total)
         self.disqualified[died] = True
-        active = self.active # & ~completed
-        inactive = ~active
-        if np.any(np.isnan(distances[active])):
+        self.fitness[died] = 0. # Because their grids are reset immediately after and before calculating reward
+        # active = self.active # & ~completed
+        # inactive = ~active
+        if np.any(np.isnan(distances)): # [active]
             raise ValueError("An active player cannot have an NaN distance value")
-        _hiatus = np.clip(hiatus, 1, None)
-        _moved_closer_p = active & moved_closer
-        _moved_closer_n = active & (~moved_closer)
+        # _hiatus = np.clip(hiatus, 1, None)
+        # _moved_closer_p = active & moved_closer
+        # _moved_closer_n = active & (~moved_closer)
         self.scores[ate_food] += 1
+        better = self.scores > self.true_scores
+        self.true_scores[better] = self.scores[better]
 
+        self.prev_fitness = self.fitness.copy()
         # Food reward
         self.fitness[ate_food] += 1000 * (self.lives + 1)[ate_food]
         # Death penalty
-        self.fitness[died] -= 1000 * (self.lives_total - self.lives + 1)[died]
+        # self.fitness[died] -= 1000 # * (self.lives_total - self.lives + 1)[died]
         # Distance shaping
         self.fitness[moved_closer] += 1 * distances[moved_closer]
-        self.fitness[~moved_closer] -= 1 * (distances * _hiatus)[~moved_closer]
+        self.fitness[~moved_closer] -= 1 * (distances)[~moved_closer] #  * _hiatus
         # # Small penalty proportional to distance
         # self.fitness[active] -= 0.001 * (distances * _hiatus)[active]
         # # Inactivity / looping penalty
@@ -107,7 +118,7 @@ class Players(object):
 
     @property
     def best_index(self):
-        total_score = self.scores * (self.lives + 1)
+        total_score = self.true_scores * (self.lives + 1)
         total_score[~self.active] = -np.inf # += INF_MIN
         # minimum, maximum = total_score.min(), total_score.max()
         # probs = np.random.rand(*total_score.shape) + ((total_score - minimum) / (maximum - minimum + 1e-6)) * 0.50
