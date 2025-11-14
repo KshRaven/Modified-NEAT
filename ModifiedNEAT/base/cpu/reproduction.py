@@ -5,7 +5,7 @@ from ModifiedNEAT.config import Config
 from ModifiedNEAT.species import Species, SpeciesSet, FLOAT, INT, SPECIES
 from ModifiedNEAT.stagnation import Stagnation
 from ModifiedNEAT.reporter.base import ReporterSet
-from .functional import calc_grid, prob, get_rng_states
+from .functional import calc_grid, prob, get_rng_states, get_enumeration
 from .mutation import mutate
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
@@ -267,7 +267,7 @@ def _crossover(value1: float, value2: float, states: CPUArray, index: int):
         return value2
 
 
-@njit(parallel=True)
+@njit(nogil=True)
 def crossover(genus: int, source: CPUArray, updates: CPUArray, parents: CPUArray, genera: CPUArray, filled: CPUArray,
               probabilities: CPUArray, equal_sources: bool):
     if updates.ndim != 3:
@@ -279,56 +279,57 @@ def crossover(genus: int, source: CPUArray, updates: CPUArray, parents: CPUArray
     x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
     y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
 
-    for genome_idx in prange(s_g):
-        for x in prange(s_x):
-            for y in prange(s_y):
-                # Linearized thread index
-                rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+    indices, total = get_enumeration(updates)
+    for i in prange(total):
+        genome_idx, x, y = indices[i]
 
-                if genome_idx < g_lim and x < x_lim and y < y_lim:
-                    parent0, parent1, parent_   = parents[genome_idx]
-                    genus0, genus1, genus_      = genera[genome_idx]
-                    filled0, filled1, filled_   = filled[genome_idx, x, y]
-                    if equal_sources or (genus0 == genus1 == genus):
-                        # For elite genomes or clones
-                        if (parent0 == parent1) and (genus == genus0 == genus1):
-                            value = source[parent0, x, y]
-                            filled[genome_idx, x, y, :2] = True
-                        # For child crossover
-                        else:
-                            already_filled = filled0 or filled1
+        # Linearized thread index
+        rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
-                            # If not filled, fill from current available source
-                            value = updates[genome_idx, x, y].item() # Get value in case param has been filled from another source
-                            if not already_filled:
-                                if genus == genus0:
-                                    value = source[parent0, x, y]
-                                    filled[genome_idx, x, y, 0] = filled0 = True
-                                elif genus == genus1:
-                                    value = source[parent1, x, y]
-                                    filled[genome_idx, x, y, 1] = filled1 = True
-
-                            # Crossover when both parents' values are available
-                            if genus == genus0 and not filled0 and filled1:
-                                value_c = source[parent0, x, y].item()
-                                value = _crossover(value, value_c, probabilities, rng_index)
-                                filled[genome_idx, x, y, 0] = True
-                            if genus == genus1 and not filled1 and filled0:
-                                value_c = source[parent1, x, y].item()
-                                value = _crossover(value, value_c, probabilities, rng_index)
-                                filled[genome_idx, x, y, 1] = True
-                    else:
-                        # Emergency fill on unmatched param groups
-                        if not filled_ and genus == genus_:
-                            # TODO: Should random emergency parents be used instead of random cloning?
-                            value = source[parent_, x, y]
-                            filled[genome_idx, x, y, 2] = True
-                        else:
-                            value = updates[genome_idx, x, y]
-
-                    updates[genome_idx, x, y] = value
+        if genome_idx < g_lim and x < x_lim and y < y_lim:
+            parent0, parent1, parent_   = parents[genome_idx]
+            genus0, genus1, genus_      = genera[genome_idx]
+            filled0, filled1, filled_   = filled[genome_idx, x, y]
+            if equal_sources or (genus0 == genus1 == genus):
+                # For elite genomes or clones
+                if (parent0 == parent1) and (genus == genus0 == genus1):
+                    value = source[parent0, x, y]
+                    filled[genome_idx, x, y, :2] = True
+                # For child crossover
                 else:
-                    raise ValueError("Out of bounds")
+                    already_filled = filled0 or filled1
+
+                    # If not filled, fill from current available source
+                    value = updates[genome_idx, x, y].item() # Get value in case param has been filled from another source
+                    if not already_filled:
+                        if genus == genus0:
+                            value = source[parent0, x, y]
+                            filled[genome_idx, x, y, 0] = filled0 = True
+                        elif genus == genus1:
+                            value = source[parent1, x, y]
+                            filled[genome_idx, x, y, 1] = filled1 = True
+
+                    # Crossover when both parents' values are available
+                    if genus == genus0 and not filled0 and filled1:
+                        value_c = source[parent0, x, y].item()
+                        value = _crossover(value, value_c, probabilities, rng_index)
+                        filled[genome_idx, x, y, 0] = True
+                    if genus == genus1 and not filled1 and filled0:
+                        value_c = source[parent1, x, y].item()
+                        value = _crossover(value, value_c, probabilities, rng_index)
+                        filled[genome_idx, x, y, 1] = True
+            else:
+                # Emergency fill on unmatched param groups
+                if not filled_ and genus == genus_:
+                    # TODO: Should random emergency parents be used instead of random cloning?
+                    value = source[parent_, x, y]
+                    filled[genome_idx, x, y, 2] = True
+                else:
+                    value = updates[genome_idx, x, y]
+
+            updates[genome_idx, x, y] = value
+        else:
+            raise ValueError("Out of bounds")
 
 
 def update_children(

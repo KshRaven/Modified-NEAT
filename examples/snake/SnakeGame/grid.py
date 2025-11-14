@@ -2,7 +2,7 @@
 from .functional import INT, FLOAT, BOOL, ARRAY_1D, Direction, GridEnum
 from .player import Players, PLAYERS_TYPE
 
-from numba import prange
+from numba import prange, njit
 from numba.experimental import jitclass
 from numpy import ndarray as CPUArray
 
@@ -19,21 +19,16 @@ def get_positions(mask: CPUArray[tuple[int, ...], bool]):
     positions = [coordinates.get(p) for p in prange(len(mask))]
     return positions
 
+# @njit(nogil=True)
 def get_free_positions(mask: CPUArray):
+    # Ensure the mask is 3-dimensional. shape(players, width, height)
     if mask.ndim != 3:
         raise ValueError(f"Invalid mask shape")
-    positions: list[tuple[int, int] | None] = []
-    for p in prange(mask.shape[0]):
-        # Get indices where mask is True for this player
-        ys, xs = np.where(mask[p])
-
-        if len(xs) == 0:
-            # no available positions
-            positions.append(None)
-        else:
-            # pick a random available index
-            index = np.random.randint(len(xs))
-            positions.append((ys[index].item(), xs[index].item()))
+    # Ensure all masks are the same
+    if np.any(~np.all(mask == mask[[0]], axis=(1, 2))):
+        raise ValueError(f"All players' masks must be the same")
+    # Get indices where mask is True
+    positions: list[tuple[int, ...]] = [tuple(index.tolist()) for index in np.argwhere(mask[0])]
     return positions
 
 def get_new_positions(positions: list[tuple[int, int] | None], directions: CPUArray[tuple[int], int] | list[int]):
@@ -66,7 +61,9 @@ def set_positions(array: CPUArray, positions: list[tuple[int, int] | None], valu
             array[p, x, y] = value
 
 def check_collision(array: CPUArray, mask: CPUArray, value: int) -> CPUArray[tuple[int], bool]:
-    return np.any((array == value) & mask, axis=(1, 2))
+    collisions: CPUArray[tuple[int], int] = np.count_nonzero((array == value) & mask, axis=(1, 2))
+    assert np.all(collisions < 2)
+    return collisions.astype(bool)
 
 def get_distance(positions0: list[tuple[int, int] | None], positions1: list[tuple[int, int] | None], split=False):
     if len(positions0) != len(positions1):
@@ -135,6 +132,7 @@ class Grid(object):
             (self.total, self.width+2, self.height+2),
             fill_value=GridEnum.Empty.value, dtype=np.int64
         )
+        self.food_locations: list[tuple[int, int]] | None = None
         self.boundary_mask = np.full_like(self.grid, fill_value=False, dtype=bool)
         self.head_mask = np.full_like(self.grid, fill_value=False, dtype=bool)
         self.direction: CPUArray[tuple[int], int] = np.full(self.total, fill_value=self.INIT_DIR, dtype=int)
@@ -157,14 +155,22 @@ class Grid(object):
         return np.all(self.grid != GridEnum.Empty.value, axis=(1, 2))
 
     def _set_food(self, mask: CPUArray[tuple[int], bool] | None):
-        free_positions = get_free_positions(self.empty)
-        set_positions(self.grid, free_positions, GridEnum.Food.value, mask, validation=True)
+        locations_total = len(self.food_locations)
+        next_indices = [
+            self.snake_length[p] - self.INIT_LEN
+            for p in range(self.total)
+        ]
+        next_positions = [
+            self.food_locations[index] if index < locations_total else None
+            for index in next_indices
+        ]
+        set_positions(self.grid, next_positions, GridEnum.Food.value, mask, validation=True)
 
     def reset(self, complete=True):
         restart = self.players.to_restart()
         complete |= self.players.total != self.total # or np.all(restart == True).item()
 
-        # Recreate masks if necessary
+        # Recreate masks if necessary and food locations
         if complete:
             self.total = self.players.total
             self.grid = np.full(
@@ -213,6 +219,9 @@ class Grid(object):
                 self.grid[:, pos_x, pos_y] = GridEnum.SnakeHead.value + 1 + i
             else:
                 self.grid[restart, pos_x, pos_y] = GridEnum.SnakeHead.value + 1 + i
+        if self.food_locations is None:
+            self.food_locations = get_free_positions(self.empty)
+            random.shuffle(self.food_locations)
         self._set_food(None if complete else restart)
 
     def restart(self):
@@ -253,7 +262,7 @@ class Grid(object):
         body_collision = check_collision(grid, old_body_mask, GridEnum.SnakeHead.value)
         boundary_mask = self.boundary_mask & _active
         wall_collision = check_collision(grid, boundary_mask, GridEnum.SnakeHead.value)
-        self._set_food(food_collision & active) # Place new food when eaten
+        self._set_food(food_collision) # Place new food when eaten
         new_food_positions = get_positions(grid == GridEnum.Food.value)
 
         distances = get_distance(new_head_positions, new_food_positions) / self.max_distance

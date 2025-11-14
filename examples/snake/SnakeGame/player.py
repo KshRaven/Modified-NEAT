@@ -19,9 +19,10 @@ INF_MIN = FLOAT(-np.finfo(np.float32).max.item())
     ('completed', MASK_1D),
     ('frames_done', COUNTER_1D),
     ('fitness', ARRAY_1D),
+    ('max_hiatus', INT),
 ])
 class Players(object):
-    def __init__(self, lives=3):
+    def __init__(self, lives=3, max_hiatus=300):
         self.total = 1
         self.lives_total = lives
         self.lives = np.full((self.total,), self.lives_total, dtype=INT)
@@ -30,6 +31,7 @@ class Players(object):
         self.completed = np.full((self.total,), False, dtype=BOOL)
         self.frames_done = np.full((self.total,), 0, dtype=INT)
         self.fitness = np.full((self.total,), 0, dtype=FLOAT)
+        self.max_hiatus = max_hiatus
 
     def reset(self, total: int | list[int]):
         self.total = total
@@ -41,7 +43,9 @@ class Players(object):
         self.fitness = np.full((self.total,), 0, dtype=FLOAT)
 
     def restart(self):
+        self.scores[self.disqualified] = 0
         self.frames_done[self.disqualified] = 0
+        self.fitness[self.disqualified] = 0
         self.disqualified[self.disqualified] = False
 
     @property
@@ -59,25 +63,33 @@ class Players(object):
                ate_food: CPUArray, hit_wall: CPUArray, hit_self: CPUArray, completed: CPUArray,
                distances: CPUArray, hiatus: CPUArray, moved_closer: CPUArray,
                verbose=False):
-        died = hit_wall | hit_self
+        too_long = hiatus >= self.max_hiatus
+        died = hit_wall | hit_self | too_long
         self.lives[died] -= 1
         self.lives = np.clip(self.lives, 0, self.lives_total)
         self.disqualified[died] = True
-        active = self.active & ~completed
+        active = self.active # & ~completed
         inactive = ~active
         if np.any(np.isnan(distances[active])):
             raise ValueError("An active player cannot have an NaN distance value")
         _hiatus = np.clip(hiatus, 1, None)
         _moved_closer_p = active & moved_closer
         _moved_closer_n = active & (~moved_closer)
-        self.scores[ate_food & active] += 1
-        self.fitness[ate_food & active] += 100
-        self.fitness[died] -= 100
-        self.fitness[_moved_closer_p] += 1
-        self.fitness[_moved_closer_n] -= 1 * distances[_moved_closer_n] * _hiatus[_moved_closer_n]
-        # self.fitness[active] += 0.00000 + ((-1e-0) * distances[active] * _hiatus[active])
-        self.fitness[inactive] -= 1e-0 * self.frames_done[inactive]
-        self.fitness[completed] += 10000
+        self.scores[ate_food] += 1
+
+        # Food reward
+        self.fitness[ate_food] += 1000 * (self.lives + 1)[ate_food]
+        # Death penalty
+        self.fitness[died] -= 1000 * (self.lives_total - self.lives + 1)[died]
+        # Distance shaping
+        self.fitness[moved_closer] += 1 * distances[moved_closer]
+        self.fitness[~moved_closer] -= 1 * (distances * _hiatus)[~moved_closer]
+        # # Small penalty proportional to distance
+        # self.fitness[active] -= 0.001 * (distances * _hiatus)[active]
+        # # Inactivity / looping penalty
+        # self.fitness[inactive] -= 0.01 * self.frames_done[inactive]
+        # Game completion
+        self.fitness[completed] += 100000
         self.completed[completed] |= True
 
         self.frames_done += 1

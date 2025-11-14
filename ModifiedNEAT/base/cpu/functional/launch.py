@@ -1,5 +1,10 @@
 
+from numba import njit, types, prange
+from numba.typed import List, Dict
+from numpy import ndarray as CPUArray
+
 import math
+import numpy as np
 
 
 def calc_grid(*block_sizes: int, tpb: int = 4, multiplier: float = None):
@@ -28,3 +33,10 @@ def calc(tasks: tuple[int, ...], threads: int, multiplier: float):
             if len(tasks) > 1:
                 tpb += (t,)
         return bpg, tpb
+
+
+@njit
+def get_enumeration(array: CPUArray):
+    positions: list[tuple[int, ...]] = [index for index, value in np.ndenumerate(array)]
+    count = len(positions)
+    return positions, count

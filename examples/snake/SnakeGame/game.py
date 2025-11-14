@@ -142,7 +142,16 @@ class Game(Env):
                 actions = actions.cpu().numpy()
             assert actions.ndim <= 2
             if actions.ndim == 2:
-                actions = actions.argmax(axis=-1)
+                if actions.shape[1] == 3:
+                    actions = actions.argmax(axis=-1)
+                elif actions.shape[1] == 1:
+                    actions = np.floor(actions[..., 0] * 3).clip(min=0, max=2).astype(int)
+                else:
+                    raise ValueError(f"Unsupported shape '{actions.shape}'")
+            elif actions.ndim == 1:
+                pass
+            else:
+                raise ValueError(f"Unsupported number of dimension '{actions.ndim}'")
 
             # Get the next state to be used
             raw_states = self.grid.move(actions, self.convolutional)

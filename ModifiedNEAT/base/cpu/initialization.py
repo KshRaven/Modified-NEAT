@@ -1,7 +1,7 @@
 
 from ModifiedNEAT.nn import NeatModule
 from ModifiedNEAT.config import Config
-from .functional import calc_grid, get_rng_states, clamp, normal, uniform
+from .functional import calc_grid, get_rng_states, clamp, normal, uniform, get_enumeration
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
 from numba import njit, prange
@@ -28,7 +28,7 @@ def initialize_genome(parameter: CPUArray, g: int, x: int, y: int, init_type: in
         parameter[g, x, y] = uniform(rng_states, rng_index, uni_min, uni_max)
 
 
-@njit(parallel=True)
+@njit(nogil=True)
 def _execute(parameter: CPUArray, init_type: int, mean: float, std: float, minimum: float, maximum: float, rng_states):
     if parameter.ndim != 3:
         raise ValueError(f"Expected a 3D array, got {parameter.ndim}")
@@ -39,19 +39,20 @@ def _execute(parameter: CPUArray, init_type: int, mean: float, std: float, minim
     x_lim = 1 if parameter.ndim <= 1 else parameter.shape[1]
     y_lim = 1 if parameter.ndim <= 2 else parameter.shape[2]
 
-    for genome_idx in prange(s_g):
-        for x in prange(s_x):
-            for y in prange(s_y):
-                # Linearized thread index
-                rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+    indices, total = get_enumeration(parameter)
+    for i in prange(total):
+        genome_idx, x, y = indices[i]
 
-                if genome_idx < g_lim and x < x_lim and y < y_lim:
-                    initialize_genome(
-                        parameter, genome_idx, x, y, init_type, mean, std, minimum, maximum, rng_states, rng_index
-                    )
-                    pass
-                else:
-                    raise ValueError("Out of bounds")
+        # Linearized thread index
+        rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+
+        if genome_idx < g_lim and x < x_lim and y < y_lim:
+            initialize_genome(
+                parameter, genome_idx, x, y, init_type, mean, std, minimum, maximum, rng_states, rng_index
+            )
+            pass
+        else:
+            raise ValueError("Out of bounds")
 
 
 def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):

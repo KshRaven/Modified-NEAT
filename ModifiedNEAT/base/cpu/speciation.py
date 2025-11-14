@@ -3,7 +3,7 @@ from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.nn.genome import Genome, INT
 from ModifiedNEAT.species import Species, SpeciesSet, GenomeDistanceCache, get_ct
-from .functional import calc_grid
+# from .functional import calc_grid
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
 from numba import types, njit, prange
@@ -56,7 +56,7 @@ def calc_distance(parameter: CPUArray, total_distance: CPUArray,
     total_distance[genome0, genome1] += current_distance
 
 
-@njit(parallel=True)
+@njit(nogil=True)
 def get_distance(parameter: CPUArray, total_distance: CPUArray,
                  compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     if parameter.ndim != 2:
@@ -65,22 +65,45 @@ def get_distance(parameter: CPUArray, total_distance: CPUArray,
     g_lim = total_distance.shape[0]
     x_lim = parameter.shape[1]
 
-    for x in prange(x_lim):
-        for genome0 in range(g_lim):
-            for genome1 in range(g_lim):
+    # Fill the lower triangle
+    for genome0 in prange(g_lim):
+        for genome1 in prange(genome0, g_lim):
+            for x in prange(x_lim):
+                # Assert limits
                 if genome0 < g_lim and genome1 < g_lim and x < x_lim:
-                    calc_distance(
-                        parameter, total_distance, genome0, genome1, x,
-                        compatibility_weight_coefficient, compatibility_disjoint_coefficient
-                    )
+                    if genome0 == genome1:
+                        total_distance[genome0, genome1] += 0.0
+                    else:
+                        calc_distance(
+                            parameter, total_distance, genome0, genome1, x,
+                            compatibility_weight_coefficient, compatibility_disjoint_coefficient
+                        )
                 else:
                     raise ValueError("Out of bounds")
+    # Fill the upper triangle
+    for genome0 in prange(g_lim):
+        for genome1 in prange(genome0):
+            # Assert limits
+            if genome0 < g_lim and genome1 < g_lim:
+                distance = total_distance[genome1, genome0]
+                if distance == 0:
+                    print(f"Was running genomes '{genome0}', and '{genome1}', "
+                          f"distances = {total_distance[genome0, genome1]}, {total_distance[genome1, genome0]}, ")
+                    raise ValueError(
+                        f"The genetic distance between 2 separate genomes cannot exist, "
+                        f"since crossover and mutation exists. "
+                        f"\nWith the config file:"
+                        f"\n1. Check the weight and disjoint coefficient values."
+                        f"\n2. Check mutation coefficients' values  ")
+                total_distance[genome0, genome1] = distance
+            else:
+                raise ValueError("Out of bounds")
 
 
 @njit(nogil=True)
 def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArray, mapping: dict[int, int]):
     hits, misses = 0, 0
-    keys = List(mapping.keys())
+    keys = list(mapping.keys())
     for i in prange(len(keys)):
         gi = keys[i]
         ii = mapping[gi]
@@ -153,7 +176,7 @@ def _get_representatives(species_dict: dict[int, Species], population: dict[int,
     def gamma(candidates_: list[tuple[float, Genome]]):
         if len(candidates_) > 0:
             candidate = candidates_[0] # (distance, genome)
-            for x in range(1, len(candidates_)):
+            for x in prange(1, len(candidates_)):
                 comp = candidates_[x]
                 if comp[0] < candidate[0]:
                     candidate = comp
@@ -162,7 +185,7 @@ def _get_representatives(species_dict: dict[int, Species], population: dict[int,
             raise ValueError(f"Empty list")
 
     # Loop through each existing species
-    mapping = List(species_dict.keys())
+    mapping = list(species_dict.keys())
     for i in prange(len(species_dict)):
         sid = mapping[i]
         species = species_dict[sid]
@@ -191,7 +214,7 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
     def gamma(candidates_: list[tuple[int, int]]):
         if len(candidates_) > 0:
             candidate = candidates_[0]  # (distance, species_key)
-            for x in range(1, len(candidates_)):
+            for x in prange(1, len(candidates_)):
                 comp = candidates_[x]
                 if comp[0] < candidate[0]:
                     candidate = comp
@@ -208,7 +231,7 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
 
         # Find the species with the most similar representative.
         candidates: list[tuple[int, int]] = List()
-        mapping = List(representatives.keys())
+        mapping = list(representatives.keys())
         for i in prange(len(representatives)):
             sid = mapping[i]
             rid = representatives[sid]
@@ -238,7 +261,7 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
 def _update_collection(genus: int, population: dict[int, Genome], species: dict[int, Species],
                        genome_to_species: dict[int, int], representatives: dict[int, int],
                        members: dict[int, list[int]], generation: int):
-    mapping = List(representatives.keys())
+    mapping = list(representatives.keys())
     for i in prange(len(representatives)):
         sid = mapping[i]
         rid = representatives[sid]

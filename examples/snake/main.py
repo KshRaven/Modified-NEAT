@@ -48,21 +48,21 @@ class BaseModel(mn.Model):
 
         # Build
         self.projection = mn.Sequential(*[
-            # mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
-            mn.Conv2d(inputs, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
+            mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
+            # mn.Conv2d(inputs, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
             *sum([
                 [
                     # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
                     activation,
-                    # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
-                    mn.Conv2d(dim_size, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
+                    mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
+                    # mn.Conv2d(dim_size, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
                 ]
                 for _ in range(layers)
             ], []),
         ])
         self.pol_proj = mn.Sequential(*[
-            nn.Flatten(-3, -1),
-            nn.AdaptiveAvgPool1d(dim_size),
+            # nn.Flatten(-3, -1),
+            # nn.AdaptiveAvgPool1d(dim_size),
             # mn.Linear(dim_size, dim_size, bias, device, dtype),
             # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
             activation,
@@ -105,7 +105,7 @@ class BaseModel(mn.Model):
         return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        squeeze = state.ndim == 4
+        squeeze = state.ndim == 2
         if squeeze:
             state = state.unsqueeze(1)
         latent      = self.projection(state, keys=keys)
@@ -201,6 +201,8 @@ def run_neat(population: neat.Population, epochs: int):
 
 def test_best_network(set_key: int = None):
     print("\n\n---------- RUNNING TEST ON SNAKE ----------")
+    print(f"Obs => {ENV.observation_space.shape}")
+    print(f"Act => {ENV.action_space.shape}")
     ENV.goal = 1000
     ENV.players.lives_total = 9
 
@@ -238,7 +240,7 @@ def test_best_network(set_key: int = None):
             ENV.render()
             while not done:
                 states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
-                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
+                actions = MODEL.get_policy(states, keys=keys) # shape(genomes)
                 next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
                 states = next_states
                 ENV.render()
@@ -267,24 +269,24 @@ if __name__ == '__main__':
     config_path = os.path.join(local_dir, 'config.txt')
 
     GENOMES = 100
-    WINDOW  = (5, 5)
+    WINDOW  = (20, 20)
     GOAL    = 1000
-    LIVES   = 3
-    ENV     = Game(WINDOW, GOAL, 3, LIVES, init_len=1, blob=50)
+    LIVES   = 1
+    ENV     = Game(WINDOW, GOAL, 3, LIVES, init_len=4, blob=25, state_type='continuous')
 
     CONFIG = neat.Config('original', 'snake')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 2.0
+    CONFIG.genome.weight_init_std           = 0.3
     CONFIG.genome.weight_min_value          = -math.inf
     CONFIG.genome.weight_max_value          = +math.inf
-    CONFIG.genome.weight_mutate_power       = 1e-0
+    CONFIG.genome.weight_mutate_power       = 1e-1
     CONFIG.genome.weight_mutate_rate        = 0.50
-    CONFIG.genome.weight_replace_rate       = 0.00
+    CONFIG.genome.weight_replace_rate       = 0.10
     CONFIG.genome.weight_add_prob           = 0.01
     CONFIG.genome.weight_del_prob           = 0.01
     CONFIG.genome.single_structural_mutation = False
-    CONFIG.genome.param_epsilon             = 1e-9
+    CONFIG.genome.param_epsilon             = 1e-6
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
     CONFIG.reproduction.clone_threshold     = 0.05
@@ -302,17 +304,17 @@ if __name__ == '__main__':
     CONFIG.load(verbose=2)
     print(CONFIG)
 
-    INPUTS          = 1
-    OUTPUTS         = 3
-    EMBED_SIZE      = 32
+    INPUTS          = 7 # 1
+    OUTPUTS         = 1
+    EMBED_SIZE      = 64
     KERNEL_SIZE     = 3
-    LAYERS          = 1
+    LAYERS          = 2
     COEFFICIENTS    = 1
-    ACTIVATION      = nn.SiLU()
+    ACTIVATION      = nn.Tanh()
     BIAS            = True
-    PROBABILISTIC   = False
+    PROBABILISTIC   = True
     CLIP_MIN        = -1
-    CLIP_MAX        = 0
+    CLIP_MAX        = 0.3
     DISTRIBUTION    = 'normal'
 
     MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, KERNEL_SIZE, LAYERS, COEFFICIENTS,
@@ -328,11 +330,11 @@ if __name__ == '__main__':
 
     # Training parameters
     EPOCHS          = 200
-    MEMORY_SIZE     = 10
+    MEMORY_SIZE     = 5
     GAMMA           = math.exp(math.log(0.33) / 256)
-    ALPHA           = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA           = fix(np.exp(np.log(1.01) / (MEMORY_SIZE - 1)), 1.0)
     ALPHA_ORDER     = 2
-    REW_NORM        = 0
+    REW_NORM        = 2
 
     # run_neat(POPULATION, EPOCHS)
     TRAINER = neat.NEAT(
@@ -355,6 +357,6 @@ if __name__ == '__main__':
         max_episodes=MEMORY_SIZE,
     )
 
-    TRAINER.learn(eval_genomes, GOAL * 2, EPOCHS, 256, 0.05, 'continuous', 2)
+    TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 2)
 
     test_best_network(set_key=None)

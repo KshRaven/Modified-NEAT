@@ -1,7 +1,6 @@
 
 from setuptools import setup, find_packages
 import os
-import sys
 
 
 # Read the requirements from the requirements.txt file.
@@ -17,7 +16,7 @@ def load_requirements(filename='requirements.txt'):
 
 setup(
     name='ModifiedNEAT',
-    version='0.5.0',
+    version='0.5.1',
     author='Bradley Odimmasi',
     author_email='bodimmasi@gmail.com',
     description='Modified version of python NEAT algorithm that uses PyTorch modules',
@@ -32,5 +31,3 @@ setup(
     ],
     python_requires='>=3.10',
 )
-
-sys.path.append('./test_models/')

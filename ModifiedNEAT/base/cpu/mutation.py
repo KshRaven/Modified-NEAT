@@ -1,5 +1,5 @@
 
-from .functional import clamp, prob, normal
+from .functional import clamp, prob, normal, get_enumeration
 from .initialization import initialize_genome
 
 from numba import njit, prange
@@ -68,7 +68,7 @@ def mutate_genome(parameter: CPUArray, g: int, x: int, y: int, mutate_rate: floa
         )
 
 
-@njit(parallel=True)
+@njit(nogil=True)
 def mutate(
         updates: CPUArray, children: CPUArray,
         mutate_rate: float, mutate_power: float,
@@ -86,20 +86,21 @@ def mutate(
     x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
     y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
 
-    for genome_idx in prange(s_g):
-        for x in prange(s_x):
-            for y in prange(s_y):
-                # Linearized thread index
-                rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+    indices, total = get_enumeration(updates)
+    for i in prange(total):
+        genome_idx, x, y = indices[i]
 
-                if genome_idx < g_lim and x < x_lim and y < y_lim:
-                    if children[genome_idx] is True:
-                        mutate_genome(
-                            updates, genome_idx, x, y,
-                            mutate_rate, mutate_power,
-                            replace_rate, init_type, mean, std, minimum, maximum,
-                            ssm, add_param, delete_param, epsilon,
-                            probabilities, normals, rng_index
-                        )
-                else:
-                    raise ValueError("Out of bounds")
+        # Linearized thread index
+        rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+
+        if genome_idx < g_lim and x < x_lim and y < y_lim:
+            if children[genome_idx] is True:
+                mutate_genome(
+                    updates, genome_idx, x, y,
+                    mutate_rate, mutate_power,
+                    replace_rate, init_type, mean, std, minimum, maximum,
+                    ssm, add_param, delete_param, epsilon,
+                    probabilities, normals, rng_index
+                )
+        else:
+            raise ValueError("Out of bounds")
