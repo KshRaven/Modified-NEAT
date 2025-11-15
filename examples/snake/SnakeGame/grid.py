@@ -5,6 +5,7 @@ from .player import Players, PLAYERS_TYPE
 from numba import prange, njit
 from numba.experimental import jitclass
 from numpy import ndarray as CPUArray
+from typing import Iterable
 
 import pygame
 import math
@@ -19,19 +20,35 @@ def get_positions(mask: CPUArray[tuple[int, ...], bool]):
     positions = [coordinates.get(p) for p in prange(len(mask))]
     return positions
 
-# @njit(nogil=True)
-def get_free_positions(mask: CPUArray):
+@njit(nogil=True)
+def get_free_positions(mask: CPUArray, independent=True):
     # Ensure the mask is 3-dimensional. shape(players, width, height)
     if mask.ndim != 3:
         raise ValueError(f"Invalid mask shape")
-    # Ensure all masks are the same
-    if np.any(~np.all(mask == mask[[0]], axis=(1, 2))):
-        raise ValueError(f"All players' masks must be the same")
-    # Get indices where mask is True
-    positions: list[tuple[int, ...]] = [tuple(index.tolist()) for index in np.argwhere(mask[0])]
+    if independent:
+        players_total = mask.shape[0]
+        positions: list[CPUArray[tuple[int], np.dtype[int]] | None] = []
+        for p in prange(players_total):
+            # Get indices where mask is True for this player
+            ys, xs = np.where(mask[p])
+
+            if len(xs) == 0:
+                # no available positions
+                positions.append(None)
+            else:
+                # pick a random available index
+                idx = np.random.randint(len(xs))
+                positions.append(np.array([ys[idx], xs[idx]], np.int64))
+    else:
+        # # Ensure all masks are the same
+        # if np.all(mask == np.expand_dims(mask[0], 0)):
+        #     raise ValueError(f"All players' masks must be the same")
+        # # Get indices where mask is True
+        # positions = [index.astype(np.int64) for index in np.argwhere(mask[0])]
+        raise RuntimeError()
     return positions
 
-def get_new_positions(positions: list[tuple[int, int] | None], directions: CPUArray[tuple[int], int] | list[int]):
+def get_new_positions(positions: list[Iterable[int] | None], directions: CPUArray[tuple[int], int] | list[int]):
     new_positions: list[tuple[int, int] | None] = []
     for p in prange(len(positions)):
         pos = positions[p]
@@ -54,11 +71,15 @@ def set_positions(array: CPUArray, positions: list[tuple[int, int] | None], valu
         if mask is not None:
             fill &= mask[p].item()
         coordinates = positions[p]
-        if fill and coordinates is not None:
-            x, y = coordinates
-            if validation and array[p, x, y] != GridEnum.Empty.value:
-                raise ValueError(f"Position must be empty")
-            array[p, x, y] = value
+        try:
+            if fill and coordinates is not None:
+                x, y = coordinates
+                if validation and array[p, x, y] != GridEnum.Empty.value:
+                    raise ValueError(f"Position must be empty. Found value '{array[p, x, y]}'")
+                array[p, x, y] = value
+        except IndexError as e:
+            return p, e
+    return None
 
 def check_collision(array: CPUArray, mask: CPUArray, value: int) -> CPUArray[tuple[int], bool]:
     collisions: CPUArray[tuple[int], int] = np.count_nonzero((array == value) & mask, axis=(1, 2))
@@ -155,15 +176,16 @@ class Grid(object):
         return np.all(self.grid != GridEnum.Empty.value, axis=(1, 2))
 
     def _set_food(self, mask: CPUArray[tuple[int], bool] | None):
-        locations_total = len(self.food_locations)
-        next_indices = [
-            self.snake_length[p] - self.INIT_LEN
-            for p in range(self.total)
-        ]
-        next_positions = [
-            self.food_locations[index] if index < locations_total else None
-            for index in next_indices
-        ]
+        # locations_total = len(self.food_locations)
+        # next_indices = [
+        #     self.snake_length[p] - self.INIT_LEN
+        #     for p in range(self.total)
+        # ]
+        # next_positions = [
+        #     self.food_locations[index] if index < locations_total else None
+        #     for index in next_indices
+        # ]
+        next_positions = get_free_positions(self.empty, independent=True)
         set_positions(self.grid, next_positions, GridEnum.Food.value, mask, validation=True)
 
     def reset(self, complete=True):
@@ -216,10 +238,12 @@ class Grid(object):
         for i in prange(self.INIT_LEN):
             pos_x, pos_y = int(self.init_x - (self.factor_x * (i+1))), int(self.init_y - (self.factor_y * (i+1)))
             if complete:
-                self.grid[:, pos_x, pos_y] = GridEnum.SnakeHead.value + 50 + i
+                self.grid[:, pos_x, pos_y] = GridEnum.SnakeBody.value + i
             else:
-                self.grid[restart, pos_x, pos_y] = GridEnum.SnakeHead.value + 50 + i
-        if self.food_locations is None:
+                self.grid[restart, pos_x, pos_y] = GridEnum.SnakeBody.value + i
+                setup = True
+        # TODO: Might want to scrap standardized movements because player's snake states might not allow at some point in time
+        if self.food_locations is None or complete: # TODO: Make this optional
             self.food_locations = get_free_positions(self.empty)
             random.shuffle(self.food_locations)
         self._set_food(None if complete else restart)
@@ -229,17 +253,17 @@ class Grid(object):
 
     def get_body_mask(self, index: int) -> CPUArray[tuple[int, int, int], bool]:
         if index < 0:
-            index = GridEnum.SnakeHead.value + 50 + self.snake_length + index
-            index[index == (GridEnum.SnakeHead.value + 50 - 1)] = GridEnum.SnakeHead.value
+            index = GridEnum.SnakeBody.value + self.snake_length + index
+            index[index == (GridEnum.SnakeBody.value - 1)] = GridEnum.SnakeHead.value
             index = index[:, None, None]
         else:
-            index = GridEnum.SnakeHead.value + (0 if index == 0 else 50 - 1) + index
+            index = GridEnum.SnakeHead.value if index == 0 else GridEnum.SnakeBody.value + index
         # TODO: Might want to add check to ensure limits of negative indices
         if np.any(index < GridEnum.SnakeHead.value):
             raise ValueError(f"A player has a snake with no body or index not within limits")
         return self.grid == index
 
-    def move(self, action: CPUArray[tuple[int], int], convolutional=True):
+    def move(self, action: CPUArray[tuple[int], int], convolutional: bool = True, verbose: int | bool = True):
         grid, prev_grid = self.grid, self.grid.copy()
         movement = action - 1 # Should be integer in interval [-1, +1]
         head, tail = self.get_body_mask(0), self.get_body_mask(-1)
@@ -254,18 +278,39 @@ class Grid(object):
 
         food_mask = prev_grid == GridEnum.Food.value
         food_collision = check_collision(grid, food_mask, GridEnum.SnakeHead.value) # NOTE: The check only counts collisions so having 2 head locations won't raise error
+        _no_food_collision = ~food_collision[:, None, None]
         # _active = active[:, None, None]
         old_body_mask = (prev_grid >= GridEnum.SnakeHead.value) # & _active
-        grid[old_body_mask] += 1 # Move the rest of the body
-        grid[head] = GridEnum.SnakeHead.value + 50 # Ensure first body part location
-        grid[tail & (~food_collision)[:, None, None]] = GridEnum.Empty.value # Extend snake on eating food. & _active
+        new_head = self.get_body_mask(0) # At this stage there should be 2 heads on the grid, assuming it moved
+        assert(np.all(np.count_nonzero(new_head, axis=(1, 2)) == 2))
+        grid[old_body_mask & (~new_head)] += 1 # Move the rest of the body. Exclude head since it might have eaten itself
+        grid[head] = GridEnum.SnakeBody.value # Ensure first body part location
+        tail_moved = tail & _no_food_collision
+        grid[tail_moved & (~new_head)] = GridEnum.Empty.value # Extend snake on eating food. & _active
         self.snake_length[food_collision] += 1
         self.hiatus[food_collision] = 0
         self.hiatus[~food_collision] += 1
-        old_body_mask[tail] = False # The tail has moved so snake can't collide with it
+        old_body_mask[tail_moved] = False # The tail has moved so snake can't collide with it if no food eaten
         body_collision = check_collision(grid, old_body_mask, GridEnum.SnakeHead.value)
+        if verbose:
+            if np.any(food_collision & body_collision):
+                raise RuntimeError("Cannot collide with food and body")
+            new_head = self.get_body_mask(0) # Should only be one head at this point and it should be at the new location
+            check = np.count_nonzero(new_head, axis=(1, 2)) != 1
+            check_index = np.argmax(check)
+            if np.any(check):
+                print(f"Head positions = {head_positions[check_index]}")
+                print(f"Actions = {action[check_index]}")
+                print(f"Directions = {self.direction[check_index]}")
+                print(f"New head positions = {new_head_positions[check_index]}")
+                print(f"Previous Grid = \n{prev_grid[check_index]}")
+                print(f"Current Grid = \n{grid[check_index]}")
+                raise RuntimeError("A snake head has not moved.")
         boundary_mask = self.boundary_mask # & _active
         wall_collision = check_collision(grid, boundary_mask, GridEnum.SnakeHead.value)
+        if verbose:
+            if np.any(body_collision | wall_collision | food_collision):
+                paused = True
         self._set_food(food_collision) # Place new food when eaten
         new_food_positions = get_positions(grid == GridEnum.Food.value)
 
@@ -273,12 +318,17 @@ class Grid(object):
         distances[np.isnan(distances)] = 1.0 # self.max_distance
         moved_closer = (self.prev_distance - distances) > 0
         self.prev_distance = distances.copy()
-        self.players.update(food_collision, wall_collision, body_collision, self.completed,
-                            distances, self.hiatus, moved_closer
-                            ) # , True)
+        self.players.update(
+            food_collision, wall_collision, body_collision, self.completed, distances, self.hiatus, moved_closer
+        ) # , True)
 
         # TODO: Restart immediately after player update because of getting the next state
+        if verbose:
+            if np.any(self.players.disqualified):
+                stop = True
         self.restart()
+        if verbose:
+            self.debug_grid_state(grid, prev_grid)
 
         if not convolutional:
             dist_x, dist_y = get_distance(new_head_positions, new_food_positions, True)
@@ -293,26 +343,102 @@ class Grid(object):
             # not_just_died = ~just_died
             # active &= not_just_died
             # _active = active[:, None, None]
-            pseudo_body_mask = (grid >= GridEnum.SnakeHead.value) # & _active
+            pseudo_food_mask = grid == GridEnum.Food.value
+            _pseudo_body_mask = (grid >= GridEnum.SnakeHead.value) # Get fake old body locations
+            pseudo_head, pseudo_tail = self.get_body_mask(0), self.get_body_mask(-1)
+            _new_head_positions = get_positions(pseudo_head)
             for t in range(3):
-                temp_grid = grid.copy()
+                temp_grid = self.grid.copy()
                 direction = self.direction.copy() - (t-1)
                 direction[direction == -1] = 3
                 direction[direction == +4] = 0
-                pseudo_head_positions = get_new_positions(new_head_positions, direction)
-                set_positions(temp_grid, pseudo_head_positions, GridEnum.SnakeHead.value, None, validation=False) # NOTE: active -> not_just_died -> None
-                temp_grid[pseudo_body_mask] += 1
-                pseudo_body_mask[self.get_body_mask(-1)] = False
+                pseudo_head_positions = get_new_positions(_new_head_positions, direction)
+                fault = set_positions(
+                    temp_grid, pseudo_head_positions, GridEnum.SnakeHead.value, None, validation=False
+                ) # NOTE: active -> not_just_died -> None
+                if fault is not None:
+                    index, e = fault
+                    print(f"\n\nFaulty index = {index}")
+                    print(f"Current position = {_new_head_positions[index]}")
+                    print(f"Check position = {pseudo_head_positions[index]}")
+                    print(f"Direction = {direction[index]}")
+                    print(f"Action = {t}")
+                    print(f"Died = {(body_collision | wall_collision)[index]}")
+                    print(f"Disq = {self.players.disqualified[index]}")
+                    print(f"Lives = {self.players.lives[index]}")
+                    print(f"Grid = \n", grid[index])
+                    print(f"Pseudo grid = \n", temp_grid[index])
+                    raise e
+
+                pseudo_food_collision = check_collision(temp_grid, pseudo_food_mask, GridEnum.SnakeHead.value)
+                _pseudo_food_collision = pseudo_food_collision[:, None, None]
+
+                pseudo_body_mask = _pseudo_body_mask.copy() # Get copy since it might be modified
+                pseudo_new_head = temp_grid == GridEnum.SnakeHead.value # Get the 2 head locations
+                temp_grid[pseudo_body_mask & (~pseudo_new_head)] += 1 # Update body excluding if head on body
+                temp_grid[pseudo_new_head] = GridEnum.SnakeBody.value # Set first body part
+                pseudo_tail_moved = pseudo_tail & (~_pseudo_food_collision)
+                temp_grid[pseudo_tail_moved & (~pseudo_new_head)] = GridEnum.Empty.value # Update tail if not eaten
+                pseudo_body_mask[pseudo_tail_moved] = False # Update tail in mask
+
                 _body_collision = check_collision(temp_grid, pseudo_body_mask, GridEnum.SnakeHead.value)
                 _wall_collision = check_collision(temp_grid, boundary_mask, GridEnum.SnakeHead.value)
+
                 dir_danger = (_body_collision | _wall_collision).astype(float)
+                dir_danger[pseudo_food_collision] = -1
                 # dir_danger[just_died] = -1
                 danger.append(dir_danger)
 
             result = scalars + danger
             return result
         else:
-            return (self.grid - GridEnum.Food.value) / GridEnum.Food.value * 2
+            normalized_grid = (self.grid - GridEnum.Food.value) / GridEnum.Food.value * 2
+            if verbose:
+                if np.any(self.players.frames_done == 0):
+                    stop = True
+            return normalized_grid
+
+    def debug_grid_state(self, grid: CPUArray,  prev_grid: CPUArray):
+        g = grid
+        GE = GridEnum
+        allowed = (
+            (g == GE.Empty.value) |
+            (g == GE.Boundary.value) |
+            (g == GE.Food.value) |
+            (g == GE.SnakeHead.value) |
+            (g >= GE.SnakeBody.value)
+        )
+        if not allowed.all():
+            bad_idx = np.argwhere(~allowed)
+            print("=== INVALID GRID VALUES FOUND ===")
+            print("unique grid values:", np.unique(g))
+            print("first 20 bad cells (player,x,y,value):")
+            for p,x,y in bad_idx[:20]:
+                print(p, x, y, "val=", int(g[p,x,y]))
+            # dump more context for the first offending player
+            p0 = int(bad_idx[0,0])
+            print("--- player", p0, "---")
+            print("snake_length:", int(self.snake_length[p0]))
+            print("hiatus:", int(self.hiatus[p0]))
+            print("unique values for player:", np.unique(g[p0]))
+            print("prev_grid slice for player:\n", prev_grid[p0])
+            print("curr_grid slice for player:\n", grid[p0])
+            # optional: raise so you get a full trace
+            raise RuntimeError("Invalid grid values detected - see console")
+
+        # per-player invariants
+        for p in range(self.total):
+            pl = g[p]
+            head_count = int(np.sum(pl == GE.SnakeHead.value))
+            body_count = int(np.sum(pl >= GE.SnakeBody.value))
+            if head_count != 1 or body_count != int(self.snake_length[p]):
+                print(f"*** Invariant fail for player {p}: heads={head_count}, bodies={body_count}, snake_length={self.snake_length[p]}")
+                print("unique:", np.unique(pl))
+                print("head positions:", np.argwhere(pl == GE.SnakeHead.value))
+                print("body positions:", np.argwhere(pl >= GE.SnakeBody.value))
+                # dump masks/collisions and small context
+                raise RuntimeError(f"Invariant failed for player {p}")
+
 
 
 if __name__ == "__main__":

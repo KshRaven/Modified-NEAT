@@ -25,3 +25,4 @@ class GridEnum(Enum):
     Boundary    = 25
     Food        = 100
     SnakeHead   = 200
+    SnakeBody   = 250

@@ -24,7 +24,7 @@ INF_MIN = FLOAT(-np.finfo(np.float32).max.item())
     ('max_hiatus', INT),
 ])
 class Players(object):
-    def __init__(self, lives=3, max_hiatus=300):
+    def __init__(self, lives=3, max_hiatus=200):
         self.total = 1
         self.lives_total = lives
         self.lives = np.full((self.total,), self.lives_total, dtype=INT)
@@ -76,11 +76,11 @@ class Players(object):
         self.lives = np.clip(self.lives, 0, self.lives_total)
         self.disqualified[died] = True
         self.fitness[died] = 0. # Because their grids are reset immediately after and before calculating reward
-        # active = self.active # & ~completed
-        # inactive = ~active
+        active = self.active # & ~completed
+        inactive = ~active
         if np.any(np.isnan(distances)): # [active]
             raise ValueError("An active player cannot have an NaN distance value")
-        # _hiatus = np.clip(hiatus, 1, None)
+        _hiatus = np.clip(hiatus, 1, None)
         # _moved_closer_p = active & moved_closer
         # _moved_closer_n = active & (~moved_closer)
         self.scores[ate_food] += 1
@@ -91,14 +91,14 @@ class Players(object):
         # Food reward
         self.fitness[ate_food] += 1000 * (self.lives + 1)[ate_food]
         # Death penalty
-        # self.fitness[died] -= 1000 # * (self.lives_total - self.lives + 1)[died]
+        self.fitness[died] -= 1000 * (self.lives_total - self.lives + 1)[died]
         # Distance shaping
         self.fitness[moved_closer] += 1 * distances[moved_closer]
         self.fitness[~moved_closer] -= 1 * (distances)[~moved_closer] #  * _hiatus
         # # Small penalty proportional to distance
-        # self.fitness[active] -= 0.001 * (distances * _hiatus)[active]
+        self.fitness[active] -= 0.1 * (distances * _hiatus)[active]
         # # Inactivity / looping penalty
-        # self.fitness[inactive] -= 0.01 * self.frames_done[inactive]
+        self.fitness[inactive] -= 0.1 * self.frames_done[inactive]
         # Game completion
         self.fitness[completed] += 100000
         self.completed[completed] |= True

@@ -27,7 +27,7 @@ neat.set_device(DEVICE)
 neat.util.storage.set_storage_location("../../storage/")
 
 
-CONVOLUTIONAL = True
+CONVOLUTIONAL = False
 
 
 class Permute(nn.Module):
@@ -66,29 +66,30 @@ class BaseModel(mn.Model):
 
         # Build
         self.projection = mn.Sequential(*[
-            # mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
-            mn.Conv2d(inputs, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
+            mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
+            # mn.Conv2d(inputs, dim_size, kernel_size, padding=-1, bias=True, device=device, dtype=dtype),
             *sum([
                 [
-                    # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
-                    mn.GroupNorm(1, dim_size, bias=False, device=device, dtype=dtype),
+                    mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+                    # mn.GroupNorm(1, dim_size, bias=False, device=device, dtype=dtype),
                     activation,
-                    # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
-                    mn.Conv2d(dim_size, dim_size, kernel_size, padding=-1, bias=bias, device=device, dtype=dtype),
+                    mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
+                    # mn.Conv2d(dim_size, dim_size, kernel_size, padding=-1, bias=bias, device=device, dtype=dtype),
                 ]
                 for _ in range(layers)
             ], []),
         ])
         self.pol_proj = mn.Sequential(*[
-            mn.GroupNorm(1, dim_size, bias=False, device=device, dtype=dtype),
+            mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+            # mn.GroupNorm(1, dim_size, bias=False, device=device, dtype=dtype),
             activation,
-            Permute([-2, -1, -3]),
-            nn.Flatten(-3, -1),
-            nn.AdaptiveAvgPool1d(fc_size),
-            # mn.Linear(dim_size, dim_size, bias, device, dtype),
-            # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
-            # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
-            mn.Linear(fc_size, outputs*(2 if self.distribution != 'discrete' else 1), True, device, dtype),
+            # Permute([-2, -1, -3]),
+            # nn.Flatten(-3, -1),
+            # nn.AdaptiveAvgPool1d(fc_size),
+            # # mn.Linear(dim_size, dim_size, bias, device, dtype),
+            # # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
+            mn.Linear(fc_size if CONVOLUTIONAL else dim_size,
+                      outputs*(2 if self.distribution != 'discrete' else 1), True, device, dtype),
         ])
 
     def extra_repr(self) -> str:
@@ -110,16 +111,24 @@ class BaseModel(mn.Model):
         return mean, std
 
     def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
-        state = (state - 0.5) * 2
+        # state = (state - 0.5) * 2
+        squeeze = state.ndim == 4 if CONVOLUTIONAL else 2
+        if squeeze:
+            state = state.unsqueeze(1)
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = self.dist(mean, std)
         action      = (dist.sample() if self.probabilistic else mean) if self.distribution != 'discrete' else dist.sample()
         log_prob    = dist.log_prob(action)
+        if squeeze:
+            action = action.squeeze(1)
         return action, log_prob
 
     def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None):
-        state = (state - 0.5) * 2
+        # state = (state - 0.5) * 2
+        squeeze = state.ndim == 4 if CONVOLUTIONAL else 2
+        if squeeze:
+            state = state.unsqueeze(1)
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = self.dist(mean, std)
@@ -128,8 +137,8 @@ class BaseModel(mn.Model):
         return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        state = (state - 0.5) * 2
-        squeeze = state.ndim == 4 if CONVOLUTIONAL else 2
+        # state = (state - 0.5) * 2
+        squeeze = state.ndim == (4 if CONVOLUTIONAL else 2)
         if squeeze:
             state = state.unsqueeze(1)
         latent      = self.projection(state, keys=keys)
@@ -202,7 +211,7 @@ def eval_genomes(population: neat.Population, **options):
             step += 1
     print("\ndone with env")
 
-    scores = ENV.players.scores # torch.mean(torch.stack(stack, dim=0), dim=0)
+    scores = ENV.players.true_scores # torch.mean(torch.stack(stack, dim=0), dim=0)
     for key, index in mapping.items():
         genome = population.genomes[key]
         score = scores[index].item()
@@ -267,7 +276,7 @@ def test_best_network(set_key: int = None):
                 next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
                 states = next_states
                 ENV.render()
-                ENV.clock.tick(10)
+                ENV.clock.tick(5)
                 print(f"\r"
                       f"Frames = {ENV.players.frames_done.max().item()}, "
                       f"Lives = {ENV.players.lives.mean().item()}, "
@@ -308,9 +317,9 @@ if __name__ == '__main__':
     CONFIG.genome.weight_max_value          = +math.inf
     CONFIG.genome.weight_mutate_power       = 1e-1
     CONFIG.genome.weight_mutate_rate        = 0.50
-    CONFIG.genome.weight_replace_rate       = 0.10
-    CONFIG.genome.weight_add_prob           = 0.01
-    CONFIG.genome.weight_del_prob           = 0.01
+    CONFIG.genome.weight_replace_rate       = 0.00
+    CONFIG.genome.weight_add_prob           = 0.00
+    CONFIG.genome.weight_del_prob           = 0.00
     CONFIG.genome.single_structural_mutation = False
     CONFIG.genome.param_epsilon             = 1e-6
     CONFIG.reproduction.min_species_size    = GENOMES
@@ -338,8 +347,8 @@ if __name__ == '__main__':
     LAYERS          = 3
     COEFFICIENTS    = 1
     ACTIVATION      = nn.SiLU()
-    BIAS            = False
-    PROBABILISTIC   = True
+    BIAS            = True
+    PROBABILISTIC   = False
     CLIP_MIN        = -1
     CLIP_MAX        = 0.3
     DISTRIBUTION    = 'normal'
@@ -357,9 +366,9 @@ if __name__ == '__main__':
 
     # Training parameters
     EPOCHS          = 200
-    MEMORY_SIZE     = 5
+    MEMORY_SIZE     = 10
     GAMMA           = math.exp(math.log(0.33) / 256)
-    ALPHA           = fix(np.exp(np.log(1.25) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA           = fix(np.exp(np.log(2) / (MEMORY_SIZE - 1)), 1.0)
     ALPHA_ORDER     = 0
     REW_NORM        = 2
 
@@ -383,6 +392,6 @@ if __name__ == '__main__':
         max_episodes=MEMORY_SIZE,
     )
 
-    # TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 2)
+    TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 3)
 
     test_best_network(set_key=None)

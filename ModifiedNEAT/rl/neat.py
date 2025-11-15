@@ -216,6 +216,10 @@ class NEAT(Algorithm):
                 rollout_time = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"rolled out data in {CM(f'{round(rollout_time, 2)}s', Fore.LIGHTCYAN_EX)}")
+                    print(f"Valid keys: {len(valid_keys)}")
+                    print(f"states = {list(states.values())[0].shape}")
+                    print(f"actions = {list(actions.values())[0].shape}")
+                    print(f"rewards = {list(rewards.values())[0].shape}")
 
                 # Sort episodes wrt. episode mapping
                 ts = clock.perf_counter()

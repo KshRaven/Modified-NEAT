@@ -24,6 +24,11 @@ class Backend(object):
     RED     = (255, 0, 0)
     BLUE1   = (0, 0, 255)
     BLUE2   = (0, 100, 255)
+    PURPLE  = (128, 0, 128)
+    BROWN   = (165, 42, 42)
+    ORANGE  = (255, 165, 0)
+    YELLOW  = (255, 255, 0)
+    LIME    = (0, 255, 0)
 
     def __init__(self, window: Window, players: Players, grid: Grid, blob_size: int = 20):
         pygame.init()
@@ -42,24 +47,25 @@ class Backend(object):
 
         best_index = self.players.best_index
 
-        grid = np.rot90(self.grid.grid[best_index].copy(), 1)
+        # grid = np.rot90(self.grid.grid[best_index].copy(), 1)
+        grid = self.grid.grid[best_index].copy()
         for index, value in np.ndenumerate(grid):
             try:
                 # value = round(value / 255 * 4)
                 pos_x, pos_y = index[::-1]
                 x, y = pos_x * self.BLOB_SIZE, pos_y * self.BLOB_SIZE
                 if value == GridEnum.Boundary.value:
-                    color = self.WHITE
+                    color = self.ORANGE
                 elif value == GridEnum.Food.value:
                     color = self.RED
                 elif value == GridEnum.SnakeHead.value:
-                    color = self.BLUE1
-                elif value > GridEnum.SnakeHead.value:
+                    color = self.LIME
+                elif value >= GridEnum.SnakeBody.value:
                     color = self.BLUE2
                 elif value == GridEnum.Empty.value:
                     color = self.BLACK
                 else:
-                    # color = self.BLACK
+                    color = self.YELLOW
                     pass
                 pygame.draw.rect(window, color, pygame.Rect(x, y, self.BLOB_SIZE, self.BLOB_SIZE))
             except ValueError as e:
