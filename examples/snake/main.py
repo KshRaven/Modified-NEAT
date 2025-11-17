@@ -276,7 +276,7 @@ def test_best_network(set_key: int = None):
                 next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
                 states = next_states
                 ENV.render()
-                ENV.clock.tick(60)
+                ENV.clock.tick(120)
                 print(f"\r"
                       f"Frames = {ENV.players.frames_done.max().item()}, "
                       f"Lives = {ENV.players.lives.mean().item()}, "
@@ -365,10 +365,10 @@ if __name__ == '__main__':
     INIT_GEN = POPULATION.generation
 
     # Training parameters
-    EPOCHS          = 200
+    EPOCHS          = 300
     MEMORY_SIZE     = 10
     GAMMA           = math.exp(math.log(0.33) / 256)
-    ALPHA           = fix(np.exp(np.log(1.25) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA           = fix(np.exp(np.log(1.75) / (MEMORY_SIZE - 1)), 1.0)
     ALPHA_ORDER     = 2
     REW_NORM        = 2
 
@@ -392,6 +392,6 @@ if __name__ == '__main__':
     #     max_episodes=MEMORY_SIZE,
     # )
     #
-    # TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 3)
+    # TRAINER.learn(eval_genomes, GOAL * 2, EPOCHS, 256, 0.05, 'continuous', 3)
 
     test_best_network(set_key=None)
