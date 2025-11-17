@@ -29,7 +29,6 @@ neat.util.storage.set_storage_location("../../storage/")
 
 CONVOLUTIONAL = False
 
-
 class Permute(nn.Module):
     def __init__(self, dims: int | Iterable[int]):
         super(Permute, self).__init__()
@@ -118,7 +117,7 @@ class BaseModel(mn.Model):
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = self.dist(mean, std)
-        action      = (dist.sample() if self.probabilistic else mean) if self.distribution != 'discrete' else dist.sample()
+        action      = torch.sigmoid(dist.sample() if self.probabilistic else mean) if self.distribution != 'discrete' else dist.sample()
         log_prob    = dist.log_prob(action)
         if squeeze:
             action = action.squeeze(1)
@@ -144,7 +143,7 @@ class BaseModel(mn.Model):
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         dist        = self.dist(mean, std)
-        action      = (dist.sample() if options.get('normal', self.probabilistic) else mean) if self.distribution != 'discrete' else dist.sample()
+        action      = torch.sigmoid(dist.sample() if options.get('normal', self.probabilistic) else mean) if self.distribution != 'discrete' else dist.sample()
         if squeeze:
             action = action.squeeze(1)
         return action
@@ -157,7 +156,7 @@ class BaseModel(mn.Model):
 
 ENV: Game | None = None
 MODEL: BaseModel | None = None
-FILE_NO: int | None = None
+FILE_NO: int | None = 90
 INIT_GEN: int = 0
 
 SAFE_GENOMES = []
@@ -179,7 +178,7 @@ def eval_genomes(population: neat.Population, **options):
         states = ENV.reset(keys=keys)[0]
         done = False
         step = 0
-        DEBUG_STEP = 0
+        DEBUG_STEP = 10
         ENV.render()
         while not done:
             DEBUG = step == DEBUG_STEP and population.generation == INIT_GEN
@@ -228,14 +227,15 @@ def eval_genomes(population: neat.Population, **options):
 
 
 def run_neat(population: neat.Population, epochs: int):
-    population.run(eval_genomes, epochs, verbose=None)
+    population.run(eval_genomes, epochs, verbose=1)
 
 
 def test_best_network(set_key: int = None):
     print("\n\n---------- RUNNING TEST ON SNAKE ----------")
     print(f"Obs => {ENV.observation_space.shape}")
     print(f"Act => {ENV.action_space.shape}")
-    ENV.goal = 1000
+    ENV.max_frames *= 10
+    ENV.players.max_hiatus *= 10
     ENV.players.lives_total = 9
 
     for i in range(20):
@@ -248,6 +248,7 @@ def test_best_network(set_key: int = None):
             probs = [g.fitness for g in ranking if g.fitness is not None]
             if len(probs) >= 2:
                 probs = np.array(probs)
+                probs[np.isnan(probs)] = np.min(probs[~np.isnan(probs)])
                 try:
                     probs = (probs - probs.min()) / (probs.max() - probs.min())
                     probs = probs / probs.sum()
@@ -276,7 +277,7 @@ def test_best_network(set_key: int = None):
                 next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
                 states = next_states
                 ENV.render()
-                ENV.clock.tick(5)
+                ENV.clock.tick(60)
                 print(f"\r"
                       f"Frames = {ENV.players.frames_done.max().item()}, "
                       f"Lives = {ENV.players.lives.mean().item()}, "
@@ -303,19 +304,20 @@ if __name__ == '__main__':
     config_path = os.path.join(local_dir, 'config.txt')
 
     GENOMES = 100
-    WINDOW  = (15, 15)
+    WINDOW  = (30, 30)
     GOAL    = 1000
     LIVES   = 3
     ENV     = Game(WINDOW, GOAL, 3, LIVES, init_len=4, blob=30,
-                   state_type='grid' if CONVOLUTIONAL else 'continuous')
+                   state_type='grid' if CONVOLUTIONAL else 'continuous',
+                   max_frames=500, timeout=200,)
 
     CONFIG = neat.Config('original', 'snake')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 0.3
+    CONFIG.genome.weight_init_std           = 0.5
     CONFIG.genome.weight_min_value          = -math.inf
     CONFIG.genome.weight_max_value          = +math.inf
-    CONFIG.genome.weight_mutate_power       = 1e-1
+    CONFIG.genome.weight_mutate_power       = 5e-1
     CONFIG.genome.weight_mutate_rate        = 0.50
     CONFIG.genome.weight_replace_rate       = 0.00
     CONFIG.genome.weight_add_prob           = 0.00
@@ -339,18 +341,18 @@ if __name__ == '__main__':
     CONFIG.load(verbose=2)
     print(CONFIG)
 
-    INPUTS          = 1 if CONVOLUTIONAL else 7
+    INPUTS          = 1 if CONVOLUTIONAL else ENV.observation_space.shape[-1]
     OUTPUTS         = 3
     EMBED_SIZE      = 32
     KERNEL_SIZE     = 3
     FC_SIZE         = 512
-    LAYERS          = 3
+    LAYERS          = 2
     COEFFICIENTS    = 1
     ACTIVATION      = nn.SiLU()
     BIAS            = True
-    PROBABILISTIC   = False
-    CLIP_MIN        = -1
-    CLIP_MAX        = 0.3
+    PROBABILISTIC   = True
+    CLIP_MIN        = -2
+    CLIP_MAX        = 0.0
     DISTRIBUTION    = 'normal'
 
     MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, KERNEL_SIZE, FC_SIZE, LAYERS, COEFFICIENTS,
@@ -361,37 +363,37 @@ if __name__ == '__main__':
     POPULATION = neat.Population(GENOMES, MODEL, CONFIG, init_rep=True)
     print(POPULATION)
 
-    # POPULATION.load_dict(name='original', directory='snake', file_no=FILE_NO)
+    POPULATION.load_dict(name='original', directory='snake', file_no=FILE_NO)
     INIT_GEN = POPULATION.generation
 
     # Training parameters
     EPOCHS          = 200
     MEMORY_SIZE     = 10
     GAMMA           = math.exp(math.log(0.33) / 256)
-    ALPHA           = fix(np.exp(np.log(2) / (MEMORY_SIZE - 1)), 1.0)
-    ALPHA_ORDER     = 0
+    ALPHA           = fix(np.exp(np.log(1.75) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA_ORDER     = 2
     REW_NORM        = 2
 
-    TRAINER = neat.NEAT(
-        POPULATION,
-        schedulers=[
-            # neat.optim.scheduler.RandomAnnealing(config, 1e-1, 1e-0, 5, ['weight_init_std', 'weight_mutate_power'], True),
-            neat.optim.scheduler.CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
-            # neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_replace_rate', True, True),
-            # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_add_prob', True, True),
-            # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_del_prob', True, True),
-        ],
-        device=DEVICE, dtype=DTYPE,
-        log_sub_dir='pong-original\\',
-        log_name=f"{unix_to_datetime_file(clock.time())}_"
-                 f"e{EMBED_SIZE}-l{LAYERS}--b{int(BIAS)}-"
-                 f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
-                 f"rn{REW_NORM}-p{round(0.0, 4)}",
-        gamma=GAMMA, alpha=ALPHA, order=ALPHA_ORDER, normalize=REW_NORM,
-        rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
-        max_episodes=MEMORY_SIZE,
-    )
-
-    TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 3)
+    # TRAINER = neat.NEAT(
+    #     POPULATION,
+    #     schedulers=[
+    #         # neat.optim.scheduler.RandomAnnealing(config, 1e-1, 1e-0, 5, ['weight_init_std', 'weight_mutate_power'], True),
+    #         neat.optim.scheduler.CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
+    #         # neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_replace_rate', True, True),
+    #         # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_add_prob', True, True),
+    #         # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_del_prob', True, True),
+    #     ],
+    #     device=DEVICE, dtype=DTYPE,
+    #     log_sub_dir='snake-original\\',
+    #     log_name=f"{unix_to_datetime_file(clock.time())}_"
+    #              f"e{EMBED_SIZE}-l{LAYERS}--b{int(BIAS)}-"
+    #              f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
+    #              f"rn{REW_NORM}-p{round(0.0, 4)}",
+    #     gamma=GAMMA, alpha=ALPHA, order=ALPHA_ORDER, normalize=REW_NORM,
+    #     rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
+    #     max_episodes=MEMORY_SIZE,
+    # )
+    #
+    # TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 3)
 
     test_best_network(set_key=None)

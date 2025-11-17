@@ -14,6 +14,7 @@ INF_MIN = FLOAT(-np.finfo(np.float32).max.item())
     ('total', INT),
     ('lives_total', INT),
     ('lives', COUNTER_1D),
+    ('deaths', COUNTER_1D),
     ('scores', COUNTER_1D),
     ('true_scores', COUNTER_1D),
     ('disqualified', MASK_1D),
@@ -24,10 +25,11 @@ INF_MIN = FLOAT(-np.finfo(np.float32).max.item())
     ('max_hiatus', INT),
 ])
 class Players(object):
-    def __init__(self, lives=3, max_hiatus=200):
+    def __init__(self, lives=3, max_hiatus=500):
         self.total = 1
         self.lives_total = lives
         self.lives = np.full((self.total,), self.lives_total, dtype=INT)
+        self.deaths = np.full((self.total,), 0, dtype=INT)
         self.scores = np.full((self.total,), 0, dtype=INT)
         self.true_scores = np.full((self.total,), 0, dtype=INT)
         self.disqualified = np.full((self.total,), False, dtype=BOOL)
@@ -40,6 +42,7 @@ class Players(object):
     def reset(self, total: int | list[int]):
         self.total = total
         self.lives = np.full((self.total,), self.lives_total, dtype=INT)
+        self.deaths = np.full((self.total,), 0, dtype=INT)
         self.scores = np.full((self.total,), 0, dtype=INT)
         self.true_scores = np.full((self.total,), 0, dtype=INT)
         self.disqualified = np.full((self.total,), False, dtype=BOOL)
@@ -73,6 +76,7 @@ class Players(object):
         too_long = hiatus >= self.max_hiatus
         died = hit_wall | hit_self | too_long
         self.lives[died] -= 1
+        self.deaths[died] += 1
         self.lives = np.clip(self.lives, 0, self.lives_total)
         self.disqualified[died] = True
         self.fitness[died] = 0. # Because their grids are reset immediately after and before calculating reward
@@ -89,16 +93,16 @@ class Players(object):
 
         self.prev_fitness = self.fitness.copy()
         # Food reward
-        self.fitness[ate_food] += 1000 * (self.lives + 1)[ate_food]
+        self.fitness[ate_food] += 200 * (self.lives + 1)[ate_food]
         # Death penalty
-        self.fitness[died] -= 1000 * (self.lives_total - self.lives + 1)[died]
+        self.fitness[died] -= 50 * (self.deaths + 1)[died]
         # Distance shaping
-        self.fitness[moved_closer] += 1 * distances[moved_closer]
-        self.fitness[~moved_closer] -= 1 * (distances)[~moved_closer] #  * _hiatus
+        self.fitness[moved_closer] += 1 * ((self.true_scores + 1) * (1.0 - distances))[moved_closer]
+        self.fitness[~moved_closer] -= 1 + (self.deaths * distances)[~moved_closer] #  * _hiatus
         # # Small penalty proportional to distance
-        self.fitness[active] -= 0.1 * (distances * _hiatus)[active]
+        # self.fitness[active] -= 0.1 * (distances * _hiatus)[active]
         # # Inactivity / looping penalty
-        self.fitness[inactive] -= 0.1 * self.frames_done[inactive]
+        # self.fitness[inactive] -= 0.1 * self.frames_done[inactive]
         # Game completion
         self.fitness[completed] += 100000
         self.completed[completed] |= True

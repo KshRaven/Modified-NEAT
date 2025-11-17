@@ -169,6 +169,160 @@ CONFIG.load(verbose=2)
 
 The same pattern is used in `examples/snake/main.py` with slightly different hyperparameters.
 
+### 3.3. Configuration reference
+
+Below is a reference for each configuration section and field. Unless otherwise stated, values are floats.
+
+#### GeneralConfig (`config.general`)
+
+- **`fitness_criterion`**
+  - What: Aggregation used when computing the global fitness for stopping and reporting.
+  - Allowed: `'max'`, `'min'`, `'mean'`.
+  - Notes: Used in `Population` and `Reproduction` to sort/select genomes; wrong values will raise `ValueError`.
+- **`fitness_threshold`**
+  - What: Target aggregated fitness at which evolution terminates early.
+  - Allowed: Any real number. Default: `math.inf` (effectively disables threshold termination).
+  - Notes: If `fitness_criterion(…) >= fitness_threshold` for all genera, `Population.run` stops.
+- **`pop_size`**
+  - What: Intended nominal population size.
+  - Allowed: Positive integer (e.g. `10`–`1000`+). Default: `100`.
+  - Notes: Currently used mainly in legacy CPU/GPU reproduction helpers; effective size is driven by how you instantiate `Population` (`Population(genomes=GENOMES, ...)`). Keep `pop_size` close to that value for consistency.
+- **`reset_on_extinction`**
+  - What: Whether to automatically create a fresh population if all species go extinct.
+  - Allowed: `True` or `False`.
+  - Notes: If `False`, complete extinction raises `CompleteExtinctionException`. If `True`, the population is re‑initialized with the current config.
+- **`seed`**
+  - What: Random seed used in CUDA/CPU initialization kernels.
+  - Allowed: Integer in `[0, 2**31 - 1]` (practically any non‑negative `int`).
+  - Notes: Defaults to a random value; set manually for reproducible runs.
+
+#### GenomeConfig (`config.genome`)
+
+Weights (and, by analogy in some examples, biases) share a common pattern:
+
+- **`weight_init_mean`**
+  - What: Mean of the initial weight distribution.
+  - Typical: `0.0`.
+  - Notes: Used along with `weight_init_std` when initializing NEAT parameters.
+- **`weight_init_std`**
+  - What: Standard deviation of the initial weight distribution.
+  - Typical: `0.1`–`2.0` depending on task.
+  - Constraint: Non‑negative.
+- **`weight_max_value` / `weight_min_value`**
+  - What: Hard clamp bounds on weights after mutation.
+  - Typical: `-math.inf`, `+math.inf` (no clamp), or finite symmetric bounds like `[-30, 30]`.
+  - Notes: Choose finite bounds if you want to keep parameters numerically stable.
+- **`weight_mutate_power`**
+  - What: Magnitude of weight perturbations during mutation.
+  - Typical: `1e-2`–`1.0`.
+  - Constraint: Non‑negative; larger values produce more aggressive changes.
+- **`weight_mutate_rate`**
+  - What: Probability that a given weight is perturbed on mutation.
+  - Range: `[0.0, 1.0]`.
+  - Typical: Around `0.5`–`0.8` in examples.
+- **`weight_replace_rate`**
+  - What: Probability of completely re‑initializing a weight instead of perturbing it.
+  - Range: `[0.0, 1.0]`.
+  - Typical: `0.0`–`0.15`.
+- **`weight_add_prob` / `weight_del_prob`**
+  - What: Structural mutation rates (adding/removing connections), when structural mutations are enabled.
+  - Range: `[0.0, 1.0]`.
+  - Notes: Many examples keep these at `0.0` (structure fixed) and only evolve values.
+- **`param_epsilon`**
+  - What: Small epsilon used in some numerical operations to avoid division by zero.
+  - Typical: `1e-6`–`1e-9`.
+
+Genome compatibility (for speciation):
+
+- **`compatibility_disjoint_coefficient`**
+  - What: Weight given to disjoint / excess genes when computing distance between genomes.
+  - Typical: `1.0`.
+  - Constraint: Non‑negative; larger values penalize topological differences more strongly.
+- **`compatibility_weight_coefficient`**
+  - What: Weight given to parameter differences (same connection/node, different value).
+  - Typical: `0.1`–`0.5`.
+  - Notes: Larger values emphasize weight mismatch over structure.
+
+Other genome settings:
+
+- **`init_type`**
+  - What: Name of the initialization regime used by the kernels.
+  - Allowed: Currently `'normal'` (aligned with existing initializers).
+- **`single_structural_mutation`**
+  - What: Whether to limit each mutation step to at most one structural change.
+  - Allowed: `True` or `False`.
+  - Notes: When `True`, helps keep topology changes gradual.
+
+> **Bias parameters**: Some CPU/GPU kernels and examples reference `bias_init_mean`, `bias_init_std`, `bias_min_value`, `bias_max_value`, `bias_mutate_power`, `bias_mutate_rate`, `bias_replace_rate`. These follow the same meaning and typical ranges as the `weight_*` counterparts, but are applied to bias tensors.
+
+#### SpeciesConfig (`config.species`)
+
+- **`compatibility_threshold`**
+  - What: Maximum allowed genetic distance for a genome to join an existing species.
+  - Allowed:
+    - Numeric (int/float): fixed threshold.
+    - String `'auto'`: automatically adapted based on distance statistics (see `ModifiedNEAT.species.get_ct`).
+  - Typical: `3.0` in neat‑style configs, `math.inf` when you want a single giant species.
+  - Notes: Lower values → more, smaller species; higher values → fewer, broader species.
+
+#### StagnationConfig (`config.stagnation`)
+
+- **`species_fitness_func`**
+  - What: Aggregation for per‑species fitness when checking stagnation.
+  - Allowed: `'max'`, `'min'`, `'mean'`.
+  - Notes: Invalid values raise `ValueError`.
+- **`max_stagnation`**
+  - What: Number of generations a species is allowed to go without improvement before being marked stagnant.
+  - Allowed: Non‑negative integer.
+  - Typical: Small integer (e.g. `1`–`20`), depending on how quickly you want to prune species.
+- **`species_elitism`**
+  - What: Minimum number of top species that are never marked stagnant, even if they do not improve.
+  - Allowed: Non‑negative integer.
+  - Notes: Prevents complete collapse to a single species due to temporary plateaus.
+
+#### ReproductionConfig (`config.reproduction`)
+
+- **`elitism`**
+  - What: Number of top genomes per species copied unchanged into the next generation.
+  - Allowed: Integer `>= 0`.
+  - Typical: `2`–`30` depending on population size.
+  - Notes: Effective minimum species size is `max(min_species_size, elitism)`.
+- **`clone_threshold`**
+  - What: Fraction of top genomes in a species that can be copied directly (cloned) without crossover.
+  - Range: `[0.0, 1.0]` (internally clipped to at most `0.75`).
+  - Notes: Higher values → more pure cloning; lower values → more crossover.
+- **`survival_threshold`**
+  - What: Fraction of genomes per species eligible to become parents.
+  - Range: `(0.0, 1.0]`.
+  - Typical: `0.2`.
+  - Notes: At least 2 parents are always used, even if this fraction would give fewer.
+- **`cross_threshold`**
+  - What: Lower bound on the fraction of offsprings produced via crossover vs cloning.
+  - Range: `[0.0, 1.0]`.
+  - Notes: Small positive values encourage some crossover; `0.0` means crossover is optional.
+- **`cross_multiplier`**
+  - What: Strength of bias towards fitter parents during crossover selection.
+  - Typical: `0.5`–`1.0`.
+  - Notes: Passed as a multiplier into parent selection; larger values emphasize high‑fitness parents.
+- **`darwin_multiplier`**
+  - What: Multiplier used when sampling parents based on fitness in some reproduction kernels.
+  - Typical: `0.1`–`1.0`.
+  - Notes: Larger values sharpen the probability differences between high‑ and low‑fitness genomes.
+- **`min_species_size`**
+  - What: Minimum spawn size per species when allocating the next generation.
+  - Allowed: Integer `>= 1`.
+  - Typical: Set close to `GENOMES` (total population size) for experiments that maintain one large species per genus, or much smaller if you expect many species.
+  - Notes: Effective value is `max(min_species_size, elitism)`.
+- **`purge`**
+  - What: When `> 0`, every `purge` generations all species are temporarily forced to exactly `min_species_size` individuals.
+  - Allowed: Integer `>= 0` (`0` disables purging).
+  - Notes: Can be used as a periodic reset to avoid species blow‑up.
+- **`preserve_elite`**
+  - What: Whether elites are guaranteed to be preserved during certain GPU reproduction flows.
+  - Allowed: `True` or `False`.
+
+> **Tip:** Start from the Pong or Snake example config values and change **one group** of parameters at a time (e.g., only `weight_mutate_*`, or only `compatibility_*`) so you can see how each group influences training behavior.
+
 ---
 
 ## 4. Basic usage: evolving a population

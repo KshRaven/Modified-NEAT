@@ -86,7 +86,7 @@ def check_collision(array: CPUArray, mask: CPUArray, value: int) -> CPUArray[tup
     assert np.all(collisions < 2)
     return collisions.astype(bool)
 
-def get_distance(positions0: list[tuple[int, int] | None], positions1: list[tuple[int, int] | None], split=False):
+def get_rel_distance(positions0: list[tuple[int, int] | None], positions1: list[tuple[int, int] | None], split=False):
     if len(positions0) != len(positions1):
         raise ValueError(f"Invalid position lists")
     total = len(positions0)
@@ -108,6 +108,36 @@ def get_distance(positions0: list[tuple[int, int] | None], positions1: list[tupl
                 distance[p, 0] = x1 - x0
                 distance[p, 1] = y1 - y0
     return distance if not split else (distance[..., 0], distance[..., 1])
+
+@njit
+def calc_collision_distance(player_grid_mask: CPUArray, index: int, axis: int, position: int, velocity: int):
+    assert player_grid_mask.ndim == 2
+    if velocity != 0:
+        array = np.take(player_grid_mask, index, axis=axis)
+        array = array[(position + velocity)::velocity]
+        if np.any(array):
+            return np.argmax(array) + 1
+    return 0.
+
+def get_lim_distance(grid_mask: CPUArray, positions: list[tuple[int, int] | None], velocities: CPUArray):
+    total = len(grid_mask)
+    if total != len(positions) or total != len(velocities):
+        raise ValueError(f"Invalid player counts")
+    distance: CPUArray[tuple[int], float] = np.full((total,), 0., dtype=np.float64)
+    for p in prange(total):
+        position = positions[p]
+        if position is None:
+            # distance[p] = np.nan
+            raise ValueError("Cannot have a missing coordinate when calculating limit distance")
+        else:
+            stack = [] # Get both axes and return max distance since only one axis will have a value that is non-zero
+            for axis, value in enumerate(position): # x = axis 0, y = axis 1
+                counter_axis = 1 - axis # The axis to reduce
+                counter_index = position[counter_axis] # The coordinate/index on the axis to get a 1D array from
+                dist = calc_collision_distance(grid_mask[p], counter_index, counter_axis, value, round(velocities[p, axis].item()))
+                stack.append(abs(dist))
+            distance[p] = max(stack)
+    return distance
 
 # @jitclass([
 #     ('MAX_VEL', FLOAT),
@@ -131,6 +161,7 @@ class Grid(object):
             shape: tuple[int, int],
             init_direction: int | None = None,
             init_length: int = 1,
+            timeout: int = 100,
     ):
         if init_direction is None:
             init_direction = random.randint(0, 3)
@@ -140,15 +171,17 @@ class Grid(object):
             assert size > init_length * 2
         self.INIT_DIR = int(init_direction)
         self.INIT_LEN = init_length
+        self.TIMEOUT = timeout
 
         self.players = players
         self.total = self.players.total
         self.shape = shape
         self.width, self.height = shape
-        self.max_distance = math.sqrt(self.width ** 2 + self.height ** 2)
+        self.max_rel_distance = math.sqrt(self.width ** 2 + self.height ** 2)
         self.init_x, self.init_y = self.width // 2 + 1, self.height // 2 + 1
         self.factor_x = round(np.cos(0.5 * math.pi * self.INIT_DIR))
         self.factor_y = round(np.sin(0.5 * math.pi * self.INIT_DIR))
+
         self.grid = np.full(
             (self.total, self.width+2, self.height+2),
             fill_value=GridEnum.Empty.value, dtype=np.int64
@@ -195,6 +228,9 @@ class Grid(object):
         # Recreate masks if necessary and food locations
         if complete:
             self.total = self.players.total
+            self.INIT_DIR = random.randint(0, 3)
+            self.factor_x = round(math.cos(0.5 * math.pi * self.INIT_DIR))
+            self.factor_y = round(math.sin(0.5 * math.pi * self.INIT_DIR))
             self.grid = np.full(
                 (self.total, self.width+2, self.height+2),
                 fill_value=GridEnum.Empty.value, dtype=np.int64
@@ -208,7 +244,7 @@ class Grid(object):
             self.boundary_mask = np.full_like(self.grid, fill_value=False, dtype=bool)
             player_indices = np.arange(self.players.total)
             limits = [list(range(dim_size)) for dim_size in self.grid.shape[1:]]
-            for dim in prange(2):
+            for dim in prange(self.grid.ndim - 1):
                 indices = [
                     np.array(indices if dim_idx == dim else [0, -1])
                     for dim_idx, indices in enumerate(limits)
@@ -224,6 +260,7 @@ class Grid(object):
             self.grid[:]                    = GridEnum.Empty.value
             self.grid[self.boundary_mask]   = GridEnum.Boundary.value
             self.grid[self.head_mask]       = GridEnum.SnakeHead.value
+            self.direction[:]               = self.INIT_DIR
             self.snake_length[:]            = self.INIT_LEN
             self.hiatus[:]                  = 0
             self.prev_distance[:]           = 1.0 # self.max_distance
@@ -232,6 +269,7 @@ class Grid(object):
             self.grid[_restart]                      = GridEnum.Empty.value
             self.grid[_restart & self.boundary_mask] = GridEnum.Boundary.value
             self.grid[_restart & self.head_mask]     = GridEnum.SnakeHead.value
+            self.direction[restart]                  = self.INIT_DIR
             self.snake_length[restart]               = self.INIT_LEN
             self.hiatus[restart]                     = 0
             self.prev_distance[restart]              = 1.0 # self.max_distance
@@ -263,7 +301,7 @@ class Grid(object):
             raise ValueError(f"A player has a snake with no body or index not within limits")
         return self.grid == index
 
-    def move(self, action: CPUArray[tuple[int], int], convolutional: bool = True, verbose: int | bool = True):
+    def move(self, action: CPUArray[tuple[int], int], convolutional: bool = True, verbose: int | bool = False):
         grid, prev_grid = self.grid, self.grid.copy()
         movement = action - 1 # Should be integer in interval [-1, +1]
         head, tail = self.get_body_mask(0), self.get_body_mask(-1)
@@ -311,10 +349,12 @@ class Grid(object):
         if verbose:
             if np.any(body_collision | wall_collision | food_collision):
                 paused = True
-        self._set_food(food_collision) # Place new food when eaten
+        move_food = self.hiatus % self.TIMEOUT == 0
+        grid[food_mask & _no_food_collision & (move_food[:, None, None])] = GridEnum.Empty.value
+        self._set_food(food_collision | move_food) # Place new food when eaten
         new_food_positions = get_positions(grid == GridEnum.Food.value)
 
-        distances = get_distance(new_head_positions, new_food_positions) / self.max_distance
+        distances = get_rel_distance(new_head_positions, new_food_positions) / self.max_rel_distance
         distances[np.isnan(distances)] = 1.0 # self.max_distance
         moved_closer = (self.prev_distance - distances) > 0
         self.prev_distance = distances.copy()
@@ -331,13 +371,14 @@ class Grid(object):
             self.debug_grid_state(grid, prev_grid)
 
         if not convolutional:
-            dist_x, dist_y = get_distance(new_head_positions, new_food_positions, True)
-            dist_x[np.isnan(dist_x)] = self.width
-            dist_y[np.isnan(dist_y)] = self.height
-            dist_x, dist_y = dist_x / self.width, dist_y / self.height
-            dir_x, dir_y = np.cos(0.5 * np.pi * self.direction).round(), np.sin(0.5 * np.pi * self.direction).round()
-            scalars = [dist_x, dist_y, dir_x, dir_y]
+            grid = self.grid
+            # TODO: Attempt to scale values between -1 and 1
+            # dir_x, dir_y = np.cos(0.5 * np.pi * self.direction).round(), np.sin(0.5 * np.pi * self.direction).round()
+            snake_dir = self.direction / 3
 
+            base = [snake_dir]
+            food = []
+            goal = []
             danger = []
             # just_died = wall_collision | body_collision
             # not_just_died = ~just_died
@@ -346,50 +387,69 @@ class Grid(object):
             pseudo_food_mask = grid == GridEnum.Food.value
             _pseudo_body_mask = (grid >= GridEnum.SnakeHead.value) # Get fake old body locations
             pseudo_head, pseudo_tail = self.get_body_mask(0), self.get_body_mask(-1)
-            _new_head_positions = get_positions(pseudo_head)
+            pseudo_old_head_positions = get_positions(pseudo_head)
+            pseudo_food_positions = get_positions(pseudo_food_mask)
+            dim_dist_max = max(self.width, self.height)
             for t in range(3):
-                temp_grid = self.grid.copy()
-                direction = self.direction.copy() - (t-1)
-                direction[direction == -1] = 3
-                direction[direction == +4] = 0
-                pseudo_head_positions = get_new_positions(_new_head_positions, direction)
-                fault = set_positions(
-                    temp_grid, pseudo_head_positions, GridEnum.SnakeHead.value, None, validation=False
+                pseudo_grid = self.grid.copy()
+                pseudo_direction = self.direction.copy() - (t-1)
+                pseudo_direction[pseudo_direction == -1] = 3
+                pseudo_direction[pseudo_direction == +4] = 0
+                pseudo_components = np.stack([
+                    np.cos(0.5 * np.pi * pseudo_direction).round(), np.sin(0.5 * np.pi * pseudo_direction).round()
+                ], axis=-1)
+                pseudo_head_positions = get_new_positions(pseudo_old_head_positions, pseudo_direction)
+                fault = set_positions( # Move the snake head first 
+                    pseudo_grid, pseudo_head_positions, GridEnum.SnakeHead.value, None, validation=False
                 ) # NOTE: active -> not_just_died -> None
                 if fault is not None:
                     index, e = fault
                     print(f"\n\nFaulty index = {index}")
-                    print(f"Current position = {_new_head_positions[index]}")
+                    print(f"Current position = {pseudo_old_head_positions[index]}")
                     print(f"Check position = {pseudo_head_positions[index]}")
-                    print(f"Direction = {direction[index]}")
+                    print(f"Direction = {pseudo_direction[index]}")
                     print(f"Action = {t}")
                     print(f"Died = {(body_collision | wall_collision)[index]}")
                     print(f"Disq = {self.players.disqualified[index]}")
                     print(f"Lives = {self.players.lives[index]}")
                     print(f"Grid = \n", grid[index])
-                    print(f"Pseudo grid = \n", temp_grid[index])
+                    print(f"Pseudo grid = \n", pseudo_grid[index])
                     raise e
 
-                pseudo_food_collision = check_collision(temp_grid, pseudo_food_mask, GridEnum.SnakeHead.value)
+                food_dist = get_rel_distance(pseudo_head_positions, pseudo_food_positions, False)
+                food_dist[np.isnan(food_dist)] = self.max_rel_distance
+                food_dist /= self.max_rel_distance
+
+                goal_dist = get_lim_distance(pseudo_food_mask, pseudo_old_head_positions, pseudo_components)
+                goal_dist /= dim_dist_max
+
+                pseudo_food_collision = check_collision(pseudo_grid, pseudo_food_mask, GridEnum.SnakeHead.value)
                 _pseudo_food_collision = pseudo_food_collision[:, None, None]
 
                 pseudo_body_mask = _pseudo_body_mask.copy() # Get copy since it might be modified
-                pseudo_new_head = temp_grid == GridEnum.SnakeHead.value # Get the 2 head locations
-                temp_grid[pseudo_body_mask & (~pseudo_new_head)] += 1 # Update body excluding if head on body
-                temp_grid[pseudo_new_head] = GridEnum.SnakeBody.value # Set first body part
+                # pseudo_new_head = pseudo_grid == GridEnum.SnakeHead.value # Get the 2 head locations
+                # pseudo_grid[pseudo_body_mask & (~pseudo_new_head)] += 1 # Update body excluding if head on body
+                # pseudo_grid[pseudo_new_head] = GridEnum.SnakeBody.value # Set first body part
                 pseudo_tail_moved = pseudo_tail & (~_pseudo_food_collision)
-                temp_grid[pseudo_tail_moved & (~pseudo_new_head)] = GridEnum.Empty.value # Update tail if not eaten
+                # pseudo_grid[pseudo_tail_moved & (~pseudo_new_head)] = GridEnum.Empty.value # Update tail if not eaten
                 pseudo_body_mask[pseudo_tail_moved] = False # Update tail in mask
 
-                _body_collision = check_collision(temp_grid, pseudo_body_mask, GridEnum.SnakeHead.value)
-                _wall_collision = check_collision(temp_grid, boundary_mask, GridEnum.SnakeHead.value)
+                # _body_collision = check_collision(pseudo_grid, pseudo_body_mask, GridEnum.SnakeHead.value)
+                # _wall_collision = check_collision(pseudo_grid, boundary_mask, GridEnum.SnakeHead.value)
 
-                dir_danger = (_body_collision | _wall_collision).astype(float)
-                dir_danger[pseudo_food_collision] = -1
-                # dir_danger[just_died] = -1
-                danger.append(dir_danger)
+                full_mask = pseudo_body_mask | boundary_mask
+                danger_dist = get_lim_distance(full_mask, pseudo_old_head_positions, pseudo_components)
+                danger_dist /= dim_dist_max
 
-            result = scalars + danger
+                # dir_danger = (_body_collision | _wall_collision).astype(float)
+                # dir_danger[pseudo_food_collision] = -1
+                # # dir_danger[just_died] = -1
+
+                food.append(food_dist)
+                goal.append(goal_dist)
+                danger.append(danger_dist)
+
+            result = base + food + goal + danger
             return result
         else:
             normalized_grid = (self.grid - GridEnum.Food.value) / GridEnum.Food.value * 2

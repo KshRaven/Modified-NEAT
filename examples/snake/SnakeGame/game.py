@@ -97,9 +97,9 @@ class Game(Env):
         self.shape = window_shape
         self.window = Window(*window_shape, options.get('blob', 20))
 
-        self.players = Players(lives)
+        self.players = Players(lives, options.get('max_frames', 500))
 
-        self.grid = Grid(self.players, self.shape, options.get('init_dir', 1), options.get('init_len', 3))
+        self.grid = Grid(self.players, self.shape, options.get('init_dir', 1), options.get('init_len', 3), options.get('timeout', 200))
 
         self.backend = Backend(self.window, self.players, self.grid, options.get('blob', 20))
 
@@ -111,7 +111,7 @@ class Game(Env):
         normal = state_type != 'grid'
         self.observation_space = spaces.Box(
             low=-np.inf if normal else 0, high=np.inf if normal else int(math.prod(window_shape)),
-            shape=(7,) if normal else (1, *self.grid.shape[1:]),
+            shape=(10,) if normal else (1, *self.grid.shape[1:]),
             dtype=np.float64 if normal else np.int64
         )
         self.action_space = spaces.Discrete(3)
