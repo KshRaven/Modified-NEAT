@@ -111,7 +111,7 @@ class Game(Env):
         normal = state_type != 'grid'
         self.observation_space = spaces.Box(
             low=-np.inf if normal else 0, high=np.inf if normal else int(math.prod(window_shape)),
-            shape=(7,) if normal else (1, *self.grid.shape[1:]),
+            shape=(10,) if normal else (1, *self.grid.shape[1:]),
             dtype=np.float64 if normal else np.int64
         )
         self.action_space = spaces.Discrete(3)
