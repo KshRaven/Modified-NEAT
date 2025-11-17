@@ -156,7 +156,7 @@ class BaseModel(mn.Model):
 
 ENV: Game | None = None
 MODEL: BaseModel | None = None
-FILE_NO: int | None = 90
+FILE_NO: int | None = None
 INIT_GEN: int = 0
 
 SAFE_GENOMES = []
@@ -248,7 +248,6 @@ def test_best_network(set_key: int = None):
             probs = [g.fitness for g in ranking if g.fitness is not None]
             if len(probs) >= 2:
                 probs = np.array(probs)
-                probs[np.isnan(probs)] = np.min(probs[~np.isnan(probs)])
                 try:
                     probs = (probs - probs.min()) / (probs.max() - probs.min())
                     probs = probs / probs.sum()
@@ -277,7 +276,7 @@ def test_best_network(set_key: int = None):
                 next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
                 states = next_states
                 ENV.render()
-                ENV.clock.tick(60)
+                ENV.clock.tick(120)
                 print(f"\r"
                       f"Frames = {ENV.players.frames_done.max().item()}, "
                       f"Lives = {ENV.players.lives.mean().item()}, "
@@ -308,8 +307,7 @@ if __name__ == '__main__':
     GOAL    = 1000
     LIVES   = 3
     ENV     = Game(WINDOW, GOAL, 3, LIVES, init_len=4, blob=30,
-                   state_type='grid' if CONVOLUTIONAL else 'continuous',
-                   max_frames=500, timeout=200,)
+                   state_type='grid' if CONVOLUTIONAL else 'continuous')
 
     CONFIG = neat.Config('original', 'snake')
     CONFIG.genome.init_type                 = 'normal'
@@ -367,7 +365,7 @@ if __name__ == '__main__':
     INIT_GEN = POPULATION.generation
 
     # Training parameters
-    EPOCHS          = 200
+    EPOCHS          = 300
     MEMORY_SIZE     = 10
     GAMMA           = math.exp(math.log(0.33) / 256)
     ALPHA           = fix(np.exp(np.log(1.75) / (MEMORY_SIZE - 1)), 1.0)
@@ -394,6 +392,6 @@ if __name__ == '__main__':
     #     max_episodes=MEMORY_SIZE,
     # )
     #
-    # TRAINER.learn(eval_genomes, GOAL * 2, None, 256, 0.05, 'continuous', 3)
+    # TRAINER.learn(eval_genomes, GOAL * 2, EPOCHS, 256, 0.05, 'continuous', 3)
 
     test_best_network(set_key=None)
