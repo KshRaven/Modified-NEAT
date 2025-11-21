@@ -53,7 +53,7 @@ class Players(object):
 
     def restart(self):
         self.scores[self.disqualified] = 0
-        self.frames_done[self.disqualified] = 0
+        # self.frames_done[self.disqualified] = 0
         self.fitness[self.disqualified] = 0
         self.prev_fitness[self.disqualified] = 0
         self.disqualified[self.disqualified] = False
@@ -71,7 +71,7 @@ class Players(object):
 
     def update(self,
                ate_food: CPUArray, hit_wall: CPUArray, hit_self: CPUArray, completed: CPUArray,
-               distances: CPUArray, hiatus: CPUArray, moved_closer: CPUArray,
+               distances: CPUArray, hiatus: CPUArray, moved_closer: CPUArray, low_action_usage: CPUArray,
                verbose=False):
         too_long = hiatus >= self.max_hiatus
         died = hit_wall | hit_self | too_long
@@ -84,21 +84,27 @@ class Players(object):
         inactive = ~active
         if np.any(np.isnan(distances)): # [active]
             raise ValueError("An active player cannot have an NaN distance value")
-        _hiatus = np.clip(hiatus, 1, None)
         # _moved_closer_p = active & moved_closer
         # _moved_closer_n = active & (~moved_closer)
         self.scores[ate_food] += 1
         better = self.scores > self.true_scores
         self.true_scores[better] = self.scores[better]
 
+        _lives = self.lives + 1
+        _deaths = self.deaths + 1
+        _scores = self.true_scores + 1
+        _hiatus = hiatus + 1
+
         self.prev_fitness = self.fitness.copy()
         # Food reward
-        self.fitness[ate_food] += 200 * (self.lives + 1)[ate_food]
+        self.fitness[ate_food] += 200 * (_lives * (self.scores + 1))[ate_food]
         # Death penalty
-        self.fitness[died] -= 50 * (self.deaths + 1)[died]
+        self.fitness[died] -= 50 * _deaths[died]
         # Distance shaping
-        self.fitness[moved_closer] += 1 * ((self.true_scores + 1) * (1.0 - distances))[moved_closer]
-        self.fitness[~moved_closer] -= 1 + (self.deaths * distances)[~moved_closer] #  * _hiatus
+        self.fitness[moved_closer] += 1 * (_lives * _scores * (1.0 - distances))[moved_closer]
+        self.fitness[~moved_closer] -= 0.01 + (_deaths * distances * _hiatus)[~moved_closer] #
+        # Penalty for looping or spiralling
+        self.fitness[low_action_usage] -= 0.01 * (hiatus * _deaths)[low_action_usage]
         # # Small penalty proportional to distance
         # self.fitness[active] -= 0.1 * (distances * _hiatus)[active]
         # # Inactivity / looping penalty

@@ -89,21 +89,28 @@ class Game(Env):
     .reset().
     """
 
-    def __init__(self, window_shape: tuple[int, int], max_frames=200, max_factor=3, lives=5, state_type='grid',
-                 render_mode: str | None = 'human', **options):
+    def __init__(
+            self,
+            window_shape: tuple[int, int], state_type='grid',
+            render_mode: str | None = 'human', **options
+    ):
         self.render_mode = render_mode
         self.clock = pygame.time.Clock()
 
         self.shape = window_shape
         self.window = Window(*window_shape, options.get('blob', 20))
 
-        self.players = Players(lives, options.get('max_frames', 500))
+        self.max_frames = options.get('max_frames', 500)
+        self.players = Players(options.get('lives', 3), options.get('max_hiatus', 3))
 
-        self.grid = Grid(self.players, self.shape, options.get('init_dir', 1), options.get('init_len', 3), options.get('timeout', 200))
+        self.grid = Grid(
+            self.players, self.shape,
+            options.get('init_dir', 1), options.get('init_len', 3),
+            options.get('timeout', None), options.get('var_thresh', 0.05)
+        )
 
         self.backend = Backend(self.window, self.players, self.grid, options.get('blob', 20))
 
-        self.max_frames = max_frames
         self.previous_rewards: CPUArray | None = None
 
         self.state_type = state_type
@@ -136,7 +143,7 @@ class Game(Env):
 
         self.previous_rewards = self.players.fitness.copy()
 
-        raw_states = self.grid.move(np.zeros((self.players.total,), dtype=int), self.convolutional)
+        raw_states = self.grid.move(np.random.randint(low=0, high=3, size=(self.players.total,)), self.convolutional)
         states: CPUArray = np.expand_dims(raw_states, axis=1) if self.convolutional else np.stack(raw_states, axis=-1)
 
         return states, {}

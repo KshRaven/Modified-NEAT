@@ -161,7 +161,8 @@ class Grid(object):
             shape: tuple[int, int],
             init_direction: int | None = None,
             init_length: int = 1,
-            timeout: int = 100,
+            timeout: int | None = 100,
+            var_thresh: float | None = 0.15,
     ):
         if init_direction is None:
             init_direction = random.randint(0, 3)
@@ -172,6 +173,7 @@ class Grid(object):
         self.INIT_DIR = int(init_direction)
         self.INIT_LEN = init_length
         self.TIMEOUT = timeout
+        self.VAR_THRESH = var_thresh
 
         self.players = players
         self.total = self.players.total
@@ -186,10 +188,12 @@ class Grid(object):
             (self.total, self.width+2, self.height+2),
             fill_value=GridEnum.Empty.value, dtype=np.int64
         )
+        self.player_indices = np.arange(self.total)
         self.food_locations: list[tuple[int, int]] | None = None
         self.boundary_mask = np.full_like(self.grid, fill_value=False, dtype=bool)
         self.head_mask = np.full_like(self.grid, fill_value=False, dtype=bool)
-        self.direction: CPUArray[tuple[int], int] = np.full(self.total, fill_value=self.INIT_DIR, dtype=int)
+        self.direction = np.full(self.total, fill_value=self.INIT_DIR, dtype=int)
+        self.action_count = np.full((self.total, 3), fill_value=0, dtype=int)
         self.snake_length = np.full((self.total,), fill_value=self.INIT_LEN, dtype=int)
         self.hiatus = np.full((self.total,), fill_value=0, dtype=int)
         self.prev_distance: CPUArray = np.full((self.total,), fill_value=1.0, dtype=float)
@@ -235,7 +239,9 @@ class Grid(object):
                 (self.total, self.width+2, self.height+2),
                 fill_value=GridEnum.Empty.value, dtype=np.int64
             )
-            self.direction: CPUArray[tuple[int], int] = np.full(self.total, fill_value=self.INIT_DIR, dtype=int)
+            self.player_indices = np.arange(self.total)
+            self.direction = np.full(self.total, fill_value=self.INIT_DIR, dtype=int)
+            self.action_count = np.full((self.total, 3), fill_value=0, dtype=int)
             self.snake_length = np.full((self.total,), fill_value=self.INIT_LEN, dtype=int)
             self.hiatus = np.full((self.total,), fill_value=0, dtype=int)
             self.prev_distance = np.full((self.total,), fill_value=1.0, dtype=float)
@@ -261,6 +267,7 @@ class Grid(object):
             self.grid[self.boundary_mask]   = GridEnum.Boundary.value
             self.grid[self.head_mask]       = GridEnum.SnakeHead.value
             self.direction[:]               = self.INIT_DIR
+            self.action_count[:]            = 0
             self.snake_length[:]            = self.INIT_LEN
             self.hiatus[:]                  = 0
             self.prev_distance[:]           = 1.0 # self.max_distance
@@ -349,17 +356,27 @@ class Grid(object):
         if verbose:
             if np.any(body_collision | wall_collision | food_collision):
                 paused = True
-        move_food = self.hiatus % self.TIMEOUT == 0
-        grid[food_mask & _no_food_collision & (move_food[:, None, None])] = GridEnum.Empty.value
-        self._set_food(food_collision | move_food) # Place new food when eaten
-        new_food_positions = get_positions(grid == GridEnum.Food.value)
+        if self.TIMEOUT is not None:
+            move_food = (self.hiatus % self.TIMEOUT) == 0
+            grid[food_mask & _no_food_collision & (move_food[:, None, None])] = GridEnum.Empty.value
+            self._set_food(food_collision | move_food) # Place new food when eaten
+            new_food_positions = get_positions(grid == GridEnum.Food.value)
+
+        self.action_count[self.player_indices, action] += 1
+        if self.VAR_THRESH is not None:
+            max_count = self.action_count.max(axis=-1)  # shape: (players,)
+            thresholds = np.ceil(max_count * self.VAR_THRESH)  # shape: (players,)
+            low_action_usage = (self.action_count < thresholds[:, None]).any(axis=-1)
+        else:
+            low_action_usage = np.zeros_like(self.hiatus, dtype=bool)
 
         distances = get_rel_distance(new_head_positions, new_food_positions) / self.max_rel_distance
         distances[np.isnan(distances)] = 1.0 # self.max_distance
         moved_closer = (self.prev_distance - distances) > 0
         self.prev_distance = distances.copy()
         self.players.update(
-            food_collision, wall_collision, body_collision, self.completed, distances, self.hiatus, moved_closer
+            food_collision, wall_collision, body_collision, self.completed,
+            distances, self.hiatus, moved_closer, low_action_usage,
         ) # , True)
 
         # TODO: Restart immediately after player update because of getting the next state
@@ -440,6 +457,7 @@ class Grid(object):
                 full_mask = pseudo_body_mask | boundary_mask
                 danger_dist = get_lim_distance(full_mask, pseudo_old_head_positions, pseudo_components)
                 danger_dist /= dim_dist_max
+                goal_dist[danger_dist < goal_dist] *= -1
 
                 # dir_danger = (_body_collision | _wall_collision).astype(float)
                 # dir_danger[pseudo_food_collision] = -1

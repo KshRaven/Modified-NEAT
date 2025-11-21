@@ -244,7 +244,7 @@ def test_best_network(set_key: int = None):
             def sort_key(genome: neat.Genome):
                 fitness = genome.fitness
                 return fitness if fitness is not None else -math.inf, genome.key
-            ranking = sorted(genomes, key=sort_key, reverse=True)[:3]
+            ranking = sorted(genomes, key=sort_key, reverse=True)[:10]
             probs = [g.fitness for g in ranking if g.fitness is not None]
             if len(probs) >= 2:
                 probs = np.array(probs)
@@ -276,7 +276,7 @@ def test_best_network(set_key: int = None):
                 next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
                 states = next_states
                 ENV.render()
-                ENV.clock.tick(120)
+                ENV.clock.tick(60)
                 print(f"\r"
                       f"Frames = {ENV.players.frames_done.max().item()}, "
                       f"Lives = {ENV.players.lives.mean().item()}, "
@@ -302,12 +302,19 @@ if __name__ == '__main__':
     local_dir = os.path.dirname(__file__)
     config_path = os.path.join(local_dir, 'config.txt')
 
-    GENOMES = 100
-    WINDOW  = (30, 30)
-    GOAL    = 1000
-    LIVES   = 3
-    ENV     = Game(WINDOW, GOAL, 3, LIVES, init_len=4, blob=30,
-                   state_type='grid' if CONVOLUTIONAL else 'continuous')
+    GENOMES     = 100
+    WINDOW      = (30, 30)
+    INIT_LEN    = 4
+    BLOB_SIZE   = 15
+    MAX_FRAMES  = 3000
+    MAX_HIATUS  = 500
+    TIMEOUT     = math.inf
+    LIVES       = 5
+    ENV = Game(
+        WINDOW, blob=BLOB_SIZE,
+        lives=LIVES, init_len=INIT_LEN, max_frames=MAX_FRAMES, max_hiatus=MAX_HIATUS, timeout=TIMEOUT,
+        state_type='grid' if CONVOLUTIONAL else 'continuous',
+    )
 
     CONFIG = neat.Config('original', 'snake')
     CONFIG.genome.init_type                 = 'normal'
@@ -325,7 +332,7 @@ if __name__ == '__main__':
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
     CONFIG.reproduction.clone_threshold     = 0.05
-    CONFIG.reproduction.survival_threshold  = 0.20
+    CONFIG.reproduction.survival_threshold  = 0.10
     CONFIG.reproduction.cross_threshold     = 0.00
     CONFIG.reproduction.elitism             = 30
     CONFIG.species.compatibility_threshold  = math.inf
@@ -365,33 +372,33 @@ if __name__ == '__main__':
     INIT_GEN = POPULATION.generation
 
     # Training parameters
-    EPOCHS          = 300
-    MEMORY_SIZE     = 10
-    GAMMA           = math.exp(math.log(0.33) / 256)
-    ALPHA           = fix(np.exp(np.log(1.75) / (MEMORY_SIZE - 1)), 1.0)
+    EPOCHS          = 200
+    MEMORY_SIZE     = 5
+    GAMMA           = math.exp(math.log(0.33) / 512)
+    ALPHA           = fix(np.exp(np.log(1.10) / (MEMORY_SIZE - 1)), 1.0)
     ALPHA_ORDER     = 2
     REW_NORM        = 2
 
-    # TRAINER = neat.NEAT(
-    #     POPULATION,
-    #     schedulers=[
-    #         # neat.optim.scheduler.RandomAnnealing(config, 1e-1, 1e-0, 5, ['weight_init_std', 'weight_mutate_power'], True),
-    #         neat.optim.scheduler.CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
-    #         # neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_replace_rate', True, True),
-    #         # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_add_prob', True, True),
-    #         # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_del_prob', True, True),
-    #     ],
-    #     device=DEVICE, dtype=DTYPE,
-    #     log_sub_dir='snake-original\\',
-    #     log_name=f"{unix_to_datetime_file(clock.time())}_"
-    #              f"e{EMBED_SIZE}-l{LAYERS}--b{int(BIAS)}-"
-    #              f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
-    #              f"rn{REW_NORM}-p{round(0.0, 4)}",
-    #     gamma=GAMMA, alpha=ALPHA, order=ALPHA_ORDER, normalize=REW_NORM,
-    #     rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
-    #     max_episodes=MEMORY_SIZE,
-    # )
-    #
-    # TRAINER.learn(eval_genomes, GOAL * 2, EPOCHS, 256, 0.05, 'continuous', 3)
+    TRAINER = neat.NEAT(
+        POPULATION,
+        schedulers=[
+            # neat.optim.scheduler.RandomAnnealing(config, 1e-1, 1e-0, 5, ['weight_init_std', 'weight_mutate_power'], True),
+            neat.optim.scheduler.CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
+            # neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_replace_rate', True, True),
+            # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_add_prob', True, True),
+            # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_del_prob', True, True),
+        ],
+        device=DEVICE, dtype=DTYPE,
+        log_sub_dir='snake-original\\',
+        log_name=f"{unix_to_datetime_file(clock.time())}_"
+                 f"e{EMBED_SIZE}-l{LAYERS}--b{int(BIAS)}-"
+                 f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
+                 f"rn{REW_NORM}-p{round(0.0, 4)}",
+        gamma=GAMMA, alpha=ALPHA, order=ALPHA_ORDER, normalize=REW_NORM,
+        rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
+        max_episodes=MEMORY_SIZE,
+    )
+
+    TRAINER.learn(eval_genomes, MAX_FRAMES * 2, EPOCHS, 256, 0.05, 'continuous', 3)
 
     test_best_network(set_key=None)
