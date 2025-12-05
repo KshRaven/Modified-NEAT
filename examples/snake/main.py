@@ -375,6 +375,7 @@ if __name__ == '__main__':
     EPOCHS          = 200
     MEMORY_SIZE     = 5
     GAMMA           = math.exp(math.log(0.33) / 512)
+    KAPPA           = math.exp(math.log(0.33) / 128)
     ALPHA           = fix(np.exp(np.log(1.10) / (MEMORY_SIZE - 1)), 1.0)
     ALPHA_ORDER     = 2
     REW_NORM        = 2
@@ -394,7 +395,7 @@ if __name__ == '__main__':
                  f"e{EMBED_SIZE}-l{LAYERS}--b{int(BIAS)}-"
                  f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
                  f"rn{REW_NORM}-p{round(0.0, 4)}",
-        gamma=GAMMA, alpha=ALPHA, order=ALPHA_ORDER, normalize=REW_NORM,
+        gamma=GAMMA, kappa=KAPPA, alpha=ALPHA, order=ALPHA_ORDER, normalize=REW_NORM,
         rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
         max_episodes=MEMORY_SIZE,
     )

@@ -49,7 +49,8 @@ class NEAT(Algorithm):
         self.score_idx = 0
 
         # Options
-        self.gamma: float       = manage_params(options, 'gamma', 0.99)
+        self.gamma: float       = manage_params(options, 'gamma', 0.97)
+        self.kappa: float       = manage_params(options, 'kappa', 0.87)
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
         self.order: int         = manage_params(options, 'order', 0)
         self.normalize: int     = manage_params(options, 'normalize', 2)
@@ -230,7 +231,7 @@ class NEAT(Algorithm):
 
                 # Compute returns
                 ts = clock.perf_counter()
-                returns_current = self.compute_returns(rewards, self.gamma, 1.0, 0, False, episode_mapping)
+                returns_current = self.compute_returns(rewards, self.gamma, self.kappa, 1.0, 0, False, episode_mapping)
                 ret_comp_time = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"computed primary returns in {CM(f'{round(ret_comp_time, 2)}s', Fore.LIGHTCYAN_EX)}")
@@ -293,7 +294,7 @@ class NEAT(Algorithm):
                 if verbose and verbose >= 2:
                     print(f"fetched secondary data in {CM(f'{round(sec_fetch_time, 2)}s', Fore.LIGHTCYAN_EX)}")
                 ts = clock.perf_counter()
-                returns = self.compute_returns(returns, 0, self.alpha, self.order, self.normalize, full_mapping)
+                returns = self.compute_returns(returns, 0, 0, self.alpha, self.order, self.normalize, full_mapping)
                 ret_comp_time2 = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"computed secondary returns in {CM(f'{round(ret_comp_time2, 2)}s', Fore.LIGHTCYAN_EX)}")

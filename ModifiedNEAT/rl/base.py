@@ -338,8 +338,10 @@ class Algorithm(object):
 
     @staticmethod
     def compute_returns_static(
-            rewards: TensorDict, gamma: float = 0.99, alpha: float = 1.00, order=0, normalize: int = 1,
-            episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None):
+            rewards: TensorDict,
+            gamma: float = 0.97, kappa: float = 0.87, alpha: float = 1.00, order=0, normalize: int = 1,
+            episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None
+    ):
         if -1 >= order > 6:
             raise ValueError(f"Invalid alpha order: '{order}'")
 
@@ -435,12 +437,12 @@ class Algorithm(object):
                 scores = torch.mean(rewards_.view(rewards_.shape[0], -1), dim=-1)
                 episodes_ = torch.tensor(episodes_, device=scores.device, dtype=scores.dtype)
                 _, episode_ranking = torch.sort(scores, descending=False if order in [2, 4] else True) # Ensure the best is last
-                rewards_ = rewards_[episode_ranking]
+                rewards_ = rewards_[episode_ranking] # If episodes are re-ordered, ensures the same on the rewards
                 episodes_ = episodes_[episode_ranking].tolist()
             assert key == c_key
-            rewards_to_go = []
             idx = episodes_[-1]
-            discounted_reward: Tensor = 0.
+            prop_past_reward: Tensor = 0.
+            prop_future_reward: Tensor = 0.
             ep_total = len(np.unique(episodes_))
             ep_factors = list(range(ep_total))[::(-1 if order not in [1,] else +1)]
 
@@ -461,40 +463,65 @@ class Algorithm(object):
                         raise e
             ep_factor = ep_factors.pop(get_ai(ep_factors))
 
-            # if ep_total >= 5:
-            #     pass
-            for reward, ep_idx in reversed(list(zip(rewards_, episodes_))):
-                if idx != ep_idx:
-                    discounted_reward = 0.
-                    try:
-                        ep_factor = ep_factors.pop(get_ai(ep_factors))
-                    except Exception as e:
-                        print(ep_factors)
-                        print(get_ai(ep_factors))
-                        raise e
-                    if ep_total >= 5:
-                        pass
-                if alpha is not None and alpha > 1.0:
-                    # TODO: Should length factor be re-enabled?
+            # Handle Alpha
+            if alpha is not None and alpha > 1.0:
+                # TODO: Reverse the listing of ep_factors
+                for index, (reward, ep_idx) in reversed(list(enumerate(zip(rewards_, episodes_)))):
+                    if idx != ep_idx:
+                        try:
+                            ep_factor = ep_factors.pop(get_ai(ep_factors))
+                        except Exception as e:
+                            print(ep_factors)
+                            print(get_ai(ep_factors))
+                            raise e
+                    # TODO: Should length factor be re-enabled for Alpha?
                     # ep_len = len([e for e in episodes_ if e == ep_idx])
                     # len_factor = 1 # ep_len / max_ep_len
                     # diff = alpha - 1.0
-                    reward = reward * (alpha ** ep_factor) # ((1.0 + (diff * len_factor)) ** ep_factor)
-                if gamma != 0:
+                    rewards_[index] = reward * (alpha ** ep_factor) # ((1.0 + (diff * len_factor)) ** ep_factor)
+                    idx = ep_idx
+
+            # Handle Gamma
+            rtg_gamma = []
+            discounted_reward: Tensor | float = 0.
+            if gamma > 0:
+                for reward, ep_idx in reversed(list(zip(rewards_, episodes_))):
+                    if idx != ep_idx:
+                        discounted_reward = 0.
                     discounted_reward = reward + (discounted_reward * gamma)
-                else:
-                    discounted_reward = reward
-                rewards_to_go.insert(0, discounted_reward)
-                idx = ep_idx
-            cm = torch.stack(rewards_to_go).to(rewards_.device, rewards_.dtype)
+                    rtg_gamma.insert(0, discounted_reward)
+                    idx = ep_idx
+            rtg_gamma = torch.stack(rtg_gamma).to(rewards_.device, rewards_.dtype) if len(rtg_gamma) > 0 else None
+
+            # Handle Kappa
+            rtg_kappa = []
+            discounted_reward: Tensor | float = 0.
+            if kappa > 0:
+                for reward, ep_idx in zip(rewards_, episodes_):
+                    if idx != ep_idx:
+                        discounted_reward = 0.
+                    discounted_reward = reward + (discounted_reward * gamma)
+                    rtg_kappa.append(discounted_reward)
+                    idx = ep_idx
+            rtg_kappa = torch.stack(rtg_kappa).to(rewards_.device, rewards_.dtype) if len(rtg_kappa) > 0 else None
+
+            if rtg_gamma is not None and rtg_kappa is not None:
+                rewards_to_go = (rtg_gamma + rtg_kappa) / 2
+            elif rtg_gamma is not None:
+                rewards_to_go = rtg_gamma
+            elif rtg_kappa is not None:
+                rewards_to_go = rtg_kappa
+            else:
+                rewards_to_go = rewards_.clone()
             if device is not None:
-                cm = cm.to(device=device)
-            returns[key] = cm
+                rewards_to_go = rewards_to_go.to(device=device)
+            returns[key] = rewards_to_go
         return returns
 
-    def compute_returns(self, rewards: TensorDict, gamma: float = 0.99, alpha: float = 1.00, order=0,
+    def compute_returns(self, rewards: TensorDict,
+                        gamma: float = 0.97, kappa: float = 0.87, alpha: float = 1.00, order=0,
                         normalize=False, episodes: dict[int, list[int]] = None, device: torch.device = None):
-        return self.compute_returns_static(rewards, gamma, alpha, order, normalize, episodes, device, self)
+        return self.compute_returns_static(rewards, gamma, kappa, alpha, order, normalize, episodes, device, self)
 
     def get_accuracy(self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
                      rewards: TensorDict = None, error=0.10, type='continuous', verbose: int = None,

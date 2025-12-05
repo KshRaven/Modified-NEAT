@@ -5,7 +5,7 @@ fitness_criterion                        = max ~ str
 fitness_threshold                        = inf ~ float
 pop_size                                 = 100 ~ int
 reset_on_extinction                      = True ~ bool
-seed                                     = 1045203 ~ int
+seed                                     = 166140 ~ int
 
 [GENOME CONFIG]
 weight_init_mean                         = 0.0 ~ float
