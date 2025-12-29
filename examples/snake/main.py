@@ -98,9 +98,9 @@ class BaseModel(mn.Model):
         return self.get_policy(state, keys=keys, **kwargs)
 
     def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
-        mean_std        = self.pol_proj(latent, keys=keys)
+        mean_std = self.pol_proj(latent, keys=keys)
         if self.distribution != 'discrete':
-            mean, log_std   = torch.chunk(mean_std, 2, -1)
+            mean, log_std = torch.chunk(mean_std, 2, -1)
             # mean            = F.sigmoid(mean) * 4 + -2
             # std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
             std = torch.exp(log_std)

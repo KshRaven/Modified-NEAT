@@ -406,7 +406,7 @@ class Algorithm(object):
         global_min, global_max = [
             g([f(r).cpu().item() for r in rewards.values()])
             for f, g in zip([torch.min, torch.max], [np.min, np.max])
-        ] if normalize in [2, 3] else (None, None)
+        ] if normalize in [2, 3, 4] else (None, None)
         # if normalize:
         #     try:
         #         self._global_mean = global_mean = fetch(self._global_mean, global_mean, max)
@@ -424,12 +424,17 @@ class Algorithm(object):
         # ]).item()
         returns: TensorDict = {}
         for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):
+            # Normalize using mean and std_dev
             if normalize == 1 and global_std != 0.0:
                 rewards_ = (rewards_ - global_mean) / (global_std + 1e-9)
+            # Normalize between [0, 1] or [-1, 1]
             elif normalize in [2, 3] and (global_max - global_min) != 0.0:
                 rewards_ = (rewards_ - global_min) / (global_max - global_min)
                 if normalize == 3:
                     rewards_ = -1 + 2 * rewards_
+            # Normalize by removing negative values
+            elif normalize == 4:
+                rewards_ = rewards_ - global_min
             if order in [2, 3, 4, 5]:
                 if len(rewards_) != len(episodes_):
                     raise ValueError(f"Number of rewards (scores) must be equal to number of episodes for key '{key}' "
