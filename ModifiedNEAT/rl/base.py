@@ -339,7 +339,7 @@ class Algorithm(object):
     @staticmethod
     def compute_returns_static(
             rewards: TensorDict,
-            gamma: float = 0.97, kappa: float = 0.87, alpha: float = 1.00, order=0, normalize: int = 1,
+            gamma: float = 0.97, kappa: float = 0.00, alpha: float = 1.00, order=0, normalize: int = 1,
             episodes: dict[int, list[int]] = None, device: torch.device = None, self: 'Algorithm' = None
     ):
         if -1 >= order > 6:
@@ -524,7 +524,7 @@ class Algorithm(object):
         return returns
 
     def compute_returns(self, rewards: TensorDict,
-                        gamma: float = 0.97, kappa: float = 0.87, alpha: float = 1.00, order=0,
+                        gamma: float = 0.97, kappa: float = 0.00, alpha: float = 1.00, order=0,
                         normalize=False, episodes: dict[int, list[int]] = None, device: torch.device = None):
         return self.compute_returns_static(rewards, gamma, kappa, alpha, order, normalize, episodes, device, self)
 

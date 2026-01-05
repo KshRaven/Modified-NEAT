@@ -949,7 +949,7 @@ config.species.compatibility_threshold      = np.inf
 config.stagnation.max_stagnation            = 1
 config.stagnation.species_elitism           = 2
 config.reproduction.darwin_multiplier       = 0.50
-config.reproduction.cross_multiplier        = 0.90
+config.reproduction.cross_multiplier        = 0.50
 config.reproduction.preserve_elite          = False
 config.save()
 config.load(2)

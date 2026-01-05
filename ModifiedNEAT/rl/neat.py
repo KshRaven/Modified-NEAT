@@ -50,7 +50,7 @@ class NEAT(Algorithm):
 
         # Options
         self.gamma: float       = manage_params(options, 'gamma', 0.97)
-        self.kappa: float       = manage_params(options, 'kappa', 0.87)
+        self.kappa: float       = manage_params(options, 'kappa', 0.00)
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
         self.order: int         = manage_params(options, 'order', 0)
         self.normalize: int     = manage_params(options, 'normalize', 2)

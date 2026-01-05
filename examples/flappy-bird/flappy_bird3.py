@@ -5,6 +5,7 @@ from ModifiedNEAT.nn.base import Model
 from ModifiedNEAT.nn.modules.sub import Linear, Conv1d, Transpose, ResidualBlock, Sequential, GroupNorm, ConverBase, SequenceEncoding
 # from ModifiedNEAT.nn.modules import Reformer
 from ModifiedNEAT.util.datetime import unix_to_datetime_file
+from ModifiedNEAT.util.qol import manage_params
 from Models import AutoEncoder
 
 import ModifiedNEAT as neat
@@ -74,40 +75,106 @@ class BaseModel(Model):
     def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
         return self.get_policy(state, keys=keys, **kwargs)
 
-    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
+    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
         mean_std        = self.pol_proj(latent, keys=keys)
         mean, log_std   = torch.chunk(mean_std, 2, -1)
-        mean            = F.sigmoid(mean) * 6 + -3
-        std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
+        # mean            = F.sigmoid(mean) * 6 + -3
+        # std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
+        std = torch.exp(log_std) if self.probabilistic else None
         return mean, std
-
-    def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
-        latent      = self.projection(state, keys=keys)
-        mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
-        action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)
-        log_prob    = dist.log_prob(action)
-        return action, log_prob
-
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None) -> Union[Tensor, Union[Tensor, None]]:
-        latent      = self.projection(state, keys=keys)
-        mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
-        log_prob    = dist.log_prob(action)
-        entropy     = dist.entropy()
-        return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
-        action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)
+        action      = torch.sigmoid(
+            (mean + (std * torch.randn_like(std)))
+            if options.get('normal', self.probabilistic) else
+            mean
+        )
         return action
 
-    # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
-    #     latent      = self.projection(state, keys=keys)
-    #     value       = self.val_proj(latent, keys=keys)
-    #     return value
+
+class BaseModelSequential(Model):
+    def __init__(self, max_seq_len: int, inputs: int, outputs: int, dim_size: int, layers: int,
+                 heads: int, kv_heads: int | None = None, differential: int | bool = False, fwd_exp=1,
+                 activation: mn.NeatModule | nn.Module = nn.SiLU(), probabilistic=False, bias=True,
+                 device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options):
+        super().__init__()
+        # Attributes
+        self.max_seq_len    = max_seq_len
+        self.inputs         = inputs
+        self.outputs        = outputs
+        self.dim_size       = dim_size
+        self.layers         = max(1, layers)
+        self.distribution   = manage_params(options, ['dist', 'distribution'], 'mult_var_normal')
+        self.probabilistic  = probabilistic
+        self.clip_min       = manage_params(options, 'clip_min', -5)
+        self.clip_max       = manage_params(options, 'clip_max', -1)
+        self.clip_range     = self.clip_max - self.clip_min
+        self.constant       = manage_params(options, 'constant', 10_000)
+
+        # Build
+        self.projection = mn.Sequential(*[
+            mn.BufferEmbedding(inputs, dim_size, True, 'continuous', device, dtype),
+            # mn.BufferEncoding(max_seq_len, dim_size, True, 'continuous', device, dtype),
+        ])
+        self.transformer = mn.TransformerBase(
+            max_seq_len, dim_size, layers, heads, kv_heads, differential, True, bias, device, dtype,
+            residual=True, normalize=True, epsilon=1e-9, fwd_exp=fwd_exp, constant=self.constant
+        )
+        self.pol_proj = mn.Sequential(*[
+            mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+            activation,
+            mn.Linear(dim_size, 2*(outputs ** (2 if self.distribution == 'discrete' else 1)), True, device, dtype)
+        ])
+
+    def extra_repr(self) -> str:
+        return f"probabilistic={self.probabilistic}, distro='{self.distribution}'"
+
+    def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
+        return self.get_policy(state, keys=keys, **kwargs)
+
+    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
+        mean_std        = self.pol_proj(latent, keys=keys)
+        mean, log_std   = torch.chunk(mean_std, 2, -1)
+        # mean            = F.tanh(mean) # * 4 + -2
+        # std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
+        std = torch.exp(log_std)
+        return mean, std
+
+    def _get(self, tensor: Tensor, keys: int | list[int] | None = None, verbose: int | bool = False):
+        tensor = self.projection(tensor, keys=keys) # Embed | Encode the tensor
+        tensor = self.transformer(tensor, keys=keys, single=True, verbose=verbose) # Pass through Tx blocks
+        return tensor.squeeze(-2) # Remove the seq_len dimension
+
+    def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
+        assert 5 >= state.ndim >= 3
+        squeeze = state.ndim == 3 # Assumes no batch dim: (genomes, seq_len, features)
+        if squeeze:
+            state = state.unsqueeze(1)
+        unflatten = state.ndim == 5 # Assumes inputs are pre-stacked: (genomes, records, batch_size, seq_len, features)
+        batch_shape = state.shape[1:3]
+        if unflatten:
+            state = state.flatten(1, 2)
+        # Expected shape (genomes, batch_size, seq_len, features)
+        latent      = self._get(state, keys=keys)
+        mean, std   = self.get_mean_std(latent, keys=keys)
+        # distribution = self.dist(mean, std if options.get('normal', self.probabilistic) else None)
+        # action      = distribution.sample()
+        if options.get('normal', self.probabilistic):
+            action = mean + (std * torch.randn_like(std))
+        else:
+            action = mean
+        if self.distribution == 'discrete':
+            action = torch.argmax(action, dim=-1)
+        else:
+            action = torch.sigmoid(action)
+        # Expected shape (genomes, *batch_size, *features)
+        if squeeze:
+            action = action.squeeze(1)
+        if unflatten:
+            action = action.unflatten(1, batch_shape)
+        return action
 
 
 def fix(value: float, default: float = 1):
@@ -118,12 +185,17 @@ def fix(value: float, default: float = 1):
 
 
 # GAME SETTINGS
+SPAWN_WIDTH     = 200
+GAP_OFFSET      = 30
+GAP_SIZE        = (200, 200)
 PIPE_Y_VELOCITY = 3
-FULL_STATES = True
-DELAY = 0
+FULL_STATES     = True
+DELAY           = 0
+USE_AE          = False
+SEQUENTIAL      = True
 
 # AutoEncoder properties
-MAX_SEQ_LEN     = 16
+MAX_SEQ_LEN     = 3
 A_INPUTS        = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
 A_OUTPUTS       = 4
 A_OFFSET        = 0
@@ -148,7 +220,8 @@ AUTOENCODER = AutoEncoder(
     DIFFERENTIAL, BIAS, DEVICE, DTYPE,
     outputs=A_OUTPUTS, stride=STRIDE, probabilistic=PROBABILISTIC, out_bias=False,
 )
-AUTOENCODER.load(SAVE_NAME, None, 'autoencoders', 'flappy-bird\\test', True)
+if USE_AE:
+    AUTOENCODER.load(SAVE_NAME, None, 'autoencoders', 'flappy-bird\\test', True)
 AUTOENCODER.eval()
 AUTOENCODER.requires_grad_(False)
 AUTOENCODER.single_mode(True)
@@ -157,50 +230,64 @@ AUTOENCODER.single_mode(True)
 # Model properties
 GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
-INPUTS              = A_OUTPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
+INPUTS              = A_OUTPUTS if USE_AE else A_INPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
 OUTPUTS             = 1
 EMBED_SIZE          = 32
 COEFFICIENTS        = 1
-LAYERS              = 2
+LAYERS              = 1
+FWD_EXP             = 2
 ENABLE_BIAS         = True
 PROBABILISTIC       = False
-MEMORY_SIZE         = 10
-GAMMA               = np.exp(np.log(0.33) / 128)
-ALPHA               = fix(np.exp(np.log(1.20) / (MEMORY_SIZE - 1)), 1.0)
-ALPHA_ORDER         = 2
-REW_NORM            = 2
+CONSTANT            = 100
+MEMORY_SIZE         = 5
+GAMMA               = np.exp(np.log(0.10) / 128)
+ALPHA               = fix(np.exp(np.log(2.50) / (MEMORY_SIZE - 1)), 1.0)
+KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
+ALPHA_ORDER         = 0
+REW_NORM            = 3
 LOSS_REG            = 0.
 ACTIVATION          = nn.Tanh()
 CLIP_MIN            = -5
 CLIP_MAX            = -0
 DISTRIBUTION        = 'normal'
 
-MODEL0 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, ACTIVATION, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
-MODEL1 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, nn.ReLU(), PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
-MODEL2 = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS, nn.SiLU(), PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE, clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION)
+if SEQUENTIAL:
+    MODELS = [
+        BaseModelSequential(
+            SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS, DIFFERENTIAL, FWD_EXP,
+            activation, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE,
+            clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION, constant=CONSTANT,
+        )
+        for activation in [ACTIVATION, nn.ReLU(), nn.SiLU()]
+    ]
+else:
+    MODELS = [
+        BaseModel(
+            INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
+            activation, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE,
+            clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
+        )
+        for activation in [ACTIVATION, nn.ReLU(), nn.SiLU()]
+    ]
 
-# GAME SETTINGS
-SPAWN_WIDTH = 200
-GAP_OFFSET = 30
-GAP_SIZE = (200, 200)
-
+MODEL0, MODEL1, MODEL2 = MODELS
 
 INIT_GEN: int = None
 
 RUNS = 1
 GOAL = 20
 STEPS = GOAL * 100 * RUNS
-EPOCHS = 100
+EPOCHS = 150
 
 print(f"creating config")
-config = neat.Config()
+config = neat.Config('flappy_bird')
 
 config.genome.init_type                 = 'normal'
 config.genome.weight_init_mean          = 0.0
-config.genome.weight_init_std           = 1.0
+config.genome.weight_init_std           = 1.5
 config.genome.weight_min_value          = -np.inf
 config.genome.weight_max_value          = +np.inf
-config.genome.weight_mutate_power       = 1e-1
+config.genome.weight_mutate_power       = 6e-1
 config.genome.weight_mutate_rate        = 0.50
 config.genome.weight_replace_rate       = 0.00
 config.genome.weight_add_prob           = 0.00
@@ -216,8 +303,8 @@ config.reproduction.elitism             = 30
 config.species.compatibility_threshold  = np.inf
 config.stagnation.max_stagnation        = 1
 config.stagnation.species_elitism       = 2
-config.reproduction.darwin_multiplier   = 0.30
-config.reproduction.cross_multiplier    = 0.50
+config.reproduction.darwin_multiplier   = 0.25
+config.reproduction.cross_multiplier    = 0.25
 config.reproduction.preserve_elite      = False
 config.save()
 config.load(2)
@@ -244,7 +331,7 @@ def evaluate(population: neat.Population, **options):
     MODEL0.train()
     while not terminate:
         env = Game(
-            population.size, goal=GOAL, seq_len=SEQ_LEN,
+            population.size, goal=GOAL, seq_len=SEQ_LEN if SEQUENTIAL else None,
             height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
             spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
             delay=DELAY,
@@ -262,11 +349,13 @@ def evaluate(population: neat.Population, **options):
         done = False
         while not done:
             with torch.no_grad():
+                DEBUG_DATA = step == DEBUG_STEP and population.generation == INIT_GEN
+
                 # Get Inputs ~ send bird location, top pipe location and bottom pipe location
                 # and determine from network whether to jump or not
-                # states = AUTOENCODER(states.to(DEVICE, DTYPE), single=False)[:, -1 - DELAY]
-                states = AUTOENCODER(states.to(DEVICE, DTYPE))
-                DEBUG_DATA = step == DEBUG_STEP and population.generation == INIT_GEN
+                if USE_AE:
+                    # states = AUTOENCODER(states.to(DEVICE, DTYPE), single=False)[:, -1 - DELAY]
+                    states = AUTOENCODER(states.to(DEVICE, DTYPE))
                 if DEBUG_DATA:
                     print(f"\nobservations =>\n{states}\n\tshape = {states.shape}")
 
@@ -307,15 +396,15 @@ def evaluate(population: neat.Population, **options):
                 observations0, observations1, observations2 = torch.split(
                     states, [len(mapping0), len(mapping1), len(mapping2)], dim=0
                 )
-                actions0, probs = MODEL0.get_action(observations0[indices0].unsqueeze(1), keys=keys0)
-                actions1, probs = MODEL1.get_action(observations1[indices1].unsqueeze(1), keys=keys1)
-                actions2, probs = MODEL2.get_action(observations2[indices2].unsqueeze(1), keys=keys2)
+                actions0 = MODEL0.get_policy(observations0[indices0].unsqueeze(1), keys=keys0)
+                actions1 = MODEL1.get_policy(observations1[indices1].unsqueeze(1), keys=keys1)
+                actions2 = MODEL2.get_policy(observations2[indices2].unsqueeze(1), keys=keys2)
                 # shape(seq_len=1, genomes, features_out)
-                actions0, actions1, actions2, probs = actions0.squeeze(1), actions1.squeeze(1), actions2.squeeze(1), probs.squeeze(1)
+                actions0, actions1, actions2 = actions0.squeeze(1), actions1.squeeze(1), actions2.squeeze(1)
                 if DEBUG_DATA:
-                    MODEL0.get_policy(observations0[indices0].unsqueeze(1), keys=None, verbose=True)
+                    MODEL0.get_policy(observations0[indices0].unsqueeze(1), keys=keys0, verbose=True)
                     print(f"actions =>\n{actions0}\n\tshape = {actions0.shape}")
-                    print(f"probs =>\n{probs}\n\tshape = {probs.shape}")
+                    # print(f"probs =>\n{probs}\n\tshape = {probs.shape}")
 
                 # Pad dead bird actions
                 if True:
@@ -383,7 +472,8 @@ def evaluate(population: neat.Population, **options):
         print(f"Buffer multiplier = {MEMORY_SIZE}")
         print(f"Mapping = {trainer.episode_mapping}")
         print(f"Lengths = {trainer.episode_lengths}")
-        print(f"Episodes = {trainer.primary.episodes()}")
+        print(f"Episodes Primary = {trainer.primary.episodes()}")
+        print(f"Episodes Secondary = {trainer.secondary.episodes()}")
         print("----------------------------------------------------------------------------")
 
         l_lim, u_lim = 10, env.floor.y * 1.05
@@ -435,10 +525,9 @@ def run():
     population2 = neat.Population(GENOMES, MODEL2, config, init_reporter=True)
     population.absorb_population(population1)
     population.absorb_population(population2)
-    print(MODEL0.pol_proj)
     # population.load_dict(name='flappy_bird', file_no=None)
 
-    TRAIN = True
+    TRAIN = False
     if TRAIN:
         trainer = neat.rl.NEAT(
             population,
@@ -457,7 +546,7 @@ def run():
                      f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
                      f"rn{REW_NORM}-p{round(LOSS_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
                      f"delay{DELAY}",
-            gamma=GAMMA, alpha=ALPHA, order=ALPHA_ORDER, normalize=REW_NORM,
+            gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
             rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
             max_episodes=MEMORY_SIZE,
         )
@@ -473,7 +562,7 @@ def run():
         population.load_dict(name='flappy_bird', file_no=None)
 
     env = Game(
-        population.size, goal=50, seq_len=SEQ_LEN,
+        population.size, goal=50, seq_len=SEQ_LEN if SEQUENTIAL else None,
         height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
         delay=DELAY,
@@ -487,18 +576,23 @@ def run():
         states = env.reset()[0]
         ts = clock.perf_counter()
         while not done:
-            # states = AUTOENCODER(states.to(DEVICE, DTYPE), single=False)[:, [-1 - DELAY]]
-            states = AUTOENCODER(states.to(DEVICE, DTYPE)).unsqueeze(1)
+            # Get states
+            if USE_AE:
+                # states = AUTOENCODER(states.to(DEVICE, DTYPE), single=False)[:, [-1 - DELAY]]
+                states = AUTOENCODER(states.to(DEVICE, DTYPE)).unsqueeze(1)
+            else:
+                states = states.unsqueeze(1)
+
             # Get actions
             with torch.no_grad():
                 observations0, observations1, observations2 = torch.split(
                     states, [len(mapping0), len(mapping1), len(mapping2)], dim=0
                 )
-                actions0, probs = MODEL0.get_action(observations0)
-                actions1, probs = MODEL1.get_action(observations1)
-                actions2, probs = MODEL2.get_action(observations2)
-                actions0, actions1, actions2, probs = \
-                    actions0.squeeze(1), actions1.squeeze(1), actions2.squeeze(1), probs.squeeze(1)
+                actions0 = MODEL0.get_policy(observations0)
+                actions1 = MODEL1.get_policy(observations1)
+                actions2 = MODEL2.get_policy(observations2)
+                actions0, actions1, actions2 = \
+                    actions0.squeeze(1), actions1.squeeze(1), actions2.squeeze(1)
             actions = torch.cat([actions0, actions1, actions2[..., :OUTPUTS]], dim=0)
 
             # Get rewards

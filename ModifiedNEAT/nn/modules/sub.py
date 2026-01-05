@@ -371,7 +371,7 @@ class RoPE(NeatModule):
         self.complex_frequencies = self._generate_encoding(max_seq_len, embed_size // heads, constant, 0)
         self.complex_frequencies = self.complex_frequencies.to(device=device).unsqueeze(0).unsqueeze(1).unsqueeze(-2)
         # EMBEDDING - [genomes, 1, sequence, embed_size]
-        self.select = torch.arange(max_seq_len, device=device, dtype=torch.int32)
+        self.select = torch.arange(max_seq_len, device=device, dtype=torch.long)
 
         # ATTRIBUTES
         self.max_seq_len = max_seq_len
@@ -383,8 +383,8 @@ class RoPE(NeatModule):
         self.device: DEVICE = device
         self.dtype: DTYPE   = dtype
 
-    @staticmethod
-    def _generate_encoding(seq_length: int, head_dim: int, constant: float = 10000.0, verbose: int = None):
+    # @staticmethod
+    def _generate_encoding(self, seq_length: int, head_dim: int, constant: float = 10000.0, verbose: int = None):
         # Dimensions of embedding must be even
         assert head_dim % 2 == 0, f"Head dimension must be divisible by 2"
         # Get theta where theta_i = 10000 ^ (-2 * (i-1) / embedding) for i = [1, 2, ..., dim / 2]; [head_dim / 2]
@@ -392,7 +392,7 @@ class RoPE(NeatModule):
         # Get positions as m; [sequence]
         positions   = torch.arange(seq_length)
         # Multiply theta by each position; [sequence] outer* [head_dim / 2] -> [sequence, head_dim / 2]
-        angles      = torch.outer(positions, theta).float()
+        angles      = torch.outer(positions, theta).to(dtype=self.conv_dtype)
         # We compute complex number in polar form c = R * exp(i * m * theta); [sequence, head_dim / 2]
         complex_f   = torch.polar(torch.ones_like(angles), angles)
         if verbose:
@@ -538,7 +538,7 @@ class Attention(NeatModule):
 
         # OPTIONS
         self.auto_single    = manage_params(options, 'auto_single', False)
-        self.constant       = manage_params(options, 'constant', 10000)
+        self.constant       = manage_params(options, 'constant', 10_000)
         self.epsilon        = manage_params(options, ['eps', 'epsilon'], 1e-9)
         self.affine         = manage_params(options, 'affine', True)
         self.skip_connection = manage_params(options, ['skip_connection', 'residual'], True)
@@ -561,7 +561,7 @@ class Attention(NeatModule):
         self.causal_mask = causal_mask
 
         # MODULES
-        self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
+        self.pre_norm = LayerNorm(dim_size, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
         self.mult = 1+differential if differential else 1
         self.query_proj = Linear(dim_size if not inputs else inputs, heads*self.head_dim*self.mult, bias, device, dtype)
         self.key_proj   = Linear(dim_size if not inputs else inputs, kv_heads*self.head_dim*self.mult, bias, device, dtype)
@@ -571,8 +571,8 @@ class Attention(NeatModule):
         self.transpose  = Transpose() if self.stride is not None else None
         self.rotary_embedding = RoPE(self.max_seq_len, dim_size * self.mult, heads, self.constant, device, dtype)
         self.softmax    = nn.Softmax(-1)
-        self.head_norm  = RMSNorm(self.head_dim, self.epsilon, self.affine, device, dtype) if self.normalize else None
-        # self.head_norm  = RMSNorm(self.head_dim, self.epsilon, False, device, dtype)
+        self.head_norm  = LayerNorm(self.head_dim, self.epsilon, self.affine, bias,  device, dtype) if self.normalize else None
+        # self.head_norm  = LayerNorm(self.head_dim, self.epsilon, False, device, dtype)
         self.diff_lambda = AttentionLambda(
             heads, self.head_dim, layer_idx, differential, 0.0, 0.1, 2.0, True, self.epsilon, device, dtype
         ) if differential else None
@@ -649,8 +649,9 @@ class Attention(NeatModule):
         if self.auto_single and pretext is None:
             pretext = tensor.select(-1, -1).unsqueeze(-1)
         if pos_idx is not None:
-            pos_idx = self.max_seq_len + pos_idx if pos_idx < 0 else pos_idx
-            assert 0 <= pos_idx < self.max_seq_len
+            seq_len = tensor.shape[-2]
+            pos_idx = (seq_len + pos_idx) if pos_idx < 0 else pos_idx
+            assert 0 <= pos_idx < seq_len
         if verbose:
             print(f'\n{CM("Executing Self Attention", Fore.LIGHTBLUE_EX)}')
             print(get_tensor_info(tensor, f'Input', verbose, Fore.LIGHTRED_EX))
@@ -674,8 +675,6 @@ class Attention(NeatModule):
             print(get_tensor_info(key, 'Key', verbose, Fore.LIGHTGREEN_EX))
             print(get_tensor_info(value, 'Value', verbose, Fore.LIGHTBLUE_EX))
 
-        # batch_size, q_seq_len = query.shape[:2]
-
         # Reshape Q, K, V for each rep head
         g, b, s, d = query.shape
         query   = query.view(g, b, s, self.heads, self.head_dim*self.mult)
@@ -687,7 +686,7 @@ class Attention(NeatModule):
 
         # Apply Rotary Embeddings
         query = self.rotary_embedding(query, pos_idx, verbose)
-        key   = self.rotary_embedding(key, None)
+        key   = self.rotary_embedding(key, pos_idx)
         if verbose:
             print(get_tensor_info(query, 'Q after Rotary Embedding', verbose))
             print(get_tensor_info(key, 'K after Rotary Embedding', verbose))
@@ -1247,7 +1246,7 @@ class SwiGLU(NeatModule):
 
         # BUILD
         hidden_size = self.fwd_exp * dim_size
-        self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
+        self.pre_norm = LayerNorm(dim_size, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
         self.inp_proj = Linear(dim_size, hidden_size, bias, device, dtype)
         self.mul_proj = Linear(dim_size, hidden_size, bias, device, dtype)
         self.out_proj = Linear(hidden_size, dim_size, self.out_bias, device, dtype)
