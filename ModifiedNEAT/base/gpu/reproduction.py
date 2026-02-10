@@ -430,14 +430,14 @@ def update_children(
             array_sources = tuple([cp.asarray(reshape(p.data.clone().to(dtype))[0]) for p in param_group])
             # ------------------------------ Define crossover kernel and randomizer values ------------------------------ #
             genome_num = len(new_population)
-            kernel_shape = calc_grid(genome_num, *array_update.shape[1:3], tpb=tpb)
+            kernel_shape = calc_grid(genome_num + 5, *array_update.shape[1:3], tpb=tpb)
             # if verbose and verbose >= 3:
             #     print(param.dtype, param.device, kernel_shape, as_shape, au_shape, array_source.shape, array_update.shape)
             probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)
             # ------------------------------ Run crossover using sources ------------------------------ #
             equal_params = check_param_compatibility(param_group)
 
-            attempts = 3
+            attempts = 5
             while attempts > 0:
                 filled = cp.zeros(array_update.shape + (sources.shape[-1],), bool)
                 updates_total = 0
@@ -450,9 +450,10 @@ def update_children(
                             genus_, source_, array_update, sources, genera, filled, probabilities, equal_params
                         )
                     else:
-                        if attempts == 2:
+                        if attempts <= 2:
                             gpu_fails += 1
                         array_update, filled = array_update.get(), filled.get()
+                        filled[:] = False
                         crossover_cpu(
                             genus_, source_.get(), array_update, sources.get(), genera.get(), filled,
                             probabilities.get(), equal_params
@@ -466,14 +467,15 @@ def update_children(
                 except Exception as e:
                     if attempts > 0:
                         continue
-                    print(f"updates total = {updates_total} for param_index = {genus_param.param_index}")
-                    print(f"indices = {cp.where(cp.any(array_update == 0, axis=(1, 2)))[0].get().tolist()[:20]}")
-                    print(f"zeros total = {cp.sum(cp.abs(array_update) == 0).get().item()}")
-                    print(f"sources = {[s.shape for s in array_sources]}")
-                    print(f"update = {array_update.shape}, probabilities = {probabilities.shape}")
-                    print(f"genus = {genus}, kernel shape = {kernel_shape}")
-                    pass
-                    raise e
+                    else:
+                        print(f"Attempts left = {attempts}, GPU fails = {gpu_fails}")
+                        print(f"updates total = {updates_total} for param_index = {genus_param.param_index}")
+                        print(f"indices = {cp.where(cp.any(array_update == 0, axis=(1, 2)))[0].get().tolist()[:20]}")
+                        print(f"zeros total = {cp.sum(cp.abs(array_update) == 0).get().item()}")
+                        print(f"sources = {[s.shape for s in array_sources]}")
+                        print(f"update = {array_update.shape}, probabilities = {probabilities.shape}")
+                        print(f"genus = {genus}, kernel shape = {kernel_shape}")
+                        raise e
                 break
 
             if verbose and verbose >= 4:

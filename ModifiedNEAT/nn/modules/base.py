@@ -551,6 +551,9 @@ class MaxPooling(NeatModule):
         self.output_size = ...
 
 
+# ---------- Miscellaneous ----------
+
+
 class Identity(nn.Module):
     def __init__(self):
         super(Identity, self).__init__()

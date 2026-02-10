@@ -364,6 +364,7 @@ class Model(NeatModule):
         self.distribution: str = 'normal'
 
     def dist(self, mean: Tensor, std: Union[Tensor, None], latent: Tensor = None, verbose: int = None):
+        mean, std = mean.float(), std.float() if std is not None else None
         def fill_std(std_dev: Tensor):
             if std_dev is not None:
                 return std_dev
@@ -372,7 +373,11 @@ class Model(NeatModule):
 
         extra = {}
         if self.distribution == 'discrete':
-            distribution = torch.distributions.Categorical(torch.softmax(mean, -1))
+            if std is not None:
+                logits = mean + (torch.randn_like(std) * std)
+            else:
+                logits = mean
+            distribution = torch.distributions.Categorical(logits=torch.softmax(logits, -1))
         elif self.distribution == 'normal':
             distribution = torch.distributions.Normal(mean, fill_std(std))
         elif self.distribution == 'mult_var_normal':

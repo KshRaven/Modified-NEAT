@@ -26,8 +26,10 @@ import warnings
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
 
-DEVICE = 'gpu' if torch.cuda.is_available() else 'cpu'
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 DTYPE  = torch.float32
+neat.set_device(DEVICE)
+print(f"Using torch device: '{DEVICE}'. neat device: '{neat.device()}'")
 
 
 class BaseModel(Model):
@@ -114,13 +116,18 @@ class BaseModelSequential(Model):
         self.constant       = manage_params(options, 'constant', 10_000)
 
         # Build
+        ff = mn.Sequential(*[
+            mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+            activation,
+            mn.Linear(dim_size, dim_size, bias, device, dtype)
+        ])
         self.projection = mn.Sequential(*[
             mn.BufferEmbedding(inputs, dim_size, True, 'continuous', device, dtype),
             # mn.BufferEncoding(max_seq_len, dim_size, True, 'continuous', device, dtype),
         ])
         self.transformer = mn.TransformerBase(
             max_seq_len, dim_size, layers, heads, kv_heads, differential, True, bias, device, dtype,
-            residual=True, normalize=True, epsilon=1e-9, fwd_exp=fwd_exp, constant=self.constant
+            residual=True, normalize=True, epsilon=1e-9, fwd_exp=fwd_exp, constant=self.constant, ff=ff,
         )
         self.pol_proj = mn.Sequential(*[
             mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
@@ -222,6 +229,7 @@ AUTOENCODER = AutoEncoder(
 )
 if USE_AE:
     AUTOENCODER.load(SAVE_NAME, None, 'autoencoders', 'flappy-bird\\test', True)
+    print(AUTOENCODER)
 AUTOENCODER.eval()
 AUTOENCODER.requires_grad_(False)
 AUTOENCODER.single_mode(True)
@@ -237,14 +245,14 @@ COEFFICIENTS        = 1
 LAYERS              = 1
 FWD_EXP             = 2
 ENABLE_BIAS         = True
-PROBABILISTIC       = False
+PROBABILISTIC       = True
 CONSTANT            = 100
 MEMORY_SIZE         = 5
 GAMMA               = np.exp(np.log(0.10) / 128)
-ALPHA               = fix(np.exp(np.log(2.50) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
 ALPHA_ORDER         = 0
-REW_NORM            = 3
+REW_NORM            = 4
 LOSS_REG            = 0.
 ACTIVATION          = nn.Tanh()
 CLIP_MIN            = -5
@@ -279,7 +287,7 @@ GOAL = 20
 STEPS = GOAL * 100 * RUNS
 EPOCHS = 150
 
-print(f"creating config")
+print(f"\ncreating config")
 config = neat.Config('flappy_bird')
 
 config.genome.init_type                 = 'normal'
@@ -293,7 +301,7 @@ config.genome.weight_replace_rate       = 0.00
 config.genome.weight_add_prob           = 0.00
 config.genome.weight_del_prob           = 0.00
 config.genome.single_structural_mutation = False
-config.genome.param_epsilon             = 1e-9
+config.genome.param_epsilon             = 1e-6
 config.reproduction.min_species_size    = GENOMES
 config.reproduction.purge               = 1
 config.reproduction.clone_threshold     = 0.05
@@ -515,11 +523,10 @@ def genome_debug(algorithm: neat.rl.NEAT):
 
 
 def run():
-    # MODEL.single_mode(True)
-    # Configuration
+    print(MODEL0)
 
     # Create the population, which is the top-level object for a NEAT run.
-    print(f"creating population")
+    print(f"\ncreating population")
     population = neat.Population(GENOMES, MODEL0, config, init_reporter=True)
     population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
     population2 = neat.Population(GENOMES, MODEL2, config, init_reporter=True)
@@ -527,7 +534,7 @@ def run():
     population.absorb_population(population2)
     # population.load_dict(name='flappy_bird', file_no=None)
 
-    TRAIN = False
+    TRAIN = True
     if TRAIN:
         trainer = neat.rl.NEAT(
             population,
@@ -547,7 +554,7 @@ def run():
                      f"rn{REW_NORM}-p{round(LOSS_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
                      f"delay{DELAY}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            rew_reg=1.0, pol_reg=0.0, validate=True, groups=None,
+            rew_reg=1.0, pol_reg=0.1, std_reg=0.25, validate=True, segr_size=None,
             max_episodes=MEMORY_SIZE,
         )
         trainer.set_report_hook(genome_debug)
@@ -621,5 +628,4 @@ def run():
 
 
 if __name__ == '__main__':
-    print(MODEL0)
     run()

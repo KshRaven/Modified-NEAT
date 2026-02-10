@@ -53,10 +53,11 @@ class NEAT(Algorithm):
         self.kappa: float       = manage_params(options, 'kappa', 0.00)
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
         self.order: int         = manage_params(options, 'order', 0)
-        self.normalize: int     = manage_params(options, 'normalize', 2)
+        self.normalize: int     = manage_params(options, 'normalize', 0)
         self.epsilon: float     = manage_params(options, 'epsilon', 1e-10)
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
         self.pol_reg: float     = manage_params(options, 'pol_reg', 0.0)
+        self.std_reg: float     = manage_params(options, 'std_reg', 0.0)
         self.validate: bool     = manage_params(options, 'validate', False)
         self.segr_size: Union[float, None] = manage_params(options, 'segr_size', None)
         self.target_kl: Union[float, None] = manage_params(options, 'target_kl', None)
@@ -239,9 +240,12 @@ class NEAT(Algorithm):
                 # Set the new episodic returns to the secondary buffer
                 ts = clock.perf_counter()
                 episodic_returns: dict[int, dict[int, tuple[float, int]]] = {
+                    # Get episode collection for all valid keys
                     key: {
+                        # Get the mean - (std * factor) of all returns per unique episode
                         uei: (
-                            torch.mean(returns_current[key][episode_indices]).item() - torch.std(returns_current[key][episode_indices]).item(),
+                            torch.mean(returns_current[key][episode_indices]).item(), # -
+                            # (torch.std(returns_current[key][episode_indices]).item() * self.std_reg),
                             len(episode_indices)
                         )
                         for episode_indices, uei in [
@@ -250,10 +254,11 @@ class NEAT(Algorithm):
                         ]
                     }
                     for key in valid_keys
-                }
+                } # Dict[Key, Dict[EpisodeIndex, Tuple[MeanReturn, EpisodeLength]]]
+                # TODO: Refactor the check below to verify both episodes done and steps done are valid for all genomes
                 validate_lengths = [len(er) for er in episodic_returns.values()]
                 if not all([l == validate_lengths[0] for l in validate_lengths]):
-                    raise RuntimeError(f"Ensure all genomes go through the same number of steps in the environment;"
+                    raise RuntimeError(f"Ensure all genomes go through the same number of episodes in the environment;"
                                        f"Got:\n {validate_lengths}")
                 episodes = sorted(set(sum([list(r.keys()) for r in episodic_returns.values()], [])))
                 for ep_idx in episodes:
@@ -299,16 +304,31 @@ class NEAT(Algorithm):
                 if verbose and verbose >= 2:
                     print(f"computed secondary returns in {CM(f'{round(ret_comp_time2, 2)}s', Fore.LIGHTCYAN_EX)}")
 
+                def fixed_std(array: list[float]):
+                    if len(array) == 0:
+                        raise ValueError("array is empty!")
+                    elif len(array) == 1:
+                        return 0.0
+                    else:
+                        res = np.std(array).item()
+                        if np.isnan(res):
+                            raise ValueError(f"std_dev raised NaN from array \n'{array}'")
+                        return res
+
                 # Compute scores from returns
-                scores: dict[int, float] = {
-                    key: np.mean([
+                _raw_scores: dict[int, list[float]] = {
+                    key: [
                         torch.mean(returns[key][indices]).item()
                         for indices in [
                             [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
                             for u_idx in np.unique(full_mapping[key])
                         ]
-                    ]).item()
+                    ]
                     for key in valid_keys
+                }
+                scores: dict[int, float] = {
+                    key: np.mean(value).item() - (self.std_reg * fixed_std(value))
+                    for key, value in _raw_scores.items()
                 }
 
                 for key, value in scores.items():
@@ -368,7 +388,7 @@ class NEAT(Algorithm):
                 ])
                 try:
                     if self.pol_reg != 0:
-                        policy_acc = policy_accuracy[best_genome_key] * 100
+                        policy_acc = policy_accuracy[best_genome_key]
                     else:
                         policy_acc = self.get_accuracy(
                             batch_indices, states, actions, None,

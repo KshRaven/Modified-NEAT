@@ -582,8 +582,8 @@ class Game(Env):
                  height: int = 800, width: int = 500, width_ext: int = 0, floor: int = 100, hitbox: int = 10,
                  spawn_width: int = 200, gap_offset: int | tuple[int, int] = 100, gap_size: int | tuple[int, int] = 200, velocity: int = 6,
                  init_x=100, init_y=300, init_pipe_x: int = None, pipe_y_velocity = 3,
-                 full_state = False, tick: int = 256, delay: int | None = None,
-                 threshold=0.9, device: torch.device = 'cpu', dtype: torch.dtype = torch.float32):
+                 full_state = False, tick: int | None = 256, delay: int | None = None,
+                 threshold=0.9, device: torch.device | str = 'cpu', dtype: torch.dtype = torch.float32):
         super(Game, self).__init__()
         if init_pipe_x is None:
             init_pipe_x = init_x * 3

@@ -374,14 +374,18 @@ class RoPE(NeatModule):
         self.select = torch.arange(max_seq_len, device=device, dtype=torch.long)
 
         # ATTRIBUTES
-        self.max_seq_len = max_seq_len
+        self.max_seq_len    = max_seq_len
         self.embed_size     = embed_size
         self.head_dim       = embed_size // heads
+        self.heads          = heads
         self.constant       = constant
 
         # STATES
         self.device: DEVICE = device
         self.dtype: DTYPE   = dtype
+
+    def extra_repr(self) -> str:
+        return f"max_seq_len={self.max_seq_len}, embed_size={self.embed_size}, heads={self.heads}, constant={self.constant}"
 
     # @staticmethod
     def _generate_encoding(self, seq_length: int, head_dim: int, constant: float = 10000.0, verbose: int = None):
@@ -1348,6 +1352,7 @@ class TransformerBlock(NeatModule):
         self.heads      = heads
         self.kv_heads       = kv_heads
         self.differential   = differential
+        fwd_func = manage_params(options, ['fwd_func', 'ff'], None)
 
         # BUILD
         # options['residual'] = True
@@ -1355,7 +1360,7 @@ class TransformerBlock(NeatModule):
             max_seq_len, dim_size, heads, kv_heads, differential, layer_idx, causal_mask,
             bias, device, dtype, **options
         )
-        self.feedforward = SwiGLU(dim_size, bias, device, dtype, **options)
+        self.feedforward = SwiGLU(dim_size, bias, device, dtype, **options) if fwd_func is None else fwd_func
         self.dropout = nn.Dropout(manage_params(options, 'dropout', 0))
 
         # STATES
