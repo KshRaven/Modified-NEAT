@@ -467,7 +467,7 @@ class AttentionLambda(NeatModule):
         self.k2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
         self.range = abs(self.u_lim - self.l_lim)
         self.init = self.u_lim - (self.range * np.exp(-0.3 * layer_idx)) if not affine else \
-            NeatParameter((heads,), requires_grad=False, device=device, dtype=dtype).unsqueeze(2)
+            NeatParameter((heads, 1), requires_grad=False, device=device, dtype=dtype) # .unsqueeze(2)
         self.exponents = (torch.arange(lambdas, device=device, dtype=dtype) + 1).unsqueeze(0).unsqueeze(1)
         self.multipliers = torch.pow(-1, self.exponents)
         self.epsilon = epsilon
@@ -486,17 +486,24 @@ class AttentionLambda(NeatModule):
         return f"heads={self.heads}, head_dim={self.head_dim}, coeffs={self.lambdas}, " \
                f"base_limits={(self.u_lim, self.l_lim)}, base_affine={self.base_affine}"
 
-    @property
-    def init_affine(self):
+    def init_affine(self, keys: Union[int, list[int], None]):
         if isinstance(self.init, NeatParameter):
-            return self.l_lim + (self.range * torch.sigmoid(self.init))
+            return self.l_lim + (self.range * torch.sigmoid(self.init[keys]))
         else:
             return self.init
 
-    def post_attention_shift(self, keys: Union[int, list[int], None], offset: int | None = None):
+    def post_attention_shift(self, keys: Union[int, list[int], None], offset: int | None = None, verbose: int = False):
         # TODO: Fix the parameterized implementation of init
         # return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, offset=offset, keys=keys)
-        return self.init if not isinstance(self.init, NeatParameter) else self.init_affine[keys].unsqueeze(0).unsqueeze(0)
+        if not isinstance(self.init, NeatParameter):
+            shift = self.init
+        else:
+            parameters = self.init[keys]
+            shift = self.l_lim + (self.range * torch.sigmoid(parameters))
+            shift = shift.unsqueeze(1).unsqueeze(2)
+        if verbose:
+            print(get_tensor_info(shift, 'Shift', verbose))
+        return shift
 
     def update_limit(self):
         for param in self.neat_parameters():
@@ -516,7 +523,7 @@ class AttentionLambda(NeatModule):
         gain = torch.sigmoid(gain) * self.max_gain
         return (
             # (base + self.biases(base, keys, 0)) * self.multipliers # ** self.exponents * self.multipliers
-            ((gain + self.init_affine) ** self.exponents) * self.multipliers
+            ((gain + self.init_affine(keys)) ** self.exponents) * self.multipliers
         ).unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
         # Returns shape (genomes, batch_size, heads, lambdas, query_len, key_len)
 
@@ -644,7 +651,7 @@ class Attention(NeatModule):
         # attention shape: (genomes, batch_size, query_len, heads, head_dim) then concat last 2 dim
         if self.differential:
             # attention = attention * (1 - self.diff_lambda.biases(attention, keys, 2))
-            attention = attention * (1 - self.diff_lambda.post_attention_shift())
+            attention = attention * (1 - self.diff_lambda.post_attention_shift(keys, verbose=verbose))
 
         return scores, attention
 

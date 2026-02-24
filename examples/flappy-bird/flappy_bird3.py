@@ -202,7 +202,7 @@ USE_AE          = False
 SEQUENTIAL      = True
 
 # AutoEncoder properties
-MAX_SEQ_LEN     = 3
+MAX_SEQ_LEN     = 8
 A_INPUTS        = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
 A_OUTPUTS       = 4
 A_OFFSET        = 0
@@ -214,7 +214,7 @@ T_LAYERS        = 2
 F_LAYERS        = 0
 HEADS           = 1
 KV_HEADS        = None
-DIFFERENTIAL    = False
+DIFFERENTIAL    = True
 BIAS            = False
 PROBABILISTIC   = True
 SAVE_NAME = f"ae_ml{MAX_SEQ_LEN}-i{A_INPUTS}-o{A_OUTPUTS}-d{DIM_SIZE}-k{KERNEL_SIZE}-s{STRIDE}-"\
@@ -240,19 +240,19 @@ GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS if USE_AE else A_INPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
 OUTPUTS             = 1
-EMBED_SIZE          = 32
+EMBED_SIZE          = 8
 COEFFICIENTS        = 1
 LAYERS              = 1
-FWD_EXP             = 2
+FWD_EXP             = 1
 ENABLE_BIAS         = True
-PROBABILISTIC       = True
+PROBABILISTIC       = False
 CONSTANT            = 100
 MEMORY_SIZE         = 5
 GAMMA               = np.exp(np.log(0.10) / 128)
-ALPHA               = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
 ALPHA_ORDER         = 0
-REW_NORM            = 4
+REW_NORM            = 0
 LOSS_REG            = 0.
 ACTIVATION          = nn.Tanh()
 CLIP_MIN            = -5
@@ -296,7 +296,7 @@ config.genome.weight_init_std           = 1.5
 config.genome.weight_min_value          = -np.inf
 config.genome.weight_max_value          = +np.inf
 config.genome.weight_mutate_power       = 6e-1
-config.genome.weight_mutate_rate        = 0.50
+config.genome.weight_mutate_rate        = 0.00
 config.genome.weight_replace_rate       = 0.00
 config.genome.weight_add_prob           = 0.00
 config.genome.weight_del_prob           = 0.00
@@ -304,15 +304,15 @@ config.genome.single_structural_mutation = False
 config.genome.param_epsilon             = 1e-6
 config.reproduction.min_species_size    = GENOMES
 config.reproduction.purge               = 1
-config.reproduction.clone_threshold     = 0.05
+config.reproduction.clone_threshold     = 0.20
 config.reproduction.survival_threshold  = 0.20
 config.reproduction.cross_threshold     = 0.00
-config.reproduction.elitism             = 30
+config.reproduction.elitism             = 40
 config.species.compatibility_threshold  = np.inf
 config.stagnation.max_stagnation        = 1
 config.stagnation.species_elitism       = 2
 config.reproduction.darwin_multiplier   = 0.25
-config.reproduction.cross_multiplier    = 0.25
+config.reproduction.cross_multiplier    = 0.15
 config.reproduction.preserve_elite      = False
 config.save()
 config.load(2)
@@ -551,10 +551,10 @@ def run():
                      f"e{EMBED_SIZE}-c{COEFFICIENTS}-m{SEQ_LEN}-l{LAYERS}-b{int(ENABLE_BIAS)}-h{HEADS}-"
                      f"prob{int(PROBABILISTIC)}-"
                      f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
-                     f"rn{REW_NORM}-p{round(LOSS_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
+                     f"rn{REW_NORM}-pl{round(LOSS_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
                      f"delay{DELAY}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            rew_reg=1.0, pol_reg=0.1, std_reg=0.25, validate=True, segr_size=None,
+            rew_reg=1.0, pol_reg=0.05, std_reg=0.5, validate=True, segr_size=None,
             max_episodes=MEMORY_SIZE,
         )
         trainer.set_report_hook(genome_debug)
@@ -562,7 +562,7 @@ def run():
         print(f"starting evaluation: population={len(population.genomes)}")
         # trainer.load(name='flappy_bird', file_no=None)
         try:
-            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', 3)
+            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', 2)
         except KeyboardInterrupt:
             pass
     else:

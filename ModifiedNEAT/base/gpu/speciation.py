@@ -23,22 +23,8 @@ import gc
 DISTANCE_TUPLE = types.Tuple([INT, INT])
 
 
-_Index  = Union[int, tuple[int]]
+_Index  = Union[int, tuple[int, ...]]
 _Number = Union[float, int]
-
-
-# @jitclass([])
-# class atomic:
-#     def __init__(self):
-#         pass
-#
-#     @staticmethod
-#     def add(array: gpu_array, index: _Index, value: _Number) -> None:
-#         atomic_add(array, index, value)
-#
-#     @staticmethod
-#     def sub(array: gpu_array, index: _Index, value: _Number) -> None:
-#         atomic_sub(array, index, value)
 
 
 @cuda.jit(device=True) # , cache=True)
@@ -54,7 +40,7 @@ def atomic_sub(array: GPUArray, index: _Index, value: _Number) -> None:
 
 
 @cuda.jit(device=True)
-def calc_distance(parameter: GPUArray, total_distance: GPUArray,
+def calc_distance(parameter: GPUArray, total_distance: GPUArray, match_counter: GPUArray,
                   genome0: int, genome1: int, x: int,
                   compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     """
@@ -83,16 +69,20 @@ def calc_distance(parameter: GPUArray, total_distance: GPUArray,
 
     atomic_add(total_distance, (genome0, genome1), current_distance)
 
+    # Add to count if values are the same to flag genomes that haven't been mutated properly
+    if value0 == value1:
+        match_counter[genome0, genome1] += 1
+
 
 @cuda.jit
-def get_distance(parameter: GPUArray, total_distance: GPUArray,
+def get_distance(parameter: GPUArray, total_distance: GPUArray, match_counter: GPUArray,
                  compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     # select one genome
     x, genome0, genome1 = cuda.grid(3)
     g_lim = total_distance.shape[0]
     x_lim = parameter.shape[1]
     if genome0 < g_lim and genome1 < g_lim and x < x_lim:
-        calc_distance(parameter, total_distance, genome0, genome1, x,
+        calc_distance(parameter, total_distance, match_counter, genome0, genome1, x,
                       compatibility_weight_coefficient, compatibility_disjoint_coefficient)
         # cuda.syncthreads()
 
@@ -100,7 +90,7 @@ def get_distance(parameter: GPUArray, total_distance: GPUArray,
 @njit(nogil=True)
 def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArray, mapping: dict[int, int]):
     hits, misses = 0, 0
-    keys = List(mapping.keys())
+    keys = list(mapping.keys())
     for i in prange(len(keys)):
         gi = keys[i]
         ii = mapping[gi]
@@ -120,7 +110,9 @@ def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArra
 
 def update_distances_cache(config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,
                            tpb=10, verbose: int = None) -> float:
-    total_distance = cp.zeros((module.genome_num, module.genome_num), genome_cache.total_distance.dtype)
+    genomes_total = module.genome_num
+    total_distance = cp.zeros((genomes_total, genomes_total), genome_cache.total_distance.dtype)
+    faulty_counter = cp.zeros((genomes_total, genomes_total), int)
 
     def reshape(tensor: Union[Tensor, cp.ndarray], required_ndim: int):
         original_shape: tuple[int, ...] = tensor.shape
@@ -137,7 +129,10 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
         return tensor, original_shape
 
     ts = clock.perf_counter()
-    for param in module.neat_parameters():
+    for p_idx, param in enumerate(module.neat_parameters()):
+        match_counter = cp.zeros((genomes_total, genomes_total), int)
+        values_total = np.prod(param.original_shape).item()
+
         # with cuda.defer_cleanup():
         genome_num = len(module.mapping)
         dtype = param.data.dtype if param.data.dtype != torch.bfloat16 else torch.float32
@@ -148,16 +143,33 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
         #     print(param.dtype, param.device, kernel_shape, array.shape, param.data.shape)
 
         get_distance[*kernel_shape](
-            array, total_distance,
+            array, total_distance, match_counter,
             config.genome.compatibility_weight_coefficient,
             config.genome.compatibility_disjoint_coefficient
         )
+
+        # Add count when genome parameters fully match
+        faulty_counter[match_counter >= values_total] += 1
+
+        if verbose and verbose >= 4:
+            max_match_count = cp.max(match_counter).item()
+            print(f"Parameter {p_idx} had a max match count of {max_match_count} / {values_total}")
 
         # # Remove data from GPU
         # del array
 
     if verbose and verbose >= 2:
         print(f"{CM('Ran distance kernel', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
+
+    neat_params_total = len(module.neat_parameters())
+    reproduction_error = faulty_counter >= neat_params_total
+    if cp.any(reproduction_error):
+        error_count = cp.sum(reproduction_error).item() // 2
+        raise ValueError(f"Genomes cannot 100% match each other! \n"
+                         f"{error_count} cases confirmed! Error in crossover or mutation of values.")
+
+    if verbose and verbose >= 4:
+        print(f"Maximum fault count was {cp.max(faulty_counter).item()} / {neat_params_total}")
 
     total_distance = total_distance.get()
     h, m = update_dict(genome_cache.distances, total_distance, Dict(module.mapping.items()))

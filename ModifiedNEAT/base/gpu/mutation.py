@@ -20,20 +20,20 @@ GPUArray = Union[DeviceNDArray, cp.ndarray]
 
 @cuda.jit(device=True)
 def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: float, mutate_power: float,
-                  replace_rate: float, init_type: str, mean: float, std: float, minimum: float, maximum: float,
+                  replace_rate: float, init_type: int, mean: float, std: float, minimum: float, maximum: float,
                   ssm: bool, add_param: float, delete_param: float, epsilon: float,
                   probabilities: tuple[GPUArray, ...], normals: GPUArray, rng_index: int):
     value = get_value(parameter, g, x, y)
 
     zero_param = abs(value) <= epsilon
     if ssm:
-        div = max(1, add_param + delete_param)
+        div = max(1.0, add_param + delete_param)
         r = prob(probabilities[0], rng_index)
         if r < (add_param / div):
             if zero_param:
                 initialize_genome(
                     parameter, g, x, y,
-                    init_type, mean, std, minimum, maximum,
+                    init_type, mean, std + mutate_power, minimum, maximum,
                     normals, rng_index
                 )
             # else:
@@ -48,7 +48,7 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
             if zero_param:
                 initialize_genome(
                     parameter, g, x, y,
-                    init_type, mean, std, minimum, maximum,
+                    init_type, mean, std + mutate_power, minimum, maximum,
                     normals, rng_index
                 )
             # else:
@@ -68,7 +68,7 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
                 minimum, maximum
             )
         )
-    elif r < replace_rate + mutate_rate:
+    elif r < (replace_rate + mutate_rate):
         initialize_genome(
             parameter, g, x, y,
             init_type, mean, std, minimum, maximum,
