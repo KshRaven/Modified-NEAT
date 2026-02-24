@@ -114,6 +114,7 @@ class BaseModelSequential(Model):
         self.clip_max       = manage_params(options, 'clip_max', -1)
         self.clip_range     = self.clip_max - self.clip_min
         self.constant       = manage_params(options, 'constant', 10_000)
+        self.residual       = manage_params(options, 'residual', True)
 
         # Build
         ff = mn.Sequential(*[
@@ -127,7 +128,8 @@ class BaseModelSequential(Model):
         ])
         self.transformer = mn.TransformerBase(
             max_seq_len, dim_size, layers, heads, kv_heads, differential, True, bias, device, dtype,
-            residual=True, normalize=True, epsilon=1e-9, fwd_exp=fwd_exp, constant=self.constant, ff=ff,
+            residual=self.residual, normalize=True, epsilon=1e-9, fwd_exp=fwd_exp, constant=self.constant,
+            activation=activation, # ff=ff,
         )
         self.pol_proj = mn.Sequential(*[
             mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
@@ -192,17 +194,18 @@ def fix(value: float, default: float = 1):
 
 
 # GAME SETTINGS
-SPAWN_WIDTH     = 200
-GAP_OFFSET      = 30
-GAP_SIZE        = (200, 200)
-PIPE_Y_VELOCITY = 3
-FULL_STATES     = True
-DELAY           = 0
-USE_AE          = False
-SEQUENTIAL      = True
+SPAWN_WIDTH          = 200
+GAP_OFFSET           = 30
+GAP_SIZE             = (200, 200)
+PIPE_Y_VELOCITY      = 3
+FULL_STATES          = True
+DELAY                = 0
+USE_AE               = False
+SEQUENTIAL           = True
+RENDER_DURING_TRAINING = False  # Prevents pygame window from popping up during NEAT training
 
 # AutoEncoder properties
-MAX_SEQ_LEN     = 8
+MAX_SEQ_LEN     = 6
 A_INPUTS        = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
 A_OUTPUTS       = 4
 A_OFFSET        = 0
@@ -212,19 +215,19 @@ STRIDE          = 1
 S_LAYERS        = 0
 T_LAYERS        = 2
 F_LAYERS        = 0
-HEADS           = 1
-KV_HEADS        = None
-DIFFERENTIAL    = True
+A_HEADS         = 1
+A_KV_HEADS      = None
+A_DIFFERENTIAL  = False
 BIAS            = False
 PROBABILISTIC   = True
 SAVE_NAME = f"ae_ml{MAX_SEQ_LEN}-i{A_INPUTS}-o{A_OUTPUTS}-d{DIM_SIZE}-k{KERNEL_SIZE}-s{STRIDE}-"\
-            f"sl{S_LAYERS}-tl{T_LAYERS}-fl{F_LAYERS}-h{HEADS}-kv{KV_HEADS}-"\
-            f"diff{DIFFERENTIAL}-b{BIAS}-prob{PROBABILISTIC}-off{A_OFFSET}"
+            f"sl{S_LAYERS}-tl{T_LAYERS}-fl{F_LAYERS}-h{A_HEADS}-kv{A_KV_HEADS}-"\
+            f"diff{A_DIFFERENTIAL}-b{BIAS}-prob{PROBABILISTIC}-off{A_OFFSET}"
 
 
 AUTOENCODER = AutoEncoder(
-    MAX_SEQ_LEN, A_INPUTS, DIM_SIZE, KERNEL_SIZE, S_LAYERS, T_LAYERS, F_LAYERS, HEADS, KV_HEADS,
-    DIFFERENTIAL, BIAS, DEVICE, DTYPE,
+    MAX_SEQ_LEN, A_INPUTS, DIM_SIZE, KERNEL_SIZE, S_LAYERS, T_LAYERS, F_LAYERS, A_HEADS, A_KV_HEADS,
+    A_DIFFERENTIAL, BIAS, DEVICE, DTYPE,
     outputs=A_OUTPUTS, stride=STRIDE, probabilistic=PROBABILISTIC, out_bias=False,
 )
 if USE_AE:
@@ -240,31 +243,39 @@ GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS if USE_AE else A_INPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
 OUTPUTS             = 1
-EMBED_SIZE          = 8
+EMBED_SIZE          = 16
 COEFFICIENTS        = 1
-LAYERS              = 1
-FWD_EXP             = 1
+LAYERS              = 2
+HEADS               = 2
+KV_HEADS            = None
+FWD_EXP             = 2
+DIFFERENTIAL        = True
+SKIP_CONNECTION     = False
 ENABLE_BIAS         = True
 PROBABILISTIC       = False
 CONSTANT            = 100
 MEMORY_SIZE         = 5
 GAMMA               = np.exp(np.log(0.10) / 128)
-ALPHA               = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
-ALPHA_ORDER         = 0
-REW_NORM            = 0
+ALPHA_ORDER         = 2
+REW_NORM            = 4
 LOSS_REG            = 0.
-ACTIVATION          = nn.Tanh()
+ACTIVATION          = nn.GELU()
 CLIP_MIN            = -5
 CLIP_MAX            = -0
-DISTRIBUTION        = 'normal'
+DISTRIBUTION        = 'unifom'
+
+POL_REG         = 0.00
+STD_REG         = 0.50
 
 if SEQUENTIAL:
     MODELS = [
         BaseModelSequential(
             SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS, DIFFERENTIAL, FWD_EXP,
             activation, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE,
-            clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION, constant=CONSTANT,
+            clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION, 
+            constant=CONSTANT, residual=SKIP_CONNECTION,
         )
         for activation in [ACTIVATION, nn.ReLU(), nn.SiLU()]
     ]
@@ -285,37 +296,39 @@ INIT_GEN: int = None
 RUNS = 1
 GOAL = 20
 STEPS = GOAL * 100 * RUNS
-EPOCHS = 150
+EPOCHS = 170
 
 print(f"\ncreating config")
 config = neat.Config('flappy_bird')
 
 config.genome.init_type                 = 'normal'
 config.genome.weight_init_mean          = 0.0
-config.genome.weight_init_std           = 1.5
+config.genome.weight_init_std           = 1.0
 config.genome.weight_min_value          = -np.inf
 config.genome.weight_max_value          = +np.inf
-config.genome.weight_mutate_power       = 6e-1
-config.genome.weight_mutate_rate        = 0.00
+config.genome.weight_mutate_power       = 5e-1
+config.genome.weight_mutate_rate        = 0.50
 config.genome.weight_replace_rate       = 0.00
 config.genome.weight_add_prob           = 0.00
 config.genome.weight_del_prob           = 0.00
 config.genome.single_structural_mutation = False
-config.genome.param_epsilon             = 1e-6
+config.genome.param_epsilon             = 0e-6
 config.reproduction.min_species_size    = GENOMES
 config.reproduction.purge               = 1
-config.reproduction.clone_threshold     = 0.20
+config.reproduction.clone_threshold     = 0.00
 config.reproduction.survival_threshold  = 0.20
 config.reproduction.cross_threshold     = 0.00
-config.reproduction.elitism             = 40
+config.reproduction.elitism             = 30
 config.species.compatibility_threshold  = np.inf
 config.stagnation.max_stagnation        = 1
 config.stagnation.species_elitism       = 2
 config.reproduction.darwin_multiplier   = 0.25
-config.reproduction.cross_multiplier    = 0.15
+config.reproduction.cross_multiplier    = 0.25
 config.reproduction.preserve_elite      = False
 config.save()
 config.load(2)
+
+ENV: Game | None = None
 
 
 def evaluate(population: neat.Population, **options):
@@ -338,22 +351,13 @@ def evaluate(population: neat.Population, **options):
     DEBUG_STEP = SEQ_LEN - 1
     MODEL0.train()
     while not terminate:
-        env = Game(
-            population.size, goal=GOAL, seq_len=SEQ_LEN if SEQUENTIAL else None,
-            height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
-            spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
-            delay=DELAY,
-            type2count=len(mapping2), type2offset=0, device=DEVICE, dtype=DTYPE
-        )
-        # print(f"Anti Count = {game.birds.}")
-
         gts = clock.perf_counter()
         step = 0
         reverse_mapping0 = {index: key for key, index in mapping0.items()}
         reverse_mapping1 = {index: key for key, index in mapping1.items()}
         reverse_mapping2 = {index: key for key, index in mapping2.items()}
 
-        states = env.reset()[0]
+        states = ENV.reset()[0]
         done = False
         while not done:
             with torch.no_grad():
@@ -371,7 +375,7 @@ def evaluate(population: neat.Population, **options):
                 ts = clock.perf_counter()
                 keys0, keys1, keys2 = [], [], []
                 indices0, indices1, indices2 = [], [], []
-                for index, dead in enumerate(env.birds.dead):
+                for index, dead in enumerate(ENV.birds.dead):
                     if not dead:
                         if index in reverse_mapping0:
                             keys0.append(reverse_mapping0[index])
@@ -385,7 +389,7 @@ def evaluate(population: neat.Population, **options):
                         else:
                             print(f"\nPopulation size {population.size}"
                                   f"\nReverse mapping \n{reverse_mapping0} \n{reverse_mapping1}"
-                                  f"\nIndex = {index}, birds_shape = {env.birds.dead.shape}")
+                                  f"\nIndex = {index}, birds_shape = {ENV.birds.dead.shape}")
                             raise KeyError()
                 if len(indices0) == 0:
                     keys0 = list(mapping0.keys())
@@ -416,7 +420,7 @@ def evaluate(population: neat.Population, **options):
 
                 # Pad dead bird actions
                 if True:
-                    padding = env.birds.bird_num - actions0.shape[0] - actions1.shape[0] - actions2.shape[0]
+                    padding = ENV.birds.bird_num - actions0.shape[0] - actions1.shape[0] - actions2.shape[0]
                     if padding > 0:
                         def fill_up(tensor: Tensor, indices: list[int], total: int):
                             fill = tensor.clone()
@@ -434,7 +438,7 @@ def evaluate(population: neat.Population, **options):
                 calc_time = clock.perf_counter() - ts
 
                 # Get rewards
-                next_states, rewards, _, done, _ = env.step(actions)
+                next_states, rewards, _, done, _ = ENV.step(actions)
                 if DEBUG_DATA:
                     print(f"rewards =>\n{rewards}\n\tshape = {rewards.shape}")
                     # v = MODEL.get_value(observations[:len(reverse_mapping0)].unsqueeze(1), ).squeeze(1)
@@ -444,10 +448,10 @@ def evaluate(population: neat.Population, **options):
                 # Updated buffers
                 terminate = trainer.update(states, actions, rewards, done, done)
 
-                alive = round(env.birds.active_num)
+                alive = round(ENV.birds.active_num)
                 max_score = round(rewards.max().item(), 2)
                 if alive > 0:
-                    best_index = torch.argmax(env.birds.score).cpu().item()
+                    best_index = torch.argmax(ENV.birds.score).cpu().item()
                     if best_index in reverse_mapping0:
                         best_key = reverse_mapping0[best_index]
                     elif best_index in reverse_mapping1:
@@ -461,9 +465,12 @@ def evaluate(population: neat.Population, **options):
                       f"alive = {alive}, max_rew = {max_score}, best_key={best_key}, ct={calc_time:.2e}, sd={trainer.steps_done} "
                       f"bl={trainer.primary.max_size()}", end='')
 
-                # Render display
-                if population.generation % 10 == 0:
-                    env.render()
+                # Render display (disabled during training to prevent window from popping up)
+                # Uncomment below to enable rendering every 10 generations
+                # if population.generation % 10 == 0:
+                #     env.render()
+                if False and population.generation % 10 == 0:
+                    ENV.render()
 
                 states = next_states
 
@@ -484,11 +491,11 @@ def evaluate(population: neat.Population, **options):
         print(f"Episodes Secondary = {trainer.secondary.episodes()}")
         print("----------------------------------------------------------------------------")
 
-        l_lim, u_lim = 10, env.floor.y * 1.05
+        l_lim, u_lim = 10, ENV.floor.y * 1.05
         # print(f"u lim = {u_lim}, l lim = {l_lim}")
-        for idx, (score, genome) in enumerate(zip(env.birds.get_reward(), population.genomes.values())):
+        for idx, (score, genome) in enumerate(zip(ENV.birds.get_reward(), population.genomes.values())):
             genome.fitness = score.item()
-            y_position = env.birds.y[idx]
+            y_position = ENV.birds.y[idx]
             died_beyond_limits = y_position <= l_lim or y_position >= u_lim
             if died_beyond_limits:
                 population.to_delete.append(genome.key)
@@ -523,6 +530,7 @@ def genome_debug(algorithm: neat.rl.NEAT):
 
 
 def run():
+    global ENV
     print(MODEL0)
 
     # Create the population, which is the top-level object for a NEAT run.
@@ -533,6 +541,15 @@ def run():
     population.absorb_population(population1)
     population.absorb_population(population2)
     # population.load_dict(name='flappy_bird', file_no=None)
+
+    ENV = Game(
+        population.size, goal=GOAL, seq_len=SEQ_LEN if SEQUENTIAL else None,
+        height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
+        spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
+        delay=DELAY, render_mode=None,
+        type2count=GENOMES, type2offset=0, device=DEVICE, dtype=DTYPE
+    )
+    # print(f"Anti Count = {game.birds.}")
 
     TRAIN = True
     if TRAIN:
@@ -546,15 +563,15 @@ def run():
                 # neat.optim.scheduler.CosineAnnealing(config, 15, 0.05, 'weight_del_prob', True, True),
             ],
             device=DEVICE, dtype=DTYPE,
-            log_sub_dir='flappy_bird\\',
+            log_sub_dir='flappy_bird/',
             log_name=f"{unix_to_datetime_file(clock.time())}_"
                      f"e{EMBED_SIZE}-c{COEFFICIENTS}-m{SEQ_LEN}-l{LAYERS}-b{int(ENABLE_BIAS)}-h{HEADS}-"
                      f"prob{int(PROBABILISTIC)}-"
                      f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
-                     f"rn{REW_NORM}-pl{round(LOSS_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
+                     f"rn{REW_NORM}-p{round(LOSS_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
                      f"delay{DELAY}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            rew_reg=1.0, pol_reg=0.05, std_reg=0.5, validate=True, segr_size=None,
+            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=None,
             max_episodes=MEMORY_SIZE,
         )
         trainer.set_report_hook(genome_debug)
@@ -562,7 +579,7 @@ def run():
         print(f"starting evaluation: population={len(population.genomes)}")
         # trainer.load(name='flappy_bird', file_no=None)
         try:
-            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', 2)
+            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', 3)
         except KeyboardInterrupt:
             pass
     else:
@@ -572,7 +589,7 @@ def run():
         population.size, goal=50, seq_len=SEQ_LEN if SEQUENTIAL else None,
         height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
-        delay=DELAY,
+        delay=DELAY, render_mode='human',
         type2count=GENOMES, type2offset=0, device=DEVICE, dtype=DTYPE
     )
     mapping0, mapping1, mapping2 = population.get_mapping()

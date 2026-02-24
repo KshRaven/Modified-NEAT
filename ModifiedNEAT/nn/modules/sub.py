@@ -531,7 +531,7 @@ class AttentionLambda(NeatModule):
 class Attention(NeatModule):
     def __init__(
             self, max_seq_len: int, dim_size: int, heads: int = None, kv_heads: int = None,
-            differential: int = None, layer_idx: int = None, causal_mask=True,
+            differential: int | bool = None, layer_idx: int = None, causal_mask=True,
             bias=False, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32, **options):
         super(Attention, self).__init__()
         self._heads = heads
@@ -1251,7 +1251,7 @@ class SwiGLU(NeatModule):
         self.epsilon        = manage_params(options, 'epsilon', 1e-8)
         self.affine         = manage_params(options, 'affine', True)
         self.normalize      = manage_params(options, 'normalize', False)
-        self.skip_connection = manage_params(options, ['skip_connection', 'residual'], False)
+        self.skip_connection = manage_params(options, ['skip_connection', 'residual'], True)
         self.fwd_exp        = manage_params(options, ['fwd_exp', 'forward_expansion'], 2)
         self.out_bias       = manage_params(options, 'out_bias', bias)
 

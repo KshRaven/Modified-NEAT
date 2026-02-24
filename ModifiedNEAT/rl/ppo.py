@@ -459,7 +459,7 @@ class PPO(Algorithm):
             plt.legend()
         if title is not None:
             plt.title(title)
-        plt.savefig(STORAGE_DIR+f"plots\\{name}-{unix_to_datetime_file(clock.time())}")
+        plt.savefig(STORAGE_DIR+f"plots/{name}-{unix_to_datetime_file(clock.time())}")
         plt.close()
 
 

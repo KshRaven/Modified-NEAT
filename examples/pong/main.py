@@ -72,8 +72,9 @@ class BaseModel(mn.Model):
     def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
         mean_std        = self.pol_proj(latent, keys=keys)
         mean, log_std   = torch.chunk(mean_std, 2, -1)
-        mean            = F.sigmoid(mean) * 6 + -3
-        std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
+        # mean            = F.sigmoid(mean) * 6 + -3
+        # std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
+        std = torch.exp(log_std)
         return mean, std
 
     def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
@@ -95,8 +96,16 @@ class BaseModel(mn.Model):
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
         latent      = self.projection(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
-        action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)
+        # dist        = torch.distributions.Normal(mean, std)
+        # action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)
+        if options.get('normal', self.probabilistic):
+            action = mean + (std * torch.randn_like(std))
+        else:
+            action = mean
+        if self.distribution == 'discrete':
+            action = torch.argmax(action, dim=-1)
+        else:
+            action = torch.sigmoid(action)
         return action
 
     # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
@@ -154,6 +163,8 @@ def eval_genomes(population: neat.Population):
             ENV.render()
             if population.generation % 20 == 0:
                 ENV.clock.tick(40)
+            else:
+                ENV.clock.tick(1000)
             print(f"\rLives = {ENV.players.lives.mean().item()}, "
                   f"Hits={(ENV.players.hits + ENV.players.scores).max().item()}, "
                   f"Alive={ENV.players.active_total}, "
@@ -239,8 +250,8 @@ if __name__ == '__main__':
     config_path = os.path.join(local_dir, 'config.txt')
 
     GENOMES = 100
-    WINDOW = (800, 600)
-    PADDLE = (10, 40)
+    WINDOW = (500, 500)
+    PADDLE = (10, 80)
     GOAL = 100
     LIVES = 10
     ENV = Game(WINDOW, GOAL, 3, LIVES, paddle_shape=PADDLE)
@@ -248,16 +259,16 @@ if __name__ == '__main__':
     CONFIG = neat.Config('original', 'pong')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 2.0
+    CONFIG.genome.weight_init_std           = 1.0
     CONFIG.genome.weight_min_value          = -math.inf
     CONFIG.genome.weight_max_value          = +math.inf
     CONFIG.genome.weight_mutate_power       = 2e-1
-    CONFIG.genome.weight_mutate_rate        = 0.50
-    CONFIG.genome.weight_replace_rate       = 0.00
-    CONFIG.genome.weight_add_prob           = 0.00
-    CONFIG.genome.weight_del_prob           = 0.00
+    CONFIG.genome.weight_mutate_rate        = 0.60
+    CONFIG.genome.weight_replace_rate       = 0.10
+    CONFIG.genome.weight_add_prob           = 0.33
+    CONFIG.genome.weight_del_prob           = 0.33
     CONFIG.genome.single_structural_mutation = False
-    CONFIG.genome.param_epsilon             = 1e-6
+    CONFIG.genome.param_epsilon             = 1e-3
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
     CONFIG.reproduction.clone_threshold     = 0.05
@@ -267,7 +278,7 @@ if __name__ == '__main__':
     CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.50
+    CONFIG.reproduction.darwin_multiplier   = 0.35
     CONFIG.reproduction.cross_multiplier    = 0.50
     CONFIG.reproduction.preserve_elite      = False
 
@@ -278,7 +289,7 @@ if __name__ == '__main__':
     INPUTS          = 3
     OUTPUTS         = 3
     EMBED_SIZE      = 64
-    LAYERS          = 3
+    LAYERS          = 2
     COEFFICIENTS    = 1
     ACTIVATION      = nn.SiLU()
     BIAS            = True
@@ -294,10 +305,10 @@ if __name__ == '__main__':
     POPULATION = neat.Population(GENOMES, MODEL, CONFIG, init_rep=True)
     print(POPULATION)
 
-    POPULATION.load_dict(name='original', directory='pong', file_no=FILE_NO)
+    # POPULATION.load_dict(name='original', directory='pong', file_no=FILE_NO)
     INIT_GEN = POPULATION.generation
 
-    EPOCHS = 200
+    EPOCHS = 100
 
-    # run_neat(POPULATION, EPOCHS)
+    run_neat(POPULATION, EPOCHS)
     test_best_network(set_keys=None)

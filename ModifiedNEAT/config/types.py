@@ -78,7 +78,7 @@ class Config:
         if directory is None:
             directory = f"{STORAGE_DIR}configs"
         self.dir = directory
-        self.path = f"{directory}\\{file_name}-neat_config.txt"
+        self.path = f"{directory}/{file_name}-neat_config.txt"
 
         self.general      = GeneralConfig()
         self.genome       = GenomeConfig()

@@ -38,7 +38,7 @@ class Window(object):
         self.end_font   = pygame.font.SysFont("comicsans", 70)
         if self.image is None:
             self.image      = pygame.transform.scale(pygame.image.load(
-                os.path.join("imgs", "bg.png")).convert_alpha(), (width, height))
+                os.path.join("./imgs", "bg.png")).convert_alpha(), (width, height))
         # -------------------- States -------------------- #
         self.draw_lines = False
         self.initialized = True
@@ -50,7 +50,7 @@ class Window(object):
         self.stat_font  = pygame.font.SysFont("comicsans", 50)
         self.end_font   = pygame.font.SysFont("comicsans", 70)
         self.image      = pygame.transform.scale(pygame.image.load(
-            os.path.join("imgs", "bg.png")
+            os.path.join("./imgs", "bg.png")
         ).convert_alpha(), (self.width, self.height))
         self.initialized = True
 
@@ -70,7 +70,7 @@ class Floor(object):
     def __init__(self, window: Window, x: int, level: int, velocity: int = 6):
         # -------------------- PyGame -------------------- #
         if self.image is None:
-            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "base.png")).convert_alpha())
+            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join("./imgs", "base.png")).convert_alpha())
         # -------------------- Attributes -------------------- #
         self.window     = window
         self.height     = self.image.get_height()
@@ -158,7 +158,7 @@ class Pipe(object):
         self.y_bot: int     = None
         # -------------------- PyGame -------------------- #
         if self.image is None:
-            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", "pipe.png")).convert_alpha())
+            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join("./imgs", "pipe.png")).convert_alpha())
         self.pxt = 1.0
         self.pipe_top       = pygame.transform.flip(self.image, False, True)
         self.pipe_bottom    = self.image
@@ -315,8 +315,8 @@ class Birds(object):
                  device: torch.device = 'cpu', dtype: torch.dtype = torch.float32):
         # -------------------- PyGame -------------------- #
         if self.images is None:
-            self.images: list       = [pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", f"bird{x}.png"))) for x in range(1, 4)]
-            self.images_anti: list  = [pygame.transform.scale2x(pygame.image.load(os.path.join("imgs", f"anti{x}.png"))) for x in range(1, 4)]
+            self.images: list       = [pygame.transform.scale2x(pygame.image.load(os.path.join("./imgs", f"bird{x}.png"))) for x in range(1, 4)]
+            self.images_anti: list  = [pygame.transform.scale2x(pygame.image.load(os.path.join("./imgs", f"anti{x}.png"))) for x in range(1, 4)]
         self.image_num          = len(self.images)
         assert self.image_num == 3
         self.ANIMATIONS: list[int] = list(range(self.image_num)) + list(reversed(list(range(self.image_num-1))))
@@ -583,7 +583,7 @@ class Game(Env):
                  spawn_width: int = 200, gap_offset: int | tuple[int, int] = 100, gap_size: int | tuple[int, int] = 200, velocity: int = 6,
                  init_x=100, init_y=300, init_pipe_x: int = None, pipe_y_velocity = 3,
                  full_state = False, tick: int | None = 256, delay: int | None = None,
-                 threshold=0.9, device: torch.device | str = 'cpu', dtype: torch.dtype = torch.float32):
+                 threshold=0.9, device: torch.device | str = 'cpu', dtype: torch.dtype = torch.float32, **options):
         super(Game, self).__init__()
         if init_pipe_x is None:
             init_pipe_x = init_x * 3
@@ -620,6 +620,7 @@ class Game(Env):
         self.device = device
         self.dtype = dtype
         self.steps = 0
+        self.render_mode: str | None = options.get('render_mode', None)
 
         self.window.close()
         self.initialized = False
@@ -629,8 +630,10 @@ class Game(Env):
 
     def initialize(self, keys: list[int] = None):
         # TODO: Make the keys initialization work
-        if not self.initialized:
+        if not (self.initialized or self.window.initialized):
+            # if self.render_mode == 'human':
             self.window.initialize()
+            pygame.display.iconify()
             self.initialized = True
         self.floor.reset()
         self.pipes.reset()
@@ -754,9 +757,10 @@ class Game(Env):
 
     def render(self, debug=False, testing=False):
         if not self.terminated:
-            # if not self.renderer.running():
-            #     self.renderer.start()
-            self._draw(debug=debug, testing=testing)
+            if self.render_mode == 'human':
+                # if not self.renderer.running():
+                #     self.renderer.start()
+                self._draw(debug=debug, testing=testing)
             self.steps += 1
         if self.terminated:
             self.renderer.stop()

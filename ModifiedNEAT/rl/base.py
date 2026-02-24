@@ -65,7 +65,7 @@ class Algorithm(object):
         # ------------------------------ Tensorboard logging ------------------------------ #
         from ModifiedNEAT.util.storage import STORAGE_DIR
 
-        self.log_dir: str = manage_params(options, ['log_dir', 'log_directory'], STORAGE_DIR+f"neat_rl_logs\\{self.__class__.__name__}\\")
+        self.log_dir: str = manage_params(options, ['log_dir', 'log_directory'], STORAGE_DIR+f"neat_rl_logs/{self.__class__.__name__}/")
         self.log_sub_dir: str = manage_params(options, 'log_sub_dir', "")
         self.log_name: str = manage_params(options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
         self.writer = SummaryWriter(self.log_dir+self.log_sub_dir+self.log_name)
@@ -733,9 +733,9 @@ class Algorithm(object):
     #     #     # Save population
     #     #     self.population.save_dict(name, directory, file_no, replace)
     #     #
-    #     #     print(CM(f"Successfully saved trainer to '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
+    #     #     print(CM(f"Successfully saved trainer to '{directory}/{name}'", Fore.LIGHTGREEN_EX))
     #     # else:
-    #     #     print(CM(f"Failed to save trainer to '{directory}\\{name}'", Fore.LIGHTRED_EX))
+    #     #     print(CM(f"Failed to save trainer to '{directory}/{name}'", Fore.LIGHTRED_EX))
     #     raise NotImplementedError()
     #
     # def load(self, name: str = None, directory: str = None, file_no: int = None):
@@ -757,7 +757,7 @@ class Algorithm(object):
     #     #     self._get_params(self.model)
     #     #     bind_modules(self.parameters, self.population.genomes, True)
     #     #
-    #     #     print(CM(f"Successfully loaded trainer from '{directory}\\{name}'", Fore.LIGHTGREEN_EX))
+    #     #     print(CM(f"Successfully loaded trainer from '{directory}/{name}'", Fore.LIGHTGREEN_EX))
     #     # else:
-    #     #     print(CM(f"Failed to load trainer from '{directory}\\{name}'", Fore.LIGHTRED_EX))
+    #     #     print(CM(f"Failed to load trainer from '{directory}/{name}'", Fore.LIGHTRED_EX))
     #     raise NotImplementedError()
