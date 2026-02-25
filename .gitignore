@@ -1,11 +1,18 @@
+.idea/
+.vscode/
 
+__pycache__/
 venv/
+dist/
+build/
+eggs/
+parts/
+sdist/
+var/
+
 storage/
-/.idea/
-/build/
-/ModifiedNEAT.egg-info/
-/.vscode/
-/__pycache__/
+build/
+
 *.pyc
 *.pyo
 *.pyd
@@ -16,9 +23,3 @@ storage/
 *.tmp
 *.egg
 *.egg-info/
-dist/
-build/
-eggs/
-parts/
-sdist/
-var/
