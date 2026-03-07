@@ -243,28 +243,28 @@ GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS if USE_AE else A_INPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
 OUTPUTS             = 1
-EMBED_SIZE          = 16
+EMBED_SIZE          = 32
 COEFFICIENTS        = 1
 LAYERS              = 2
 HEADS               = 2
 KV_HEADS            = None
-FWD_EXP             = 2
-DIFFERENTIAL        = True
-SKIP_CONNECTION     = False
+FWD_EXP             = 1
+DIFFERENTIAL        = 3
+SKIP_CONNECTION     = True
 ENABLE_BIAS         = True
 PROBABILISTIC       = False
 CONSTANT            = 100
 MEMORY_SIZE         = 5
 GAMMA               = np.exp(np.log(0.10) / 128)
-ALPHA               = fix(np.exp(np.log(2.00) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
-ALPHA_ORDER         = 2
+ALPHA_ORDER         = 0
 REW_NORM            = 4
 LOSS_REG            = 0.
 ACTIVATION          = nn.GELU()
 CLIP_MIN            = -5
 CLIP_MAX            = -0
-DISTRIBUTION        = 'unifom'
+DISTRIBUTION        = 'mult_var_normal'
 
 POL_REG         = 0.00
 STD_REG         = 0.50
@@ -296,18 +296,18 @@ INIT_GEN: int = None
 RUNS = 1
 GOAL = 20
 STEPS = GOAL * 100 * RUNS
-EPOCHS = 170
+EPOCHS = 150
 
 print(f"\ncreating config")
 config = neat.Config('flappy_bird')
 
 config.genome.init_type                 = 'normal'
 config.genome.weight_init_mean          = 0.0
-config.genome.weight_init_std           = 1.0
+config.genome.weight_init_std           = np.pi * 1.0
 config.genome.weight_min_value          = -np.inf
 config.genome.weight_max_value          = +np.inf
-config.genome.weight_mutate_power       = 5e-1
-config.genome.weight_mutate_rate        = 0.50
+config.genome.weight_mutate_power       = np.pi * 0.5
+config.genome.weight_mutate_rate        = 0.33
 config.genome.weight_replace_rate       = 0.00
 config.genome.weight_add_prob           = 0.00
 config.genome.weight_del_prob           = 0.00
@@ -315,7 +315,7 @@ config.genome.single_structural_mutation = False
 config.genome.param_epsilon             = 0e-6
 config.reproduction.min_species_size    = GENOMES
 config.reproduction.purge               = 1
-config.reproduction.clone_threshold     = 0.00
+config.reproduction.clone_threshold     = 0.10
 config.reproduction.survival_threshold  = 0.20
 config.reproduction.cross_threshold     = 0.00
 config.reproduction.elitism             = 30
@@ -509,7 +509,7 @@ def evaluate(population: neat.Population, **options):
 
 def genome_debug(algorithm: neat.rl.NEAT):
     population = algorithm.population
-    COUNT = 5
+    COUNT = 10
 
     def fill(text: str, space: int):
         if not isinstance(text, str):
@@ -551,7 +551,7 @@ def run():
     )
     # print(f"Anti Count = {game.birds.}")
 
-    TRAIN = True
+    TRAIN = False
     if TRAIN:
         trainer = neat.rl.NEAT(
             population,
@@ -585,12 +585,35 @@ def run():
     else:
         population.load_dict(name='flappy_bird', file_no=None)
 
+    elites_limit = 10
+    elites_available = any([
+        g.fitness is not None and not np.isnan(g.fitness) 
+        for g in population.genomes.values()
+    ])
+    if elites_available:
+        elites = []
+        np.random.randn()
+        for gn_id, specie in enumerate(population.species_set.species.values()):
+            genomes = sorted(
+                [
+                    g for g in specie.members.values()
+                    if g.fitness is not None and not np.isnan(g.fitness)
+                ], 
+                key=lambda g: g.fitness, reverse=True
+            )
+            elites.extend(genomes[:elites_limit])
+            print(f"\nElites [{gn_id}]: {[g.key for g in genomes[:10]]}")
+        population.crop([e.key for e in elites], DEVICE)
+
+    last_genus = population.genera[-1]
+    last_genus_size = len([g for g in population.genomes.values() if g.genus == last_genus])
+    print(f"Last genus size: {last_genus_size}")
     env = Game(
-        population.size, goal=50, seq_len=SEQ_LEN if SEQUENTIAL else None,
-        height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
+        population.size, goal=100, seq_len=SEQ_LEN if SEQUENTIAL else None,
+        height=800, width=1200, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY * 1.85,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
         delay=DELAY, render_mode='human',
-        type2count=GENOMES, type2offset=0, device=DEVICE, dtype=DTYPE
+        type2count=last_genus_size, type2offset=50, device=DEVICE, dtype=DTYPE
     )
     mapping0, mapping1, mapping2 = population.get_mapping()
     cons_mapping = population.get_mapping(consolidated=True)

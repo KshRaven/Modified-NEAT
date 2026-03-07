@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ModifiedNEAT"
+version = "0.5.9"
+description = "Modified version of python NEAT algorithm that uses PyTorch modules"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "Bradley Odimmasi", email = "bodimmasi@gmail.com"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+]
+
+dependencies = [
+    "cuda-python",
+    "cuda-toolkit",
+    "numba",
+    "numba-cuda[cu13]",
+    "numpy",
+    "cupy-cuda13x",
+    "matplotlib",
+    "colorama",
+    "tensorboard",
+    "torch",
+    "gymnasium",
+    "pygame",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "isort",
+]
+
+[project.urls]
+Repository = "https://github.com/KshRaven/Modified-NEAT.git"
+Issues = "https://github.com/KshRaven/Modified-NEAT/issues"
+
+[tool.setuptools]
+packages = ["ModifiedNEAT"]
+
+[tool.uv]
+# UV configuration - Python version default
+python-version = "3.12"
+
+[tool.uv.pip]
+# Optional: pre-release handling for packages
+pre = false
