@@ -12,6 +12,7 @@ import warnings
 import random
 import math
 import numpy as np
+import argparse
 
 from torch import Tensor
 from typing import Union
@@ -47,7 +48,7 @@ class BaseModel(mn.Model):
             mn.Linear(inputs, dim_size, True, device, dtype),
             *sum([
                 [
-                    # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+                    mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
                     activation,
                     # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
                     mn.Linear(dim_size, dim_size, bias, device, dtype),
@@ -57,7 +58,7 @@ class BaseModel(mn.Model):
         ])
         self.pol_proj = mn.Sequential(*[
             # mn.Linear(dim_size, dim_size, bias, device, dtype),
-            # mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+            mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
             activation,
             # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
             mn.Linear(dim_size, 2*outputs, True, device, dtype),
@@ -116,6 +117,7 @@ class BaseModel(mn.Model):
 
 ENV: Game | None = None
 MODEL: BaseModel | None = None
+FILE_NAME: str = "original"
 FILE_NO: int | None = None
 INIT_GEN: int = 0
 
@@ -124,7 +126,7 @@ def eval_genomes(population: neat.Population):
     """
     Run each genome against each other one time to determine the fitness.
     """
-    global ENV, MODEL, FILE_NO
+    global ENV, MODEL, FILE_NAME, FILE_NO
     mapping: dict[int, int] = population.get_mapping(consolidated=True)
     _mapping = list(mapping.items())
     # random.shuffle(_mapping)
@@ -179,7 +181,7 @@ def eval_genomes(population: neat.Population):
         genome.fitness = scores[index].item()
 
     _, FILE_NO = population.save_dict(
-        name='original', directory='pong', file_no=FILE_NO, replace=population.generation != INIT_GEN
+        name=FILE_NAME, directory='pong', file_no=FILE_NO, replace=population.generation != INIT_GEN
     )
 
 
@@ -246,39 +248,45 @@ def test_best_network(set_keys: tuple[int, int] = None):
 
 
 if __name__ == '__main__':
-    local_dir = os.path.dirname(__file__)
-    config_path = os.path.join(local_dir, 'config.txt')
+    parser = argparse.ArgumentParser(description='Run NEAT algorithm on Pong game')
+    parser.add_argument('--render_mode', type=str, default=None, 
+                        help='Render mode for the game (e.g., "human", None)')
+    parser.add_argument('--load', type=str, default=None,
+                        help='Load a previously trained model (True for latest, or specify file number)')
+    parser.add_argument('--train', type=str, default='true',
+                        help='Train the model (True/False or 1/0, default: True)')
+    args = parser.parse_args()
 
     GENOMES = 100
     WINDOW = (500, 500)
-    PADDLE = (10, 80)
+    PADDLE = (10, 70)
     GOAL = 100
-    LIVES = 10
-    ENV = Game(WINDOW, GOAL, 3, LIVES, paddle_shape=PADDLE)
+    LIVES = 5
+    ENV = Game(WINDOW, GOAL, 3, LIVES, paddle_shape=PADDLE, render_mode=args.render_mode)
 
-    CONFIG = neat.Config('original', 'pong')
+    CONFIG = neat.Config('pong', '../../storage/configs')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 1.0
+    CONFIG.genome.weight_init_std           = 1.5
     CONFIG.genome.weight_min_value          = -math.inf
     CONFIG.genome.weight_max_value          = +math.inf
-    CONFIG.genome.weight_mutate_power       = 2e-1
+    CONFIG.genome.weight_mutate_power       = 5e-1
     CONFIG.genome.weight_mutate_rate        = 0.60
-    CONFIG.genome.weight_replace_rate       = 0.10
-    CONFIG.genome.weight_add_prob           = 0.33
-    CONFIG.genome.weight_del_prob           = 0.33
-    CONFIG.genome.single_structural_mutation = False
-    CONFIG.genome.param_epsilon             = 1e-3
+    CONFIG.genome.weight_replace_rate       = 0.01
+    CONFIG.genome.weight_add_prob           = 0.10
+    CONFIG.genome.weight_del_prob           = 0.10
+    CONFIG.genome.single_structural_mutation = True
+    CONFIG.genome.param_epsilon             = 1e-12
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
     CONFIG.reproduction.clone_threshold     = 0.05
     CONFIG.reproduction.survival_threshold  = 0.20
-    CONFIG.reproduction.cross_threshold     = 0.00
+    CONFIG.reproduction.cross_threshold
     CONFIG.reproduction.elitism             = 30
     CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.35
+    CONFIG.reproduction.darwin_multiplier   = 0.50
     CONFIG.reproduction.cross_multiplier    = 0.50
     CONFIG.reproduction.preserve_elite      = False
 
@@ -288,27 +296,69 @@ if __name__ == '__main__':
 
     INPUTS          = 3
     OUTPUTS         = 3
-    EMBED_SIZE      = 64
+    EMBED_SIZE      = 16
     LAYERS          = 2
     COEFFICIENTS    = 1
     ACTIVATION      = nn.SiLU()
     BIAS            = True
     PROBABILISTIC   = False
-    CLIP_MIN        = -2
-    CLIP_MAX        = 0
+    FILE_NAME       = f"PongModel-E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_A-{ACTIVATION.__class__.__name__}_"\
+                      f"B{int(BIAS)}_P{int(PROBABILISTIC)}"
 
     MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
-                      ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE,
-                      clip_min=CLIP_MIN, clip_max=CLIP_MAX)
+                      ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE)
     print(MODEL)
 
     POPULATION = neat.Population(GENOMES, MODEL, CONFIG, init_rep=True)
     print(POPULATION)
 
-    # POPULATION.load_dict(name='original', directory='pong', file_no=FILE_NO)
+    # Handle --load argument
+    if args.load is not None:
+        if args.load.lower() == 'true':
+            # Load the latest checkpoint
+            POPULATION.load_dict(name=FILE_NAME, directory='pong', file_no=None)
+            print(f"Loaded latest population checkpoint")
+        else:
+            # Load a specific file number
+            try:
+                file_no = int(args.load)
+                POPULATION.load_dict(name=FILE_NAME, directory='pong', file_no=file_no)
+                print(f"Loaded population checkpoint from file {file_no}")
+            except ValueError:
+                if args.load.lower() != 'false':
+                    print(f"Error: --load argument must be 'true' or a valid file number, got '{args.load}'")
+                    exit(1)
+    
     INIT_GEN = POPULATION.generation
+    FILE_NO = None  # Reset FILE_NO for saving subsequent generations
+
+    # Parse --train argument
+    def str_to_bool(value: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value.lower() in ('true', '1', 'yes', 'on'):
+            return True
+        elif value.lower() in ('false', '0', 'no', 'off'):
+            return False
+        else:
+            raise ValueError(f"Cannot convert '{value}' to boolean")
+    
+    try:
+        should_train = str_to_bool(args.train)
+    except ValueError as e:
+        print(f"Error: {e}")
+        exit(1)
 
     EPOCHS = 100
 
-    run_neat(POPULATION, EPOCHS)
+    if should_train:
+        print(f"\n{'='*50}")
+        print("Starting training...")
+        print(f"{'='*50}\n")
+        run_neat(POPULATION, EPOCHS)
+    else:
+        print(f"\n{'='*50}")
+        print("Skipping training...")
+        print(f"{'='*50}\n")
+
     test_best_network(set_keys=None)

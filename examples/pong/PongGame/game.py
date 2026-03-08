@@ -77,18 +77,18 @@ class Backend(object):
         pygame.init()
 
     def render(self, draw_score=True, draw_hits=False):
+        if self.window.surface is None:
+            return  # Skip rendering in headless mode
+        
         self.window.surface.fill(self.BLACK)
-
         self._draw_divider()
-
         best_index = self.players.best_index
-
+        
         if draw_score:
             self._draw_score(best_index)
-
         if draw_hits:
             self._draw_hits(best_index)
-
+        
         self._draw_objects(best_index)
         pygame.display.update()
 
@@ -103,12 +103,12 @@ class Game(Env):
     """
 
     def __init__(self, window_shape: tuple[int, int], goal=20, max_factor=3, lives=3,
-                 render_mode: str | None = 'human', **options):
+                 render_mode: str | None = None, **options):
+        pygame.init()
         self.render_mode = render_mode
         self.clock = pygame.time.Clock()
 
-        self.window = Window(*window_shape)
-
+        self.window = Window(*window_shape, headless=(render_mode != 'human'))
         self.players = Players(lives)
 
         self.paddles = Paddles(
@@ -289,11 +289,11 @@ class Game(Env):
             raise RuntimeError("Environment is terminated!")
 
     def render(self, **options) -> RenderFrame | list[RenderFrame] | None:
-        if self.render_mode is not None:
-            if self.render_mode == 'human':
-                self.backend.render(True, True)
+        if self.render_mode == 'human':
+            self.backend.render(True, True)
 
     def run(self):
+        self.window.enable_display()
         self.goal = np.inf
         print(self.players)
         _lives = self.players.lives_total
@@ -350,13 +350,9 @@ class Game(Env):
 
 if __name__ == "__main__":
     import time as clock
-    game = Game((500, 500))
+    game = Game((500, 500), render_mode=None)
     game.run()
 
     clock.sleep(10)
-
-
-
-
 
 

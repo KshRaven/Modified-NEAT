@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ModifiedNEAT"
-version = "0.5.9"
+version = "0.5.11"
 description = "Modified version of python NEAT algorithm that uses PyTorch modules"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     {name = "Bradley Odimmasi", email = "bodimmasi@gmail.com"}
 ]
@@ -49,11 +49,3 @@ Issues = "https://github.com/KshRaven/Modified-NEAT/issues"
 
 [tool.setuptools]
 packages = ["ModifiedNEAT"]
-
-[tool.uv]
-# UV configuration - Python version default
-python-version = "3.12"
-
-[tool.uv.pip]
-# Optional: pre-release handling for packages
-pre = false

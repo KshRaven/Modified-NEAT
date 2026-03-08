@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.config.base import Configuration
 from ModifiedNEAT.util.storage import STORAGE_DIR
 
@@ -31,7 +30,7 @@ class GenomeConfig(Configuration):
         self.weight_replace_rate    = 0.01
         self.weight_add_prob        = 0.01
         self.weight_del_prob        = 0.01
-        self.param_epsilon          = 1e-6
+        self.param_epsilon          = 1e-12
 
         self.compatibility_disjoint_coefficient = 1.0
         self.compatibility_weight_coefficient   = 0.1
@@ -78,7 +77,7 @@ class Config:
         if directory is None:
             directory = f"{STORAGE_DIR}configs"
         self.dir = directory
-        self.path = f"{directory}/{file_name}-neat_config.txt"
+        self.path = f"{directory}/{file_name}.mnc.json"
 
         self.general      = GeneralConfig()
         self.genome       = GenomeConfig()

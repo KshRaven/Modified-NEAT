@@ -49,6 +49,8 @@ def set_storage_location(directory: str = STORAGE_DIR):
 def save(items: dict[str, Any], filename: str, directory: str, file_no: int = None, replace=False,
          subdirectory: str = None, save_location: str = None, extension: str = None,
          items_name: str = None, time: int = None, debug=True):
+    if isinstance(file_no, int) and file_no == 0:
+        file_no = None
     # Use default directory and name as subdirectory
     if save_location is None:
         save_location = STORAGE_DIR
@@ -108,6 +110,8 @@ def load(filename: str, directory: str, file_no: int = None,
          subdirectory: str = None, save_location: str = None, extension: str = None,
          items_name: str = None, time: int = None, cooldown: int = None, debug=True):
     try:
+        if isinstance(file_no, int) and file_no == 0:
+            file_no = None
         # Use default directory and name as subdirectory
         if save_location is None:
             save_location = STORAGE_DIR
@@ -170,6 +174,8 @@ def load(filename: str, directory: str, file_no: int = None,
 def delete(filename: str, directory: str, file_no: Union[int, None],
            subdirectory: str = None, save_location: str = None, extension: str = None, disable_warn=False, debug=True):
     try:
+        if isinstance(file_no, int) and file_no == 0:
+            file_no = None
         # Use default directory and name as subdirectory
         if save_location is None:
             save_location = STORAGE_DIR
