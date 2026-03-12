@@ -22,6 +22,7 @@ from typing import Union
 import time as clock
 import numpy as np
 import warnings
+import argparse
 
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
@@ -194,15 +195,15 @@ def fix(value: float, default: float = 1):
 
 
 # GAME SETTINGS
-SPAWN_WIDTH          = 200
-GAP_OFFSET           = 30
-GAP_SIZE             = (200, 200)
-PIPE_Y_VELOCITY      = 3
-FULL_STATES          = True
-DELAY                = 0
-USE_AE               = False
-SEQUENTIAL           = True
-RENDER_DURING_TRAINING = False  # Prevents pygame window from popping up during NEAT training
+SPAWN_WIDTH         = 200
+GAP_OFFSET          = 30
+GAP_SIZE            = (200, 200)
+PIPE_Y_VELOCITY     = 3
+FULL_STATES         = True
+DELAY               = 0
+USE_AE              = False
+SEQUENTIAL          = True
+DISCRETE            = False
 
 # AutoEncoder properties
 MAX_SEQ_LEN     = 6
@@ -243,13 +244,13 @@ GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS if USE_AE else A_INPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
 OUTPUTS             = 1
-EMBED_SIZE          = 32
+EMBED_SIZE          = 16
 COEFFICIENTS        = 1
-LAYERS              = 2
-HEADS               = 2
+LAYERS              = 1
+HEADS               = 1
 KV_HEADS            = None
-FWD_EXP             = 1
-DIFFERENTIAL        = 3
+FWD_EXP             = 2
+DIFFERENTIAL        = False
 SKIP_CONNECTION     = True
 ENABLE_BIAS         = True
 PROBABILISTIC       = False
@@ -261,13 +262,13 @@ KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
 ALPHA_ORDER         = 0
 REW_NORM            = 4
 LOSS_REG            = 0.
-ACTIVATION          = nn.GELU()
+TEST_ACTIVATION     = nn.GELU()
 CLIP_MIN            = -5
 CLIP_MAX            = -0
-DISTRIBUTION        = 'mult_var_normal'
+DISTRIBUTION        = 'normal'
 
 POL_REG         = 0.00
-STD_REG         = 0.50
+STD_REG         = 0.25
 
 if SEQUENTIAL:
     MODELS = [
@@ -277,7 +278,7 @@ if SEQUENTIAL:
             clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION, 
             constant=CONSTANT, residual=SKIP_CONNECTION,
         )
-        for activation in [ACTIVATION, nn.ReLU(), nn.SiLU()]
+        for activation in [TEST_ACTIVATION, nn.ReLU(), nn.SiLU()]
     ]
 else:
     MODELS = [
@@ -286,12 +287,22 @@ else:
             activation, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE,
             clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
         )
-        for activation in [ACTIVATION, nn.ReLU(), nn.SiLU()]
+        for activation in [TEST_ACTIVATION, nn.ReLU(), nn.SiLU()]
     ]
 
 MODEL0, MODEL1, MODEL2 = MODELS
 
-INIT_GEN: int = None
+GAME_TYPE = 0 if not FULL_STATES else (1 if PIPE_Y_VELOCITY == 0 else 2)
+BASE_NAME: str = (
+    f"GT{GAME_TYPE}_AE{int(USE_AE)}_SQ{int(SEQUENTIAL)}_DC{int(DISCRETE)}_"
+    f"SeqL{SEQ_LEN}_E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_A-{TEST_ACTIVATION.__class__.__name__}_"
+    f"H{HEADS}_K{KV_HEADS}_F{FWD_EXP}_D{int(DIFFERENTIAL)}_R{int(SKIP_CONNECTION)}_"
+    f"Con{CONSTANT}_B{int(BIAS)}_P{int(PROBABILISTIC)}"
+)
+FILE_NAME: str = f"FlappyBirdModel-{BASE_NAME}"
+FILE_DIR: str | None = None
+FILE_NO: int | None = None
+INIT_GEN: int | None = 0
 
 RUNS = 1
 GOAL = 20
@@ -303,11 +314,11 @@ config = neat.Config('flappy_bird')
 
 config.genome.init_type                 = 'normal'
 config.genome.weight_init_mean          = 0.0
-config.genome.weight_init_std           = np.pi * 1.0
+config.genome.weight_init_std           = 1.0
 config.genome.weight_min_value          = -np.inf
 config.genome.weight_max_value          = +np.inf
-config.genome.weight_mutate_power       = np.pi * 0.5
-config.genome.weight_mutate_rate        = 0.33
+config.genome.weight_mutate_power       = 0.7
+config.genome.weight_mutate_rate        = 0.50
 config.genome.weight_replace_rate       = 0.00
 config.genome.weight_add_prob           = 0.00
 config.genome.weight_del_prob           = 0.00
@@ -322,7 +333,7 @@ config.reproduction.elitism             = 30
 config.species.compatibility_threshold  = np.inf
 config.stagnation.max_stagnation        = 1
 config.stagnation.species_elitism       = 2
-config.reproduction.darwin_multiplier   = 0.25
+config.reproduction.darwin_multiplier   = 0.50
 config.reproduction.cross_multiplier    = 0.25
 config.reproduction.preserve_elite      = False
 config.save()
@@ -337,7 +348,7 @@ def evaluate(population: neat.Population, **options):
     cons_mapping = population.get_mapping(consolidated=True)
     trainer.update_mapping(cons_mapping)
     # BUFFER = torch.zeros(SEQ_LEN, population.pop_size, INPUTS).to(DEVICE, DTYPE)
-    global INIT_GEN
+    global INIT_GEN, FILE_NO
     if INIT_GEN is None:
         INIT_GEN = population.generation
 
@@ -503,7 +514,9 @@ def evaluate(population: neat.Population, **options):
         game_step += 1
     print(f"\n")
 
-    population.save_dict('flappy_bird', replace=population.generation != INIT_GEN)
+    _, file_no = population.save_dict(FILE_NAME, FILE_DIR, FILE_NO, replace=population.generation != INIT_GEN)
+    if population.generation == INIT_GEN:
+        FILE_NO = file_no
     # trainer.save('flappy_bird', replace=population.generation != INIT_GEN)
 
 
@@ -530,7 +543,16 @@ def genome_debug(algorithm: neat.rl.NEAT):
 
 
 def run():
-    global ENV
+    parser = argparse.ArgumentParser(description='Run NEAT algorithm on Pong game')
+    parser.add_argument('--rm', type=str, default=None, 
+                        help='Render mode for the game (e.g., "human", None)')
+    parser.add_argument('--load', type=str, default=None,
+                        help='Load a previously trained model (True for latest, or specify file number)')
+    parser.add_argument('--train', type=str, default='true',
+                        help='Train the model (True/False or 1/0, default: True)')
+    args = parser.parse_args()
+
+    global ENV, FILE_NO
     print(MODEL0)
 
     # Create the population, which is the top-level object for a NEAT run.
@@ -540,19 +562,40 @@ def run():
     population2 = neat.Population(GENOMES, MODEL2, config, init_reporter=True)
     population.absorb_population(population1)
     population.absorb_population(population2)
-    # population.load_dict(name='flappy_bird', file_no=None)
+    if args.load is not None:
+        if args.load.lower() == 'true':
+            FILE_NO = None
+            print(f"Will load the latest population checkpoint")
+        else:
+            try:
+                FILE_NO = int(args.load)
+                print(f"WIll load population checkpoint from file number '{FILE_NO}'")
+            except ValueError:
+                if args.load.lower() not in ['false', 'none', 'null', '']:
+                    print(f"Error: --load argument must be a boolean, valid positive integer, null or empty; Got '{args.load}'")
+                    exit(1)
+        population.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
 
     ENV = Game(
         population.size, goal=GOAL, seq_len=SEQ_LEN if SEQUENTIAL else None,
         height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
-        delay=DELAY, render_mode=None,
-        type2count=GENOMES, type2offset=0, device=DEVICE, dtype=DTYPE
+        delay=DELAY, type2count=GENOMES, type2offset=0, device=DEVICE, dtype=DTYPE,
+        render_mode=args.rm
     )
     # print(f"Anti Count = {game.birds.}")
 
-    TRAIN = False
-    if TRAIN:
+    def str_to_bool(value: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value.lower() in ('true', '1', 'yes', 'on'):
+            return True
+        elif value.lower() in ('false', '0', 'no', 'off'):
+            return False
+        else:
+            raise ValueError(f"Cannot convert '{value}' to boolean")
+
+    if str_to_bool(args.train):
         trainer = neat.rl.NEAT(
             population,
             schedulers=[
@@ -582,8 +625,6 @@ def run():
             trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', 3)
         except KeyboardInterrupt:
             pass
-    else:
-        population.load_dict(name='flappy_bird', file_no=None)
 
     elites_limit = 10
     elites_available = any([

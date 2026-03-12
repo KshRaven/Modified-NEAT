@@ -13,7 +13,7 @@ from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
 from numba import njit
 from numpy import ndarray
-from typing import Any, Union, Callable
+from typing import Any, Union, Iterable, Callable
 from itertools import count
 
 import torch
@@ -54,7 +54,7 @@ class Algorithm(object):
         self.episodes_done              = 0
         self.prev_episodes_done         = self.episodes_done
         self.updates_done               = 0
-        self.batch_size                 = manage_params(options, 'batch_size', 512)
+        self.batch_size                 = manage_params(options, 'batch_size', 64)
         self.terminated                 = True
         # ------------------------------ States ------------------------------ #
         self.device: torch.device       = device
@@ -68,14 +68,19 @@ class Algorithm(object):
         self.log_dir: str = manage_params(options, ['log_dir', 'log_directory'], STORAGE_DIR+f"neat_rl_logs/{self.__class__.__name__}/")
         self.log_sub_dir: str = manage_params(options, 'log_sub_dir', "")
         self.log_name: str = manage_params(options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
-        self.writer = SummaryWriter(self.log_dir+self.log_sub_dir+self.log_name)
+        self.log_path: str = self.log_dir+self.log_sub_dir+self.log_name
+        self.writer: SummaryWriter | None = None
         self._report_hook: Callable = None
+
+    def _init_writer(self):
+        if self.writer is None:
+            self.writer = SummaryWriter(self.log_path)
 
     def set_report_hook(self, hook: Callable):
         """
+        Add a custom post env calculation report hook for when you do not want to add/modify the Population's Reporter
         :param hook: Set a function that receives the Trainer as its parameter to report on a given generation's
             progress.
-            You can also just add a custom Reporter object to the Population class for post-evaluation statistics.
         :return: None
         """
         self._report_hook = hook
@@ -86,7 +91,9 @@ class Algorithm(object):
                 return module
         raise ValueError(f"Cannot find module")
 
-    def update_mapping(self, mapping: dict[int, int]):
+    def update_mapping(self, mapping: dict[int, int] | None = None):
+        if mapping is None:
+            mapping = self.population.get_mapping(consolidated=True, grouped=False)
         self.primary.update_mapping(mapping)
         self.secondary.update_mapping(mapping)
         self.logging.update_mapping(mapping)
@@ -218,20 +225,16 @@ class Algorithm(object):
             for ep_map in self.episode_lengths.keys():
                 self.episode_lengths[ep_map] = 0
 
-    def get_batches(self, keys: list[int], batch_size: int = None, shuffle=False):
+    def get_batches(self, keys: Iterable[int], batch_size: int = None, shuffle=False):
         batches = {}
-        buffer_sizes = self.primary.buffer_sizes()
+        buffer_sizes = self.primary.buffer_sizes() # TODO: Might want to parameterize it
         for key in keys:
             records = int(buffer_sizes[key])
 
             if batch_size is None:
-                batch_size = records
-            assert records > 0
-            if batch_size is None:
-                batch_size = records
-            else:
-                assert batch_size > 0
-                batch_size = min(batch_size, records)
+                batch_size = 64
+            assert batch_size > 0
+            batch_size = min(batch_size, records)
 
             indices: list[int] = list(range(records))
             if shuffle:
@@ -607,90 +610,112 @@ class Algorithm(object):
         if groups < 1:
             raise ValueError(f"Invalid segregation size '{size}' with '{groups}' groups and '{len(ranking)}' keys")
         keys = list(ranking.keys())
-        index = 0
         clusters: list[dict[int, float]] = [
-            {key: ranking[key] for key in keys[index+size*x:index+size*(x+1)]} for x in range(groups)
+            {
+                key: ranking[key] 
+                for key in keys[size*x:size*(x+1)]
+            } 
+            for x in range(groups)
         ]
         return clusters
 
-    def normalize_array(self, array: dict[int, Any], index: int = None, segr_size: int = None, ranking: dict[int, float] = None):
-        keys, source = list(array.keys()), list(array.values())
+    def normalize_array(self, array: dict[int, Any], index: int = None, segr_size: int = None, 
+                        ranking: dict[int, float] = None, genus_separated: bool = False):
+        verbose = False
+        full_norm_array = {key: 1.0 for key in array.keys()}
+        # Filter by genera
+        for genus in (self.population.genera if genus_separated else [-1]):
+            keys    = [key for key in array.keys() if not genus_separated or self.population.genomes[key].genus == genus]
+            source  = [value for (key, value) in array.items() if not genus_separated or self.population.genomes[key].genus == genus]
 
-        # Handle errors
-        if len(source) == 0:
-            return array
-        if isinstance(source[0], (list, tuple)):
-            for i, (key, item) in enumerate(zip(keys, source)):
-                if len(item) == 0:
-                    raise ValueError(f"Empty Iterable found in key '{key}'")
-                if isinstance(item[0], (int, float)):
-                    if index is None:
-                        source[i] = np.mean(item).item()
+            # Handle errors
+            if len(source) == 0:
+                return array
+            sample = source[0]
+            if isinstance(sample, (list, tuple)):
+                # Ensure iterable can be reduced for all keys
+                for i, (key, item) in enumerate(zip(keys, source)):
+                    if len(item) == 0:
+                        raise ValueError(f"Empty Iterable found in key '{key}'")
+                    if isinstance(item[0], (int, float)):
+                        if index is None:
+                            source[i] = np.mean(item).item()
+                        else:
+                            source[i] = item[-1]
                     else:
-                        source[i] = item[-1]
-                else:
-                    ValueError(f"Cannot convert variable of type '{type(item)}'")
-        elif isinstance(source[0], ndarray):
-            source = [item().mean().item() for item in source]
-        elif isinstance(source[0], Tensor):
-            source = [item().mean().item() for item in source]
-        elif not isinstance(source[0], (float, int)):
-            ValueError(f"Cannot consolidate variable of type '{type(source[0])}'")
+                        ValueError(f"Cannot convert variable of type '{type(item)}'")
+            elif isinstance(sample, (ndarray, Tensor)):
+                source = [a.mean().item() for a in source]
+            elif not isinstance(sample, (float, int)):
+                ValueError(f"Cannot consolidate variable of type '{type(sample)}'")
 
-        source = np.array(source)
-        # print(source.shape)
-        # print(np.max(source), np.min(source), source.mean(), source.std())
-        maximum, minimum = np.max(source), np.min(source)
-        if maximum > minimum:
-            norm_source: ndarray = (source - minimum) / (maximum - minimum)
-        else:
-            norm_source = np.full_like(source, 1.0)
-
-        norm_array = dict(zip(keys, norm_source))
-
-        # Segregate normalization when enabled
-        if segr_size is not None:
-            # Sort if ranking is not given
-            if ranking is None:
-                norm_array = dict(sorted(norm_array.items(), key=lambda item: (item[1], -item[0]), reverse=True))
+            source = np.array(source) # Should be a 1-D array of shape (genomes,)
+            if verbose:
+                print(source.shape)
+                print(np.max(source), np.min(source), source.mean(), source.std())
+            minimum, maximum = np.min(source), np.max(source)
+            if maximum > minimum:
+                norm_source: ndarray = (source - minimum) / (maximum - minimum)
             else:
-                norm_array = {key: norm_array[key] for key in ranking.keys()}
+                norm_source = np.full_like(source, 1.0)
 
-            segr_norm_array: dict[int, float] = {}
-            clusters = self.segregate(norm_array, segr_size)
-            segr_range = max(list(norm_array.values())) / len(clusters)
-            for c_idx, cluster in enumerate(clusters):
-                for key, norm_value in self.normalize_array(cluster).items():
-                    segr_norm_array[key] = (norm_value*segr_range) + ((len(clusters)-1-c_idx)*segr_range)
-            norm_array = segr_norm_array
+            norm_array: dict[int, float] = dict(zip(keys, norm_source))
 
-        return norm_array
-
-    @staticmethod
-    def level_array(array: dict[int, Any]) -> dict[int, float]:
-        keys, source = list(array.keys()), list(array.values())
-
-        # Handle errors
-        if len(source) == 0:
-            raise ValueError("No keys in dict")
-        if isinstance(source[0], list):
-            for i, (key, item) in enumerate(zip(keys, source)):
-                if len(item) == 0:
-                    raise ValueError(f"Empty Iterable found in key '{key}'")
-                if isinstance(item, (int, float)):
-                    source[i] = np.mean(item).item()
+            # Segregate normalization when enabled
+            if segr_size is not None:
+                # Sort if ranking is not given
+                if ranking is None:
+                    norm_array = dict(sorted(norm_array.items(), key=lambda item: (item[1], -item[0]), reverse=True))
                 else:
-                    ValueError(f"Cannot convert variable of type '{type(item)}'")
-        elif isinstance(source[0], ndarray):
-            source = [item().mean().item() for item in source]
-        elif isinstance(source[0], Tensor):
-            source = [item().mean().item() for item in source]
-        elif not isinstance(source[0], (float, int)):
-            ValueError(f"Cannot consolidate variable of type '{type(source[0])}'")
+                    norm_array = {key: norm_array[key] for key in ranking.keys() if key in norm_array}
 
-        source = np.array(source)
-        level_source = source - np.min(np.clip(source, None, 0))
-        return {k: v for k, v in zip(keys, level_source)}
+                segr_norm_array: dict[int, float] = {}
+                clusters = self.segregate(norm_array, segr_size)
+                segr_range: float = np.max(norm_source).item() / len(clusters)
+                for c_idx, cluster in enumerate(clusters):
+                    for key, norm_value in self.normalize_array(cluster).items():
+                        segr_norm_array[key] = (norm_value*segr_range) + ((len(clusters)-1-c_idx)*segr_range)
+                norm_array = segr_norm_array
+
+            for key, value in norm_array.items():
+                full_norm_array[key] = value
+
+        return full_norm_array
+
+    def level_array(self, array: dict[int, Any], index: int = None, genus_separated: bool = False) -> dict[int, float]:
+        full_level_array = {key: np.nan for key in array.keys()}
+        # Filter by genera
+        for genus in (self.population.genera if genus_separated else [-1]):
+            keys    = [key for key in array.keys() if not genus_separated or self.population.genomes[key].genus == genus]
+            source  = [value for (key, value) in array.items() if not genus_separated or self.population.genomes[key].genus == genus]
+
+            # Handle errors
+            if len(source) == 0:
+                raise ValueError("No keys in dict")
+            sample = source[0]
+            if isinstance(sample, list):
+                for i, (key, item) in enumerate(zip(keys, source)):
+                    if len(item) == 0:
+                        raise ValueError(f"Empty Iterable found in key '{key}'")
+                    if isinstance(item, (int, float)):
+                        if index is None:
+                            source[i] = np.mean(item).item()
+                        else:
+                            source[i] = item[-1]
+                    else:
+                        ValueError(f"Cannot convert variable of type '{type(item)}'")
+            elif isinstance(sample, (ndarray, Tensor)):
+                source = [a.mean().item() for a in source]
+            elif not isinstance(sample, (float, int)):
+                ValueError(f"Cannot consolidate variable of type '{type(sample)}'")
+
+            source = np.array(source)
+            level_source = source - np.min(np.clip(source, None, 0))
+
+            for key, value in zip(keys, level_source):
+                full_level_array[key] = value
+
+        return full_level_array
 
     @staticmethod
     def sort_episodes(episode_mapping: dict[int, list[int]], *buffers: TensorDict):
@@ -717,7 +742,7 @@ class Algorithm(object):
 
         return episode_lengths
 
-    # # TODO: Implement saving and loading of Reinforcing
+    # # TODO: Implement saving and loading of RL Algorithm
     # def save(self, name: str = None, directory: str = None, file_no: int = None, replace=False):
     #     # exclude = ['population', 'parameters', 'model', 'replay', 'logging', 'writer']
     #     # state = {var: getattr(self, var) for var in vars(self).keys() if var not in exclude}

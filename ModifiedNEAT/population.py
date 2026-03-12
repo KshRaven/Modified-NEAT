@@ -163,7 +163,9 @@ class Population(object):
             res = res[0]
         return res
 
-    def get_mapping(self, consolidated=False, grouped=False):
+    def get_mapping(
+            self, consolidated=False, grouped=False
+        ) -> dict[int, int] | tuple[dict[int, int], ...] | dict[tuple[int, ...], int]:
         """
         Mapping of keys / group of keys to an index, for each genus or entire population
         """
@@ -180,6 +182,7 @@ class Population(object):
                         index += 1
                 mapping = consolidated_mapping
             elif grouped:
+                assert all([len(gm) == len(mapping[0]) for gm in mapping])
                 grouped_mapping = {}
                 for group in zip(*[list(genus_mapping.keys()) for genus_mapping in mapping]):
                     grouped_mapping[group] = index

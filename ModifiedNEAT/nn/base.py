@@ -31,7 +31,7 @@ def _addindent(s_, numSpaces):
 class NeatParameter(nn.Module):
     __indexer = count(0)
 
-    def __init__(self, shape: Union[int, Iterable[int]], requires_grad=False,
+    def __init__(self, shape: int | Iterable[int], requires_grad=False,
                  device: torch.device = 'cpu', dtype: torch.dtype = torch.float32):
         super(NeatParameter, self).__init__()
         if isinstance(shape, (int, float)):
@@ -166,14 +166,14 @@ class NeatParameter(nn.Module):
 
         return self.mapping, self.genome_num
 
-    def get(self, keys: Union[int, Iterable[int]] = None):
+    def get(self, keys: int | Iterable[int] = None):
         if keys is None:
             return self.data
         elif isinstance(keys, (int, float)):
             keys = [keys]
         return self.data[[self.mapping[i] for i in keys]]
 
-    def __getitem__(self, keys: Union[int, Iterable[int]] = None):
+    def __getitem__(self, keys: int | Iterable[int] = None):
         return self.get(keys)
 
     def __str__(self):
@@ -303,7 +303,7 @@ class NeatModule(nn.Module):
             res[i] = list(range(shape[i]))
         return res
 
-    def fetch(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None):
+    def fetch(self, tensor: Tensor, keys: int | Iterable[int] = None):
         if isinstance(keys, (int, float)):
             keys = [keys]
         elif keys is None:
@@ -359,9 +359,12 @@ class NeatModule(nn.Module):
 
 
 class Model(NeatModule):
-    def __init__(self):
+    def __init__(self, distribution: str = 'normal'):
         super().__init__()
-        self.distribution: str = 'normal'
+        self.distribution: str = distribution
+    
+    def set_ditribution(self, distribution: str):
+        self.distribution = distribution
 
     def dist(self, mean: Tensor, std: Union[Tensor, None], latent: Tensor = None, verbose: int = None):
         mean, std = mean.float(), std.float() if std is not None else None
@@ -439,56 +442,29 @@ class Model(NeatModule):
         else:
             return distribution
 
-    def get_mean(self, latent: Tensor, keys: Union[int, Iterable[int]] = None) -> Tensor:
+    def get_mean(self, latent: Tensor, keys: int | Iterable[int] = None) -> Tensor:
         raise NotImplementedError(f"No 'get_mean' method")
 
-    def get_std(self, latent: Tensor, keys: Union[int, Iterable[int]] = None) -> Tensor:
+    def get_std(self, latent: Tensor, keys: int | Iterable[int] = None) -> Tensor | None:
         raise NotImplementedError(f"No 'get_std' method")
 
-    def get_action(self, state: Tensor, keys: Union[int, Iterable[int]] = None) -> tuple[Tensor, Tensor]:
+    def get_mean_std(self, latent: Tensor, keys: int | Iterable[int] = None) -> tuple[Tensor, Tensor | None]:
+        raise NotImplementedError(f"No 'get_mean_std' method")
+
+    def get_action(self, state: Tensor, keys: int | Iterable[int] = None) -> tuple[Tensor, Tensor]:
         raise NotImplementedError(f"No 'get_action' method")
 
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, Iterable[int]] = None) -> tuple[Tensor, Union[Tensor, None]]:
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: int | Iterable[int] = None) -> tuple[Tensor, Tensor | None]:
         raise NotImplementedError(f"No 'evaluate_action' method")
 
-    def get_policy(self, state: Tensor, keys: Union[int, Iterable[int]] = None, **options) -> Tensor:
+    def get_policy(self, state: Tensor, keys: int | Iterable[int] = None, **options) -> Tensor:
         raise NotImplementedError(f"No 'get_policy' method")
 
-    def get_value(self, state: Tensor, keys: Union[int, Iterable[int]] = None) -> Tensor:
+    def get_value(self, state: Tensor, keys: int | Iterable[int] = None) -> Tensor:
         raise NotImplementedError(f"No 'get_value' method")
-
-    def __repr__(self):
-        if len(self.params) == 0:
-            # We treat the extra repr like the sub-module, one item per line
-            extra_lines = []
-            extra_repr = self.extra_repr()
-            # empty string will be split into list ['']
-            if extra_repr:
-                extra_lines = extra_repr.split("\n")
-            child_lines = []
-            for key, module in self._modules.items():
-                mod_str = repr(module)
-                mod_str = _addindent(mod_str, 2)
-                child_lines.append("(" + key + "): " + mod_str)
-            lines = extra_lines + child_lines
-
-            main_str = self._get_name() + "("
-            if lines:
-                # simple one-liner info, which most builtin Modules will use
-                if len(extra_lines) == 1 and not child_lines:
-                    main_str += extra_lines[0]
-                else:
-                    main_str += "\n  " + "\n  ".join(lines) + "\n"
-
-            main_str += ")"
-            return main_str
-        else:
-            params = ""
-            for i, (param, value) in enumerate(self.params.items()):
-                params += f"{param}={value}"
-                if i < len(self.params)-1:
-                    params += ", "
-            return f"{self.__class__.__name__}[NeatModule]({params})"
+    
+    def extra_repr(self) -> str:
+        return f"distribution='{self.distribution}'"
 
 
 def check_for_illegal_zeros(config: Config, array: Union[CPUArray, GPUArray], param: NeatParameter, modules: Union[NeatModule, list[NeatModule], dict[Any, NeatModule]]):

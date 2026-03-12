@@ -54,10 +54,10 @@ class NEAT(Algorithm):
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
         self.order: int         = manage_params(options, 'order', 0)
         self.normalize: int     = manage_params(options, 'normalize', 0)
-        self.epsilon: float     = manage_params(options, 'epsilon', 1e-10)
+        self.epsilon: float     = manage_params(options, 'epsilon', 1e-12)
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
         self.pol_reg: float     = manage_params(options, 'pol_reg', 0.0)
-        self.std_reg: float     = manage_params(options, 'std_reg', 0.0)
+        self.std_reg: float     = manage_params(options, 'std_reg', 0.5)
         self.validate: bool     = manage_params(options, 'validate', False)
         self.segr_size: Union[float, None] = manage_params(options, 'segr_size', None)
         self.target_kl: Union[float, None] = manage_params(options, 'target_kl', None)
@@ -128,47 +128,52 @@ class NEAT(Algorithm):
         return filled
 
     def set_scores(self, scores: dict[int, float], policy: dict[int, float] | None):
-        if policy is not None:
-            assert all([key in policy for key in scores.keys()])
-
         def sort_key(item: tuple[int, float]):
             key, score = item
             return score, -key
 
-        scores = dict(sorted(self.normalize_array(scores).items(), key=sort_key, reverse=True))
-        if self.pol_reg != 0:
-            policy = self.normalize_array(policy, None, self.segr_size, scores)
-            scores = {key: self.rew_reg*scores[key] + self.pol_reg*policy[key] for key in scores.keys()}
-            scores = dict(sorted(scores.items(), key=sort_key, reverse=True))
-        else:
-            scores = dict(sorted(scores.items(), key=sort_key, reverse=True))
-        true_scores = scores
+        scores = dict(sorted(self.normalize_array(scores, genus_separated=True).items(), key=sort_key, reverse=True))
+        global_scores = dict(sorted(self.normalize_array(scores).items(), key=sort_key, reverse=True))
+        if self.pol_reg > 0.:
+            assert policy is not None
+            assert all([key in policy for key in scores.keys()])
+            policy = self.normalize_array(policy, None, self.segr_size, scores, genus_separated=True)
+            global_policy = self.normalize_array(policy, None, self.segr_size, scores)
+            scores = dict(sorted(
+                {
+                    key: (self.rew_reg * scores[key]) + (self.pol_reg * policy[key])
+                    for key in scores.keys()
+                }.items(), 
+                key=sort_key, reverse=True
+            ))
+            global_scores = dict(sorted(
+                {
+                    key: (self.rew_reg * global_scores[key]) + (self.pol_reg * global_policy[key])
+                    for key in scores.keys()
+                }.items(), 
+                key=sort_key, reverse=True
+            ))
 
-        available_keys = list(true_scores.keys())
-        available_scores = list(true_scores.values())
-
-        for genome in self.population.genomes.values():
-            if genome.key in available_keys:
-                genome.fitness = true_scores[genome.key]
-            else:
-                genome.fitness = 0.0 # -np.inf
-
-        # Normalize between species members considering genomes that were ignored
-        upper_limit = 1.0 + self.pol_reg
-        for specie in self.population.species_set.species.values():
-            fitnesses = np.array([genome.fitness for genome in specie.members.values()])
-            inf_fitnesses = np.isinf(fitnesses)
-            if np.any(inf_fitnesses):
-                raise ValueError(f"Cannot have an inf fitness value; 0.0 < fitness < [1.0, 2.0]")
-            if np.any((fitnesses < 0) | (fitnesses > upper_limit)):
-                raise ValueError(f"Cannot have a fitness value outside of [0.0, <upper_limit>]")
-            minimum, maximum = np.min(fitnesses).item(), np.max(fitnesses).item()
-            difference = maximum - minimum
-            for genome in specie.members.values():
-                genome.fitness = upper_limit if difference == 0.0 else \
-                    upper_limit * (genome.fitness - minimum) / (maximum - minimum)
+        available_keys = list(global_scores.keys())
+        available_scores = list(global_scores.values())
 
         criterion = self.population.config.general.fitness_criterion
+        score_min, score_max = np.min(available_scores).item(), np.max(available_scores).item()
+        score_min -= abs(score_min)
+        score_max += abs(score_max)
+        if score_min == 0.: score_min = -score_max
+        if score_max == 0.: score_max = -score_min
+        reg_sum = self.rew_reg + self.pol_reg
+        for genome in self.population.genomes.values():
+            if genome.key in available_keys:
+                genome.fitness = scores[genome.key]
+            else:
+                genome.fitness = (
+                    (score_min if criterion == 'max' else score_max)
+                    if self.pol_reg <= 0.0 else 
+                    (-reg_sum if criterion == 'max' else reg_sum * 2)
+                )
+
         if criterion == 'max':
             best_genome_key = available_keys[np.argmax(available_scores)]
         elif criterion == 'min':
@@ -177,12 +182,16 @@ class NEAT(Algorithm):
             best_genome_key = available_keys[np.argmin((np.mean(available_scores) - available_scores) ** 2)]
         else:
             raise ValueError(f"unsupported fitness criteria")
+        
+        global_fitness_stats: tuple[float, ...] = tuple([
+            func(available_scores).item() for func in [np.min, np.max, np.mean, np.std]
+        ])
 
-        return best_genome_key
+        return best_genome_key, global_fitness_stats
 
     def learn(self, evaluation_function: callable, steps: int, epochs: int = None, batch_size: int = None,
               accuracy_error=0.20, accuracy_type='continuous', verbose: int = None):
-        print(f"Logging to {self.log_dir+self.log_name}")
+        print(f"Logging to {CM(self.log_path, Fore.MAGENTA)}")
         if epochs is None:
             epochs = np.inf
         epoch_done = 0
@@ -196,12 +205,6 @@ class NEAT(Algorithm):
             self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
             if len(self.population.to_delete) == len(self.population.genomes):
                 self.population.to_delete.clear()
-            run_time = clock.perf_counter() - ts
-            if verbose and verbose >= 2:
-                print(f"collected data in {CM(f'{round(run_time, 2)}s', Fore.LIGHTCYAN_EX)}")
-
-            # Rolling out genomes that are not to be deleted
-            pts = clock.perf_counter()
             # TODO: Might need to remove the check below since it might be redundant
             invalid_population = len(self.population.to_delete) == len(self.population.genomes)
             valid_keys = [
@@ -209,6 +212,12 @@ class NEAT(Algorithm):
             ] if self.validate else list(self.population.genomes.keys())
             if len(valid_keys) == 0:
                 valid_keys = list(self.population.genomes.keys())
+            run_time = clock.perf_counter() - ts
+            if verbose and verbose >= 2:
+                print(f"collected data in {CM(f'{round(run_time, 2)}s', Fore.LIGHTCYAN_EX)}")
+
+            # Rolling out genomes that are not to be deleted
+            pts = clock.perf_counter()
             with torch.no_grad():
                 # Roll out data from buffers
                 ts = clock.perf_counter()
@@ -341,12 +350,12 @@ class NEAT(Algorithm):
                     batch_indices, states, actions, None,
                     accuracy_error, accuracy_type, verbose, keys=valid_keys
                 )[0] if self.pol_reg != 0 else None
-                balanced_scores = {}
-                for genus in self.population.genera:
-                    genus_scores = {key: score for key, score in scores.items() if self.population.genomes[key].genus == genus}
-                    for key, score in self.normalize_array(genus_scores).items():
-                        balanced_scores[key] = score
-                best_genome_key = self.set_scores(balanced_scores, policy_accuracy)
+                # balanced_scores = {}
+                # for genus in self.population.genera:
+                #     genus_scores = {key: score for key, score in scores.items() if self.population.genomes[key].genus == genus}
+                #     for key, score in self.normalize_array(genus_scores).items():
+                #         balanced_scores[key] = score
+                best_genome_key, fitness_stats = self.set_scores(scores, policy_accuracy)
                 set_time = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"set scores in {CM(f'{round(set_time, 2)}s', Fore.LIGHTCYAN_EX)}")
@@ -387,14 +396,14 @@ class NEAT(Algorithm):
                     for key in returns.keys()
                 ])
                 try:
-                    if self.pol_reg != 0:
+                    if self.pol_reg > 0.:
                         policy_acc = policy_accuracy[best_genome_key]
                     else:
                         policy_acc = self.get_accuracy(
                             batch_indices, states, actions, None,
                             accuracy_error, accuracy_type, verbose, keys=[best_genome_key]
                         )[0][best_genome_key]
-                    if self.pol_reg != 0:
+                    if self.pol_reg > 0:
                         policy_reduction = 1 if len(policy_accuracy) <= 1 else sorted(
                             list(policy_accuracy.keys()), key=lambda k: policy_accuracy[k]
                         ).index(best_genome_key) / (len(policy_accuracy)-1)
@@ -431,6 +440,7 @@ class NEAT(Algorithm):
 
             # Logging
             with torch.no_grad():
+                self._init_writer()
                 self.logging.update(
                     ep_len_mean=ep_len_mean, ep_len_std=ep_len_std, ep_rew_mean=ep_rew_mean, ep_rew_std=ep_rew_std,
                     std=std, policy_acc=policy_acc, # explained_variance=explained_variance,
@@ -494,10 +504,14 @@ class NEAT(Algorithm):
                 self.prev_valid_keys = valid_keys
                 extra = 'population/'
                 self.writer.add_scalar(extra+'best_genome', best_genome.key, self.updates_done)
-                self.writer.add_scalar(extra+'best_fitness', best_genome.fitness, self.updates_done)
+                if len(self.population.genera) > 0:
+                    self.writer.add_scalar(extra+'best_genus', best_genome.genus, self.updates_done)
+                # self.writer.add_scalar(extra+'best_fitness', best_genome.fitness, self.updates_done)
                 self.writer.add_scalar(extra+'survival_rate', survival_rate, self.updates_done)
                 self.writer.add_scalar(extra+'creep_score', creep, self.updates_done)
                 self.writer.add_scalar(extra+'creep_score_max', creep_max, self.updates_done)
+                for param, label in zip(fitness_stats, ['min', 'max', 'mean', 'std']):
+                    self.writer.add_scalar(extra+f'fitness_{label}', param, self.updates_done)
 
                 # Schedule
                 extra = 'schedule/'
@@ -597,13 +611,13 @@ if __name__ == '__main__':
         def forward(self, state: Tensor):
             return self.get_policy(state)
 
-        def get_mean(self, latent: Tensor, key: int = None) -> Tensor:
+        def get_mean(self, latent: Tensor, key: int = None):
             return self.mean(latent, key=key) * 100
 
-        def get_std(self, latent: Tensor, key: int = None) -> Tensor:
+        def get_std(self, latent: Tensor, key: int = None):
             return 10 ** (-2 + self.log_std(latent, key=key) * 3)
 
-        def get_action(self, state: Tensor, key: int = None) -> tuple[Tensor, Tensor]:
+        def get_action(self, state: Tensor, key: int = None):
             latent = self.act_proj(state, key=key)
             mean, std = self.get_mean(latent, key=key), self.get_std(latent, key=key)
             dist = torch.distributions.Normal(mean, std)
@@ -611,7 +625,7 @@ if __name__ == '__main__':
             log_prob = dist.log_prob(action)
             return action, log_prob
 
-        def evaluate_action(self, state: Tensor, action: Tensor, key: int = None) -> [Tensor, Union[Tensor, None]]:
+        def evaluate_action(self, state: Tensor, action: Tensor, key: int = None):
             latent = self.act_proj(state, key=key)
             mean, std = self.get_mean(latent, key=key), self.get_std(latent, key=key)
             dist = torch.distributions.Normal(mean, std)

@@ -16,7 +16,7 @@ def load_requirements(filename='requirements.txt'):
 
 setup(
     name='ModifiedNEAT',
-    version='0.5.11',
+    version='0.5.12',
     author='Bradley Odimmasi',
     author_email='bodimmasi@gmail.com',
     description='Modified version of python NEAT algorithm that uses PyTorch modules',

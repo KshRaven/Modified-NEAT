@@ -302,7 +302,8 @@ if __name__ == '__main__':
     ACTIVATION      = nn.SiLU()
     BIAS            = True
     PROBABILISTIC   = False
-    FILE_NAME       = f"PongModel-E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_A-{ACTIVATION.__class__.__name__}_"\
+    FILE_NAME       = f"PongModel-E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_"\
+                      f"A-{ACTIVATION.__class__.__name__}_"\
                       f"B{int(BIAS)}_P{int(PROBABILISTIC)}"
 
     MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
