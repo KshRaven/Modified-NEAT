@@ -572,7 +572,8 @@ class Attention(NeatModule):
         self.causal_mask = causal_mask
 
         # MODULES
-        self.pre_norm = LayerNorm(dim_size, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
+        self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
+        # self.pre_norm = LayerNorm(dim_size, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
         self.mult = 1+differential if differential else 1
         self.query_proj = Linear(dim_size if not inputs else inputs, heads*self.head_dim*self.mult, bias, device, dtype)
         self.key_proj   = Linear(dim_size if not inputs else inputs, kv_heads*self.head_dim*self.mult, bias, device, dtype)
@@ -582,8 +583,8 @@ class Attention(NeatModule):
         self.transpose  = Transpose() if self.stride is not None else None
         self.rotary_embedding = RoPE(self.max_seq_len, dim_size * self.mult, heads, self.constant, device, dtype)
         self.softmax    = nn.Softmax(-1)
-        self.head_norm  = LayerNorm(self.head_dim, self.epsilon, self.affine, bias,  device, dtype) if self.normalize else None
-        # self.head_norm  = LayerNorm(self.head_dim, self.epsilon, False, device, dtype)
+        self.head_norm  = RMSNorm(self.head_dim, self.epsilon, self.affine, device, dtype) if self.normalize else None
+        # self.head_norm  = LayerNorm(self.head_dim, self.epsilon, bias, device, dtype) if self.normalize else None
         self.diff_lambda = AttentionLambda(
             heads, self.head_dim, layer_idx, differential, 0.0, 0.1, 2.0, True, self.epsilon, device, dtype
         ) if differential else None
@@ -714,15 +715,12 @@ class Attention(NeatModule):
             query, key, value, keys, self.causal_mask and pretext is None, verbose
         )
         attention = attention.reshape(g, b, s, self.dim_size)
-        # out_view shape:  (genomes, batch_size, seq_len, channels)
+        # out_view shape:  (genomes, batch_size, seq_len, dim_size)
         if verbose:
             print(get_tensor_info(attention, 'Attented Values', verbose))
 
         # Apply output projection
-        if self.stride is None:
-            tensor: Tensor = self.out_proj(attention, keys=keys)
-        else:
-            tensor = self.transpose(self.out_proj(self.transpose(attention), keys=keys))
+        tensor: Tensor = self.out_proj(attention, keys=keys)
         # Add the residue
         if self.skip_connection:
             tensor = tensor + residue
@@ -1257,7 +1255,8 @@ class SwiGLU(NeatModule):
 
         # BUILD
         hidden_size = self.fwd_exp * dim_size
-        self.pre_norm = LayerNorm(dim_size, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
+        self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
+        # self.pre_norm = LayerNorm(dim_size, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
         self.inp_proj = Linear(dim_size, hidden_size, bias, device, dtype)
         self.mul_proj = Linear(dim_size, hidden_size, bias, device, dtype)
         self.out_proj = Linear(hidden_size, dim_size, self.out_bias, device, dtype)

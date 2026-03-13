@@ -119,7 +119,8 @@ class BaseModelSequential(Model):
 
         # Build
         ff = mn.Sequential(*[
-            mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+            mn.RMSNorm(dim_size, device=device, dtype=dtype),
+            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
             activation,
             mn.Linear(dim_size, dim_size, bias, device, dtype)
         ])
@@ -133,7 +134,8 @@ class BaseModelSequential(Model):
             activation=activation, # ff=ff,
         )
         self.pol_proj = mn.Sequential(*[
-            mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+            mn.RMSNorm(dim_size, device=device, dtype=dtype),
+            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
             activation,
             mn.Linear(dim_size, 2*(outputs ** (2 if self.distribution == 'discrete' else 1)), True, device, dtype)
         ])
@@ -246,20 +248,20 @@ INPUTS              = A_OUTPUTS if USE_AE else A_INPUTS # SEQ_LEN // (STRIDE ** 
 OUTPUTS             = 1
 EMBED_SIZE          = 16
 COEFFICIENTS        = 1
-LAYERS              = 1
+LAYERS              = 3
 HEADS               = 1
 KV_HEADS            = None
 FWD_EXP             = 2
 DIFFERENTIAL        = False
 SKIP_CONNECTION     = True
-ENABLE_BIAS         = True
+ENABLE_BIAS         = False
 PROBABILISTIC       = False
 CONSTANT            = 100
 MEMORY_SIZE         = 5
 GAMMA               = np.exp(np.log(0.10) / 128)
 ALPHA               = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
-ALPHA_ORDER         = 0
+ALPHA_ORDER         = 2
 REW_NORM            = 4
 LOSS_REG            = 0.
 TEST_ACTIVATION     = nn.GELU()
@@ -297,12 +299,12 @@ BASE_NAME: str = (
     f"GT{GAME_TYPE}_AE{int(USE_AE)}_SQ{int(SEQUENTIAL)}_DC{int(DISCRETE)}_"
     f"SeqL{SEQ_LEN}_E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_A-{TEST_ACTIVATION.__class__.__name__}_"
     f"H{HEADS}_K{KV_HEADS}_F{FWD_EXP}_D{int(DIFFERENTIAL)}_R{int(SKIP_CONNECTION)}_"
-    f"Con{CONSTANT}_B{int(BIAS)}_P{int(PROBABILISTIC)}"
+    f"Con{CONSTANT}_B{int(ENABLE_BIAS)}_P{int(PROBABILISTIC)}"
 )
 FILE_NAME: str = f"FlappyBirdModel-{BASE_NAME}"
 FILE_DIR: str | None = None
 FILE_NO: int | None = None
-INIT_GEN: int | None = 0
+INIT_GEN: int | None = None
 
 RUNS = 1
 GOAL = 20
@@ -516,7 +518,9 @@ def evaluate(population: neat.Population, **options):
 
     _, file_no = population.save_dict(FILE_NAME, FILE_DIR, FILE_NO, replace=population.generation != INIT_GEN)
     if population.generation == INIT_GEN:
-        FILE_NO = file_no
+        print(f"Saved initial population to file number '{file_no}'")
+        print(f"Initial generation was set to {INIT_GEN}, now updated to {population.generation}")
+        FILE_NO = file_no 
     # trainer.save('flappy_bird', replace=population.generation != INIT_GEN)
 
 
@@ -566,15 +570,16 @@ def run():
         if args.load.lower() == 'true':
             FILE_NO = None
             print(f"Will load the latest population checkpoint")
+            population.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
         else:
             try:
                 FILE_NO = int(args.load)
                 print(f"WIll load population checkpoint from file number '{FILE_NO}'")
+                population.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
             except ValueError:
                 if args.load.lower() not in ['false', 'none', 'null', '']:
                     print(f"Error: --load argument must be a boolean, valid positive integer, null or empty; Got '{args.load}'")
                     exit(1)
-        population.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
 
     ENV = Game(
         population.size, goal=GOAL, seq_len=SEQ_LEN if SEQUENTIAL else None,
@@ -622,7 +627,7 @@ def run():
         print(f"starting evaluation: population={len(population.genomes)}")
         # trainer.load(name='flappy_bird', file_no=None)
         try:
-            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', 3)
+            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', True)
         except KeyboardInterrupt:
             pass
 
@@ -697,15 +702,6 @@ def run():
                   f"Score = {env.score} ",
                   end='')
         print(f" ")
-
-    # while True:
-    #     evaluate(population, trainer=trainer)
-
-    # for p in population.get(winner):
-    #     print(p)
-
-    # show final stats
-    # print('\nBest genome:\n{!s}'.format(winner.key))
 
 
 if __name__ == '__main__':
