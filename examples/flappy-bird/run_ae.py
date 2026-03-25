@@ -271,7 +271,7 @@ DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
 MODEL_NUM           = 4
 
 POL_REG         = 0.75
-STD_REG         = 0.50
+STD_REG         = 0.75
 
 MODELS = [
     BaseModelSequential(
