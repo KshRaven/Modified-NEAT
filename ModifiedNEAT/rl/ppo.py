@@ -526,7 +526,7 @@ if __name__ == '__main__':
     DIM_SIZE    = 64
     MODEL       = RModel(INPUTS, OUTPUTS, DIM_SIZE, DEVICE, DTYPE)
     CONFIG      = neat.Config("ppo_test")
-    CONFIG.reproduction.elitism = 50
+    CONFIG.reproduction.elitism = 0.5
     CONFIG.reproduction.min_species_size = 100
     GENOMES     = 100
     POPULATION  = neat.Population(GENOMES, MODEL, CONFIG, init_reporter=True)

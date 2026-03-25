@@ -282,7 +282,7 @@ if __name__ == '__main__':
     CONFIG.reproduction.clone_threshold     = 0.05
     CONFIG.reproduction.survival_threshold  = 0.20
     CONFIG.reproduction.cross_threshold
-    CONFIG.reproduction.elitism             = 30
+    CONFIG.reproduction.elitism             = 0.30
     CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2

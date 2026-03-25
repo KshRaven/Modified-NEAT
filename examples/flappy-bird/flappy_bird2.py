@@ -1248,7 +1248,7 @@ def run():
     config.reproduction.clone_threshold         = 0.05
     config.reproduction.survival_threshold      = 0.10
     config.reproduction.cross_threshold         = 0.00
-    config.reproduction.elitism                 = 30
+    config.reproduction.elitism                 = 0.30
     config.species.compatibility_threshold      = np.inf
     config.stagnation.max_stagnation            = 1
     config.stagnation.species_elitism           = 2

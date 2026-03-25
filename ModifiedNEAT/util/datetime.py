@@ -9,7 +9,7 @@ def unix_to_datetime(unix_time: int):
     return formatted_datetime
 
 
-def unix_to_datetime_file(unix_time: int):
+def unix_to_datetime_file(unix_time: int | float):
     dt = datetime.datetime.fromtimestamp(int(unix_time))
     formatted_datetime = dt.strftime("%Y_%m_%d-%H_%M_%S")
     return formatted_datetime

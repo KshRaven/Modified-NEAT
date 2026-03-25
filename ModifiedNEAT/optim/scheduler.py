@@ -117,6 +117,29 @@ class RandomAnnealing(Scheduler):
             self.set(param, new_value)
 
 
+class BinaryAnnealing(Scheduler):
+    def __init__(self, config: Config, period: int, value: float, params: Union[str, list[str]] = None):
+        """
+        period: number of steps to hold each state (can be 1)
+        factor: multiplier applied to base value for the alternate state
+        """
+        assert period >= 1, "period must be >= 1"
+        super(BinaryAnnealing, self).__init__(config, params)
+
+        self.period = period
+        self.value = value
+
+    def modify(self, param: str):
+        phase = (self._step_idx // self.period) % 2
+
+        if phase == 0:
+            new_value = self.get(param, self._config)
+        else:
+            new_value = self.value
+
+        self.set(param, new_value)
+
+
 if __name__ == '__main__':
     import matplotlib.pyplot as plt
     import matplotlib
@@ -126,28 +149,34 @@ if __name__ == '__main__':
 
     CONFIG = Config('scheduler_test')
     CONFIG.genome.weight_mutate_power = 1.0
-    CONFIG.reproduction.elitism = 40
+    CONFIG.reproduction.elitism = 0.20
+    CONFIG.reproduction.cross_threshold = 0.10
     CONFIG.save()
     CONFIG.load(2)
 
     schedulers = [
         CosineAnnealing(CONFIG, 10, 0.001, warm=True, log=True),
-        CosineAnnealing(CONFIG, 20, 1.5, 'elitism', log=True)
+        CosineAnnealing(CONFIG, 20, 1.5, 'elitism', log=True),
+        BinaryAnnealing(CONFIG, 15, 0, 'cross_threshold')
     ]
 
-    plot0 = []
-    plot1 = []
+    plots: tuple[list[int | float | bool], ...] = tuple([[] for _ in range(len(schedulers))])
     for _ in range(52):
-        plot0.append(CONFIG.genome.weight_mutate_power)
-        plot1.append(CONFIG.reproduction.elitism)
+        data = [
+            CONFIG.genome.weight_mutate_power,
+            CONFIG.reproduction.elitism,
+            CONFIG.reproduction.cross_threshold,
+        ]
+        for p, d in zip(plots, data): p.append(d)
 
         for s in schedulers:
             s.step()
 
-    _, axes = plt.subplots(2, 1, figsize=(10.8, 7.2))
+    n_rows = len(schedulers)
+    _, axes = plt.subplots(n_rows, 1, figsize=(10.8, 7.2))
     axes = axes.flatten()
-    axes[0].plot(plot0, label='mutate_power')
-    axes[1].plot(plot1, label='elitism')
+    for axis, plot, label in zip(axes, plots, ['mutate_power', 'elitism', 'cross_threshold']):
+        axis.plot(plot, label=label)
 
     plt.legend()
     plt.show()

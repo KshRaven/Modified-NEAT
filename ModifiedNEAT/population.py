@@ -550,7 +550,7 @@ class Population(object):
             tpb=self.threads_per_block, verbose=verbose if verbose and verbose >= 2 else False
         )
 
-    def crop(self, keys: Union[int, Iterable[int]], device: torch.device = None):
+    def crop(self, keys: Union[int, Iterable[int]], device: torch.device | str = None):
         if not isinstance(keys, Iterable):
             keys = [keys]
         if device is None:

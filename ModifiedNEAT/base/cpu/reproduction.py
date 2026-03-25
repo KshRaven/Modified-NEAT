@@ -72,7 +72,7 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
 @njit(nogil=True)
 def create_children(genus: int, genus_population: dict[int, Genome], population: dict[int, Genome], species: dict[int, Species],
                     available_gid: int, spawn_amounts: list[int], remaining_species: list[Species], to_delete: list[int],
-                    elitism: int, survival_threshold: float, clone_threshold: float, cross_threshold: float,
+                    elitism: float, survival_threshold: float, clone_threshold: float, cross_threshold: float,
                     cross_multiplier: float, darwin_multiplier: float,
                     criteria: str, ancestors: dict[int, tuple[Genome, Genome]], equal_params: bool, preserve: bool):
     if len(spawn_amounts) != len(remaining_species):
@@ -184,7 +184,8 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         spawn  = spawn_amounts[idx]
         specie = remaining_species[idx]
         # If elitism is enabled, each species always at least gets to retain its elites.
-        spawn = max(spawn, elitism)
+        elite_total = np.ceil(elitism * len(specie.members))
+        spawn = max(spawn, elite_total)
         assert spawn > 0
 
         # Get fitness limits
@@ -198,7 +199,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         execution_count = 0
         # The species has at least one member for the next generation, so retain it.
         for member in sort(specie.members, criteria)[::-1]:
-            purge_limit_reached = not preserve or (len(specie.members) - execution_count <= elitism and preserve)
+            purge_limit_reached = not preserve or (len(specie.members) - execution_count <= elite_total and preserve)
             if not purge_limit_reached and len(specie.members) > 1:
                 if member.key in executions:
                     del specie.members[member.key]
@@ -212,8 +213,8 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         species[specie.key] = specie
 
         # Transfer elites to new generation.
-        if elitism > 0:
-            for m in old_members[:elitism]:
+        if elite_total > 0:
+            for m in old_members[:elite_total]:
                 if m.key not in executions:
                     genus_population[m.key] = m
                     spawn -= 1
@@ -566,7 +567,7 @@ def reproduce(
         # Isn't the effective min_species_size going to be max(min_species_size, self.reproduction_config.elitism)?
         # That would probably produce more accurate tracking of population sizes and relative fitnesses... doing.
         # TODO: document.
-        min_species_size = max(min_species_size, config.reproduction.elitism)
+        min_species_size = max(min_species_size, max([np.ceil(config.reproduction.elitism * len(s.members)) for s in remaining_species]))
         # TODO: add pop size to arguments or just get from current population?
         pop_size = math.ceil(len(population) / len(genera))
 
@@ -582,7 +583,7 @@ def reproduce(
         # print(f"Current genome index = {genome_indexer}")
         genome_indexer = create_children(
             genus, genus_population, population, species_set.species, genome_indexer, spawn_amounts, remaining_species,
-            to_delete, int(config.reproduction.elitism),
+            to_delete, config.reproduction.elitism,
             config.reproduction.survival_threshold, config.reproduction.clone_threshold, config.reproduction.cross_threshold,
             config.reproduction.cross_multiplier, config.reproduction.darwin_multiplier,
             config.general.fitness_criterion, ancestors, False, config.reproduction.preserve_elite
