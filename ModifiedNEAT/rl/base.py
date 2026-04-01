@@ -536,7 +536,7 @@ class Algorithm(object):
                      keys: Union[int, list[int]] = None) -> tuple[dict[int, float], dict[int, float]]:
         if isinstance(keys, (int, float)):
             keys = [keys]
-        all_keys = list(self.primary.mapping.keys())
+        all_keys = list(self.population.genomes.keys())
         keys = all_keys if keys is None else keys
         with torch.no_grad():
             ts, ud, ut = clock.perf_counter(), 0, len(keys)
@@ -589,11 +589,11 @@ class Algorithm(object):
                     actions_acc[key] = 0
                     rewards_acc[key] = 0
 
-                if verbose:
+                if verbose >= 2:
                     ud += 1
                     eta(ts, ud, ut, 'Getting accuracy')
 
-            if verbose:
+            if verbose >= 2:
                 print(f"\rGot accuracy in {round(clock.perf_counter() - ts, 2)}s")
             return actions_acc, rewards_acc
 

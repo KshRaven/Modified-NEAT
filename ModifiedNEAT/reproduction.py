@@ -104,7 +104,7 @@ class Reproduction:
     @njit(nogil=True)
     def spawn(new_population: dict[int, Genome], species: dict[int, Species], available_gid: int,
               spawn_amounts: list[int], remaining_species: list[Species], to_delete: list[int],
-              elitism: int, survival_threshold: float, darwin_multiplier: float, criteria: str,
+              elitism: float, survival_threshold: float, darwin_multiplier: float, criteria: str,
               structure_params: tuple, weight_params: tuple, bias_params: tuple,
               ancestors: dict[int, tuple[Genome, Genome]] = None):
         def sort(members: dict[int, Genome], criteria: str) -> list[Genome]:
@@ -144,7 +144,8 @@ class Reproduction:
         for idx in range(len(temp)):
             spawn, specie = temp[idx]
             # If elitism is enabled, each species always at least gets to retain its elites.
-            spawn = max(spawn, elitism)
+            elite_total = np.ceil(elitism * len(specie.members))
+            spawn = max(spawn, elite_total)
             assert spawn > 0
 
             # Delete unwanted members
@@ -162,8 +163,8 @@ class Reproduction:
             species[specie.key] = specie
 
             # Transfer elites to new generation.
-            if elitism > 0:
-                for m in old_members[:elitism]:
+            if elite_total > 0:
+                for m in old_members[:elite_total]:
                     new_population[m.key] = m
                     spawn -= 1
 
@@ -240,7 +241,7 @@ class Reproduction:
         # Isn't the effective min_species_size going to be max(min_species_size, self.reproduction_config.elitism)?
         # That would probably produce more accurate tracking of population sizes and relative fitnesses... doing.
         # TODO: document.
-        min_species_size = max(min_species_size, self._config.reproduction.elitism)
+        min_species_size = max(min_species_size, max([np.ceil(self._config.reproduction.elitism * len(s.members)) for s in remaining_species]))
         # TODO: add pop size to arguments or just get from current population?
         pop_size = len(population)
         spawn_amounts = self.compute_spawn(adjusted_fitnesses, previous_sizes, pop_size, min_species_size,

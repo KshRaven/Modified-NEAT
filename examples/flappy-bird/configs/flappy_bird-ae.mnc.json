@@ -1,0 +1,44 @@
+{
+  "general config": {
+    "fitness_criterion": "max",
+    "fitness_threshold": Infinity,
+    "pop_size": 100,
+    "reset_on_extinction": true,
+    "seed": 932444
+  },
+  "genome config": {
+    "weight_init_mean": 0.0,
+    "weight_init_std": 1.0,
+    "weight_max_value": Infinity,
+    "weight_min_value": -Infinity,
+    "weight_mutate_power": 0.7,
+    "weight_mutate_rate": 0.5,
+    "weight_replace_rate": 0.0,
+    "weight_add_prob": 0.25,
+    "weight_del_prob": 1e-06,
+    "param_epsilon": 0.0,
+    "compatibility_disjoint_coefficient": 1.0,
+    "compatibility_weight_coefficient": 0.1,
+    "init_type": "normal",
+    "single_structural_mutation": false
+  },
+  "species config": {
+    "compatibility_threshold": Infinity
+  },
+  "stagnation config": {
+    "species_fitness_func": "max",
+    "max_stagnation": 1,
+    "species_elitism": 2
+  },
+  "reproduction config": {
+    "elitism": 0.3,
+    "clone_threshold": 0.05,
+    "survival_threshold": 0.1,
+    "cross_threshold": 0.05,
+    "cross_multiplier": 0.75,
+    "darwin_multiplier": 0.33,
+    "min_species_size": 100,
+    "purge": 1,
+    "preserve_elite": false
+  }
+}

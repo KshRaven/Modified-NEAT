@@ -2,7 +2,7 @@
 from game import Game
 from ModifiedNEAT.util.fancy_text import CM, Fore
 from ModifiedNEAT.nn.base import Model
-from ModifiedNEAT.nn.modules.sub import Linear, Conv1d, Transpose, ResidualBlock, Sequential, GroupNorm, ConverBase, SequenceEncoding
+# from ModifiedNEAT.nn.modules.sub import Linear, Conv1d, Transpose, ResidualBlock, Sequential, GroupNorm, ConverBase, SequenceEncoding
 # from ModifiedNEAT.nn.modules import Reformer
 from ModifiedNEAT.util.datetime import unix_to_datetime_file
 from ModifiedNEAT.util.qol import manage_params
@@ -12,7 +12,7 @@ import ModifiedNEAT as neat
 import ModifiedNEAT.nn as mn
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+# import torch.nn.functional as F
 
 from torch import Tensor
 from numba.typed import List, Dict
@@ -23,19 +23,20 @@ import time as clock
 import numpy as np
 import warnings
 import argparse
+import os
 
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-DTYPE  = torch.float32
+DTYPE  = torch.float64
 neat.set_device(DEVICE)
 print(f"Using torch device: '{DEVICE}'. neat device: '{neat.device()}'")
 
 
 class BaseModel(Model):
     def __init__(self, inputs: int, outputs: int, dim_size: int, layers: int, coefficients=1, activation=nn.SiLU(),
-                 probabilistic=False, bias=True, device: torch.device = 'cpu', dtype: torch.device = torch.float32, **options):
+                 probabilistic=False, bias=True, device: torch.device | str = 'cpu', dtype: torch.dtype = torch.float32, **options):
         super().__init__()
         # Attributes
         self.inputs         = inputs
@@ -101,7 +102,7 @@ class BaseModelSequential(Model):
     def __init__(self, max_seq_len: int, inputs: int, outputs: int, dim_size: int, layers: int,
                  heads: int, kv_heads: int | None = None, differential: int | bool = False, fwd_exp=1,
                  activation: mn.NeatModule | nn.Module = nn.SiLU(), probabilistic=False, bias=True,
-                 device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options):
+                 device: torch.device | str = 'cpu', dtype: torch.dtype = torch.float32, **options):
         super().__init__()
         # Attributes
         self.max_seq_len    = max_seq_len
@@ -137,7 +138,7 @@ class BaseModelSequential(Model):
             mn.RMSNorm(dim_size, device=device, dtype=dtype),
             # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
             activation,
-            mn.Linear(dim_size, 2*(outputs ** (2 if self.distribution == 'discrete' else 1)), True, device, dtype)
+            mn.Linear(dim_size, 2*outputs, True, device, dtype)
         ])
 
     def extra_repr(self) -> str:
@@ -205,7 +206,7 @@ FULL_STATES         = True
 DELAY               = 0
 USE_AE              = False
 SEQUENTIAL          = True
-DISCRETE            = False
+DISCRETE            = True
 
 # AutoEncoder properties
 MAX_SEQ_LEN     = 6
@@ -222,7 +223,7 @@ A_HEADS         = 1
 A_KV_HEADS      = None
 A_DIFFERENTIAL  = False
 BIAS            = False
-PROBABILISTIC   = True
+PROBABILISTIC   = False
 SAVE_NAME = f"ae_ml{MAX_SEQ_LEN}-i{A_INPUTS}-o{A_OUTPUTS}-d{DIM_SIZE}-k{KERNEL_SIZE}-s{STRIDE}-"\
             f"sl{S_LAYERS}-tl{T_LAYERS}-fl{F_LAYERS}-h{A_HEADS}-kv{A_KV_HEADS}-"\
             f"diff{A_DIFFERENTIAL}-b{BIAS}-prob{PROBABILISTIC}-off{A_OFFSET}"
@@ -245,7 +246,7 @@ AUTOENCODER.single_mode(True)
 GENOMES             = 100
 SEQ_LEN             = MAX_SEQ_LEN // 1
 INPUTS              = A_OUTPUTS if USE_AE else A_INPUTS # SEQ_LEN // (STRIDE ** S_LAYERS) * A_OUTPUTS # 3 if not FULL_STATES else 5
-OUTPUTS             = 1
+OUTPUTS             = 1 if not DISCRETE else 2
 EMBED_SIZE          = 16
 COEFFICIENTS        = 1
 LAYERS              = 3
@@ -258,45 +259,45 @@ ENABLE_BIAS         = False
 PROBABILISTIC       = False
 CONSTANT            = 100
 MEMORY_SIZE         = 5
-GAMMA               = np.exp(np.log(0.10) / 128)
+GAMMA               = np.exp(np.log(0.01) / 128)
 ALPHA               = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
 ALPHA_ORDER         = 2
+<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
 REW_NORM            = 4
 LOSS_REG            = 0.
 TEST_ACTIVATION     = nn.GELU()
+=======
+REW_NORM            = 0
+TEST_ACTIVATION     = nn.SiLU()
+>>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
 CLIP_MIN            = -5
 CLIP_MAX            = -0
-DISTRIBUTION        = 'normal'
+DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
+MODEL_NUM           = 4
 
-POL_REG         = 0.00
-STD_REG         = 0.25
+POL_REG         = 0.75
+STD_REG         = 0.75
 
-if SEQUENTIAL:
-    MODELS = [
-        BaseModelSequential(
-            SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS, DIFFERENTIAL, FWD_EXP,
-            activation, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE,
-            clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION, 
-            constant=CONSTANT, residual=SKIP_CONNECTION,
-        )
-        for activation in [TEST_ACTIVATION, nn.ReLU(), nn.SiLU()]
-    ]
-else:
-    MODELS = [
-        BaseModel(
-            INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
-            activation, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE,
-            clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
-        )
-        for activation in [TEST_ACTIVATION, nn.ReLU(), nn.SiLU()]
-    ]
-
-MODEL0, MODEL1, MODEL2 = MODELS
+MODELS = [
+    BaseModelSequential(
+        SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS, DIFFERENTIAL, FWD_EXP,
+        activation, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE,
+        clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
+        constant=CONSTANT, residual=SKIP_CONNECTION,
+    )
+    if SEQUENTIAL else
+    BaseModel(
+        INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
+        activation, PROBABILISTIC, ENABLE_BIAS, DEVICE, DTYPE,
+        clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
+    )
+    for activation in [TEST_ACTIVATION for _ in range(MODEL_NUM)]
+]
 
 GAME_TYPE = 0 if not FULL_STATES else (1 if PIPE_Y_VELOCITY == 0 else 2)
 BASE_NAME: str = (
-    f"GT{GAME_TYPE}_AE{int(USE_AE)}_SQ{int(SEQUENTIAL)}_DC{int(DISCRETE)}_"
+    f"GT{GAME_TYPE}_AE{int(USE_AE)}_SQ{int(SEQUENTIAL)}_DC{int(DISCRETE)}_T{MODEL_NUM}"
     f"SeqL{SEQ_LEN}_E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_A-{TEST_ACTIVATION.__class__.__name__}_"
     f"H{HEADS}_K{KV_HEADS}_F{FWD_EXP}_D{int(DIFFERENTIAL)}_R{int(SKIP_CONNECTION)}_"
     f"Con{CONSTANT}_B{int(ENABLE_BIAS)}_P{int(PROBABILISTIC)}"
@@ -310,43 +311,23 @@ RUNS = 1
 GOAL = 20
 STEPS = GOAL * 100 * RUNS
 EPOCHS = 150
+FILTER_DEAD = True
 
 print(f"\ncreating config")
-config = neat.Config('flappy_bird')
-
-config.genome.init_type                 = 'normal'
-config.genome.weight_init_mean          = 0.0
-config.genome.weight_init_std           = 1.0
-config.genome.weight_min_value          = -np.inf
-config.genome.weight_max_value          = +np.inf
-config.genome.weight_mutate_power       = 0.7
-config.genome.weight_mutate_rate        = 0.50
-config.genome.weight_replace_rate       = 0.00
-config.genome.weight_add_prob           = 0.00
-config.genome.weight_del_prob           = 0.00
-config.genome.single_structural_mutation = False
-config.genome.param_epsilon             = 0e-6
-config.reproduction.min_species_size    = GENOMES
-config.reproduction.purge               = 1
-config.reproduction.clone_threshold     = 0.10
-config.reproduction.survival_threshold  = 0.20
-config.reproduction.cross_threshold     = 0.00
-config.reproduction.elitism             = 30
-config.species.compatibility_threshold  = np.inf
-config.stagnation.max_stagnation        = 1
-config.stagnation.species_elitism       = 2
-config.reproduction.darwin_multiplier   = 0.50
-config.reproduction.cross_multiplier    = 0.25
-config.reproduction.preserve_elite      = False
-config.save()
-config.load(2)
+CONFIG_DIR = f"{os.path.curdir}/configs"
+CONFIG_NAME = "flappy_bird-ae"
+CONFIG = neat.Config(CONFIG_NAME, CONFIG_DIR)
+CONFIG.load(verbose=2)
+CONFIG.save(debug=2)
 
 ENV: Game | None = None
 
 
 def evaluate(population: neat.Population, **options):
     trainer: neat.rl.NEAT = options['trainer']
-    mapping0, mapping1, mapping2 = population.get_mapping()
+    split_mappings = population.get_mapping()
+    if len(population.genera) == 1: split_mappings = (split_mappings,)
+    split_sizes = [len(m) for m in split_mappings]
     cons_mapping = population.get_mapping(consolidated=True)
     trainer.update_mapping(cons_mapping)
     # BUFFER = torch.zeros(SEQ_LEN, population.pop_size, INPUTS).to(DEVICE, DTYPE)
@@ -362,13 +343,14 @@ def evaluate(population: neat.Population, **options):
     run_step = 0
     game_step = 0
     DEBUG_STEP = SEQ_LEN - 1
-    MODEL0.train()
+    for model in MODELS: model.eval()
     while not terminate:
         gts = clock.perf_counter()
         step = 0
-        reverse_mapping0 = {index: key for key, index in mapping0.items()}
-        reverse_mapping1 = {index: key for key, index in mapping1.items()}
-        reverse_mapping2 = {index: key for key, index in mapping2.items()}
+        reverse_mappings = tuple([
+            {index: key for key, index in m.items()}
+            for m in split_mappings
+        ])
 
         states = ENV.reset()[0]
         done = False
@@ -386,72 +368,86 @@ def evaluate(population: neat.Population, **options):
 
                 # Filter dead birds from calculation
                 ts = clock.perf_counter()
-                keys0, keys1, keys2 = [], [], []
-                indices0, indices1, indices2 = [], [], []
-                for index, dead in enumerate(ENV.birds.dead):
-                    if not dead:
-                        if index in reverse_mapping0:
-                            keys0.append(reverse_mapping0[index])
-                            indices0.append(index)
-                        elif index-len(mapping0) in reverse_mapping1:
-                            keys1.append(reverse_mapping1[index-len(mapping0)])
-                            indices1.append(index-len(mapping0))
-                        elif index-(len(mapping0)+len(mapping1)) in reverse_mapping2:
-                            keys2.append(reverse_mapping2[index-(len(mapping0)+len(mapping1))])
-                            indices2.append(index-(len(mapping0)+len(mapping1)))
-                        else:
-                            print(f"\nPopulation size {population.size}"
-                                  f"\nReverse mapping \n{reverse_mapping0} \n{reverse_mapping1}"
-                                  f"\nIndex = {index}, birds_shape = {ENV.birds.dead.shape}")
-                            raise KeyError()
-                if len(indices0) == 0:
-                    keys0 = list(mapping0.keys())
-                    indices0 = list(mapping0.values())
-                if len(indices1) == 0:
-                    keys1 = list(mapping1.keys())
-                    indices1 = list(mapping1.values())
-                if len(indices2) == 0:
-                    keys2 = list(mapping2.keys())
-                    indices2 = list(mapping2.values())
-                if DEBUG_DATA:
-                    print(f"keys =>\n{keys0}")
-                    print(f"indices =>\n{indices0}")
+                if FILTER_DEAD:
+                    split_keys: list[list[int]] = [[] for _ in range(MODEL_NUM)]
+                    split_indices: list[list[int]] = [[] for _ in range(MODEL_NUM)]
+                    for index, dead in enumerate(ENV.birds.dead):
+                        if not dead:
+                            found = False
+                            for rmi, rm in enumerate(reverse_mappings):
+                                if index in rm:
+                                    split_keys[rmi].append(rm[index])
+                                    split_indices[rmi].append(index)
+                                    found = True
+                                    break
+                                index -= len(split_mappings[rmi])
+                            if not found:
+                                # Use code below to debug in case filtering raises an error
+                                print(f"\nPopulation size {population.size}"
+                                      f"\nReverse mapping \n{reverse_mappings}"
+                                      f"\nIndex = {index}, birds_shape = {ENV.birds.dead.shape}")
+                                raise KeyError()
+                    for mi, indices in enumerate(split_indices):
+                        if len(indices) == 0:
+                            split_keys[mi] = list(split_mappings[mi].keys())
+                            split_indices[mi] = list(split_mappings[mi].values())
+                    if DEBUG_DATA:
+                        print(f"keys =>\n{split_keys[0]}")
+                        print(f"indices =>\n{split_indices[0]}")
+                else:
+                    pass
 
                 # Get actions
-                observations0, observations1, observations2 = torch.split(
-                    states, [len(mapping0), len(mapping1), len(mapping2)], dim=0
-                )
-                actions0 = MODEL0.get_policy(observations0[indices0].unsqueeze(1), keys=keys0)
-                actions1 = MODEL1.get_policy(observations1[indices1].unsqueeze(1), keys=keys1)
-                actions2 = MODEL2.get_policy(observations2[indices2].unsqueeze(1), keys=keys2)
-                # shape(seq_len=1, genomes, features_out)
-                actions0, actions1, actions2 = actions0.squeeze(1), actions1.squeeze(1), actions2.squeeze(1)
+                split_observations = torch.split(states, split_sizes, dim=0)
+                if FILTER_DEAD:
+                    split_observations = [obs[indices] for obs, indices in zip(split_observations, split_indices)]
+                split_actions = [
+                    m.get_policy(obs.unsqueeze(1), keys=None if not FILTER_DEAD else split_keys[mi]).squeeze(1)
+                    for mi, (m, obs) in enumerate(zip(MODELS, split_observations))
+                ]
                 if DEBUG_DATA:
-                    MODEL0.get_policy(observations0[indices0].unsqueeze(1), keys=keys0, verbose=True)
-                    print(f"actions =>\n{actions0}\n\tshape = {actions0.shape}")
+                    obs_debug = split_observations[0]
+                    keys_debug = None
+                    if FILTER_DEAD:
+                        obs_debug = obs_debug[split_indices[0]]
+                        keys_debug = split_keys[0]
+                    MODELS[0].get_policy(obs_debug.unsqueeze(1), keys=keys_debug, verbose=True)
+                    print(f"actions =>\n{split_actions[0]}\n\tshape = {split_actions[0].shape}")
                     # print(f"probs =>\n{probs}\n\tshape = {probs.shape}")
 
                 # Pad dead bird actions
-                if True:
-                    padding = ENV.birds.bird_num - actions0.shape[0] - actions1.shape[0] - actions2.shape[0]
+                if FILTER_DEAD:
+                    padding = ENV.birds.bird_num - sum([act.shape[0] for act in split_actions])
                     if padding > 0:
-                        def fill_up(tensor: Tensor, indices: list[int], total: int):
+                        def fill_up(tensor: Tensor, indices_list: list[int], total: int):
                             fill = tensor.clone()
                             tensor = torch.zeros(
-                                total, *tensor.shape[1:], device=DEVICE, dtype=DTYPE
+                                total, *tensor.shape[1:], device=DEVICE, dtype=DTYPE if not DISCRETE else torch.long
                                 )
-                            tensor[indices] = fill
+                            tensor[indices_list] = fill
                             return tensor
-                        actions0 = fill_up(actions0, indices0, len(reverse_mapping0))
-                        actions1 = fill_up(actions1, indices1, len(reverse_mapping1))
-                        actions2 = fill_up(actions2, indices2, len(reverse_mapping2))
-                    actions = torch.cat([actions0, actions1, actions2[..., :OUTPUTS]], dim=0)
+                        split_actions = [
+                            fill_up(act, indices, len(rm))
+                            for act, indices, rm in zip(split_actions, split_indices, reverse_mappings)
+                        ]
+                actions = torch.cat(split_actions, dim=0)
                 if DEBUG_DATA:
                     print(f"filled actions =>\n{actions}\n\tshape = {actions.shape}")
+                    print(f"mapping sizes = {[len(m) for m in reverse_mappings]}")
+                    print(f"filling shapes = {[t.shape for t in split_actions]}")
+                    if DISCRETE:
+                        print(f"actions count {dict([(idx, (actions == idx).sum().item()) for idx in range(2)])}")
+                if DISCRETE:
+                    # Environment does not have discrete option so actions sent be reverted to expected shape and type
+                    raw_actions = (0 ** actions).float().unsqueeze(-1)
+                    if DEBUG_DATA:
+                        print(f"un-discretized actions =>\n{actions}\n\tshape = {actions.shape}")
+                else:
+                    raw_actions = actions
                 calc_time = clock.perf_counter() - ts
 
                 # Get rewards
-                next_states, rewards, _, done, _ = ENV.step(actions)
+                next_states, rewards, _, done, _ = ENV.step(raw_actions)
                 if DEBUG_DATA:
                     print(f"rewards =>\n{rewards}\n\tshape = {rewards.shape}")
                     # v = MODEL.get_value(observations[:len(reverse_mapping0)].unsqueeze(1), ).squeeze(1)
@@ -465,15 +461,12 @@ def evaluate(population: neat.Population, **options):
                 max_score = round(rewards.max().item(), 2)
                 if alive > 0:
                     best_index = torch.argmax(ENV.birds.score).cpu().item()
-                    if best_index in reverse_mapping0:
-                        best_key = reverse_mapping0[best_index]
-                    elif best_index in reverse_mapping1:
-                        best_key = reverse_mapping1[best_index]
-                    elif best_index in reverse_mapping2:
-                        best_key = reverse_mapping2[best_index]
-                    else:
-                        # raise KeyError()
-                        best_key = None
+                    best_key = None
+                    for rmi, rm in enumerate(reverse_mappings):
+                        if best_index in rm:
+                            best_key = rm[best_index]
+                            break
+                        best_index -= len(split_mappings[rmi])
                 print(f"\r{CM('Executing', Fore.GREEN)}: time_elapsed = {round(clock.perf_counter()-gts)}s, "
                       f"alive = {alive}, max_rew = {max_score}, best_key={best_key}, ct={calc_time:.2e}, sd={trainer.steps_done} "
                       f"bl={trainer.primary.max_size()}", end='')
@@ -520,7 +513,11 @@ def evaluate(population: neat.Population, **options):
     if population.generation == INIT_GEN:
         print(f"Saved initial population to file number '{file_no}'")
         print(f"Initial generation was set to {INIT_GEN}, now updated to {population.generation}")
+<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
         FILE_NO = file_no 
+=======
+        FILE_NO = file_no + 1
+>>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
     # trainer.save('flappy_bird', replace=population.generation != INIT_GEN)
 
 
@@ -557,32 +554,39 @@ def run():
     args = parser.parse_args()
 
     global ENV, FILE_NO
-    print(MODEL0)
+    print(MODELS[0])
 
     # Create the population, which is the top-level object for a NEAT run.
     print(f"\ncreating population")
-    population = neat.Population(GENOMES, MODEL0, config, init_reporter=True)
-    population1 = neat.Population(GENOMES, MODEL1, config, init_reporter=True)
-    population2 = neat.Population(GENOMES, MODEL2, config, init_reporter=True)
-    population.absorb_population(population1)
-    population.absorb_population(population2)
+    POPULATION = neat.Population(GENOMES, MODELS[0], CONFIG, init_reporter=True)
+    for model in MODELS[1:]:
+        extra_population = neat.Population(GENOMES, model, CONFIG, init_reporter=True)
+        POPULATION.absorb_population(extra_population)
     if args.load is not None:
         if args.load.lower() == 'true':
             FILE_NO = None
             print(f"Will load the latest population checkpoint")
+<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
             population.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
+=======
+            POPULATION.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
+>>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
         else:
             try:
                 FILE_NO = int(args.load)
                 print(f"WIll load population checkpoint from file number '{FILE_NO}'")
+<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
                 population.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
+=======
+                POPULATION.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
+>>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
             except ValueError:
                 if args.load.lower() not in ['false', 'none', 'null', '']:
                     print(f"Error: --load argument must be a boolean, valid positive integer, null or empty; Got '{args.load}'")
                     exit(1)
 
     ENV = Game(
-        population.size, goal=GOAL, seq_len=SEQ_LEN if SEQUENTIAL else None,
+        POPULATION.size, goal=GOAL, seq_len=SEQ_LEN if SEQUENTIAL else None,
         height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
         delay=DELAY, type2count=GENOMES, type2offset=0, device=DEVICE, dtype=DTYPE,
@@ -602,7 +606,7 @@ def run():
 
     if str_to_bool(args.train):
         trainer = neat.rl.NEAT(
-            population,
+            POPULATION,
             schedulers=[
                 # neat.optim.scheduler.RandomAnnealing(config, 1e-1, 1e+1, 3, ['weight_init_std', 'weight_mutate_power'], True),
                 # neat.optim.scheduler.CosineAnnealing(config, 10, 0.1, 'weight_mutate_rate', True, True),
@@ -616,30 +620,35 @@ def run():
                      f"e{EMBED_SIZE}-c{COEFFICIENTS}-m{SEQ_LEN}-l{LAYERS}-b{int(ENABLE_BIAS)}-h{HEADS}-"
                      f"prob{int(PROBABILISTIC)}-"
                      f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
-                     f"rn{REW_NORM}-p{round(LOSS_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
-                     f"delay{DELAY}",
+                     f"rn{REW_NORM}-p{round(POL_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
+                     f"delay{DELAY}-type{int(DISCRETE)}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=None,
+            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=10,
             max_episodes=MEMORY_SIZE,
         )
         trainer.set_report_hook(genome_debug)
 
-        print(f"starting evaluation: population={len(population.genomes)}")
+        print(f"starting evaluation: population={len(POPULATION.genomes)}")
         # trainer.load(name='flappy_bird', file_no=None)
         try:
+<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
             trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', True)
+=======
+            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1,
+                          'binary' if not DISCRETE else 'discrete', True)
+>>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
         except KeyboardInterrupt:
             pass
 
     elites_limit = 10
     elites_available = any([
         g.fitness is not None and not np.isnan(g.fitness) 
-        for g in population.genomes.values()
+        for g in POPULATION.genomes.values()
     ])
     if elites_available:
         elites = []
         np.random.randn()
-        for gn_id, specie in enumerate(population.species_set.species.values()):
+        for gn_id, specie in enumerate(POPULATION.species_set.species.values()):
             genomes = sorted(
                 [
                     g for g in specie.members.values()
@@ -649,20 +658,22 @@ def run():
             )
             elites.extend(genomes[:elites_limit])
             print(f"\nElites [{gn_id}]: {[g.key for g in genomes[:10]]}")
-        population.crop([e.key for e in elites], DEVICE)
+        POPULATION.crop([e.key for e in elites], DEVICE)
 
-    last_genus = population.genera[-1]
-    last_genus_size = len([g for g in population.genomes.values() if g.genus == last_genus])
+    last_genus = POPULATION.genera[-1]
+    last_genus_size = len([g for g in POPULATION.genomes.values() if g.genus == last_genus])
     print(f"Last genus size: {last_genus_size}")
     env = Game(
-        population.size, goal=100, seq_len=SEQ_LEN if SEQUENTIAL else None,
+        POPULATION.size, goal=100, seq_len=SEQ_LEN if SEQUENTIAL else None,
         height=800, width=1200, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY * 1.85,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
         delay=DELAY, render_mode='human',
         type2count=last_genus_size, type2offset=50, device=DEVICE, dtype=DTYPE
     )
-    mapping0, mapping1, mapping2 = population.get_mapping()
-    cons_mapping = population.get_mapping(consolidated=True)
+    split_mappings = POPULATION.get_mapping()
+    if len(POPULATION.genera) == 1: split_mappings = (split_mappings,)
+    split_sizes = [len(m) for m in split_mappings]
+    cons_mapping = POPULATION.get_mapping(consolidated=True)
     for i in range(5):
         done = False
         step = 0
@@ -678,15 +689,14 @@ def run():
 
             # Get actions
             with torch.no_grad():
-                observations0, observations1, observations2 = torch.split(
-                    states, [len(mapping0), len(mapping1), len(mapping2)], dim=0
-                )
-                actions0 = MODEL0.get_policy(observations0)
-                actions1 = MODEL1.get_policy(observations1)
-                actions2 = MODEL2.get_policy(observations2)
-                actions0, actions1, actions2 = \
-                    actions0.squeeze(1), actions1.squeeze(1), actions2.squeeze(1)
-            actions = torch.cat([actions0, actions1, actions2[..., :OUTPUTS]], dim=0)
+                split_observations = torch.split(states, split_sizes, dim=0)
+                split_actions = [
+                    m.get_policy(split_observations[mi]).squeeze(1)
+                    for mi, m in enumerate(MODELS)
+                ]
+            actions = torch.cat(split_actions, dim=0)
+            if DISCRETE:
+                actions = (0 ** actions).float().unsqueeze(-1)
 
             # Get rewards
             next_states, rewards, _, done, _ = env.step(actions)

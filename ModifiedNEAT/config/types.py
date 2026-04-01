@@ -59,11 +59,11 @@ class ReproductionConfig(Configuration):
     def __init__(self):
         super(ReproductionConfig, self).__init__('reproduction config')
 
-        self.elitism            = 10
+        self.elitism            = 0.10
         self.clone_threshold    = 0.00
-        self.survival_threshold = 0.10
-        self.cross_threshold    = 0.05
-        self.cross_multiplier   = 0.75
+        self.survival_threshold = 0.20
+        self.cross_threshold    = 0.00
+        self.cross_multiplier   = 0.50
         self.darwin_multiplier  = 0.10
         self.min_species_size   = 100
         self.purge              = 0
