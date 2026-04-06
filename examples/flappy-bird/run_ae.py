@@ -263,14 +263,8 @@ GAMMA               = np.exp(np.log(0.01) / 128)
 ALPHA               = fix(np.exp(np.log(3.00) / (MEMORY_SIZE - 1)), 1.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
 ALPHA_ORDER         = 2
-<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
-REW_NORM            = 4
-LOSS_REG            = 0.
-TEST_ACTIVATION     = nn.GELU()
-=======
 REW_NORM            = 0
-TEST_ACTIVATION     = nn.SiLU()
->>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
+TEST_ACTIVATION     = nn.GELU()
 CLIP_MIN            = -5
 CLIP_MAX            = -0
 DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
@@ -513,11 +507,7 @@ def evaluate(population: neat.Population, **options):
     if population.generation == INIT_GEN:
         print(f"Saved initial population to file number '{file_no}'")
         print(f"Initial generation was set to {INIT_GEN}, now updated to {population.generation}")
-<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
-        FILE_NO = file_no 
-=======
         FILE_NO = file_no + 1
->>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
     # trainer.save('flappy_bird', replace=population.generation != INIT_GEN)
 
 
@@ -566,20 +556,12 @@ def run():
         if args.load.lower() == 'true':
             FILE_NO = None
             print(f"Will load the latest population checkpoint")
-<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
-            population.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
-=======
             POPULATION.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
->>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
         else:
             try:
                 FILE_NO = int(args.load)
                 print(f"WIll load population checkpoint from file number '{FILE_NO}'")
-<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
-                population.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
-=======
                 POPULATION.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
->>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
             except ValueError:
                 if args.load.lower() not in ['false', 'none', 'null', '']:
                     print(f"Error: --load argument must be a boolean, valid positive integer, null or empty; Got '{args.load}'")
@@ -631,12 +613,8 @@ def run():
         print(f"starting evaluation: population={len(POPULATION.genomes)}")
         # trainer.load(name='flappy_bird', file_no=None)
         try:
-<<<<<<< HEAD:examples/flappy-bird/autoencoder/run.py
-            trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1, 'binary', True)
-=======
             trainer.learn(evaluate, STEPS, EPOCHS, 1024, 0.1,
                           'binary' if not DISCRETE else 'discrete', True)
->>>>>>> 86742fa5fd8385a2de440eaad469e976bf7f20d6:examples/flappy-bird/run_ae.py
         except KeyboardInterrupt:
             pass
 

@@ -1,3 +1,5 @@
 
-from ModifiedNEAT.reporter.reporters import StdOutReporter
-from ModifiedNEAT.reporter.base import BaseReporter, ReporterSet
+from . import reporters, base
+
+from .reporters import StdOutReporter
+from .base import BaseReporter, ReporterSet

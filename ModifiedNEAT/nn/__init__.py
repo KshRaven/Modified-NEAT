@@ -1,6 +1,6 @@
 
-from ModifiedNEAT.nn.genome import Genome # TODO: Remove -> , Network, Connection, NODE, initialize_genome, load_genome, load_network
-from ModifiedNEAT.nn.base import NeatParameter, NeatModule, Model
-from ModifiedNEAT.nn.modules import *
+from . import activations, modules, genome
 
-from ModifiedNEAT.nn import activations, modules, genome
+from .genome import Genome # TODO: Remove -> , Network, Connection, NODE, initialize_genome, load_genome, load_network
+from .base import NeatParameter, NeatModule, Model
+from .modules import *

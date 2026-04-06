@@ -1,4 +1,4 @@
 
-from ModifiedNEAT.config.types import Config
+from . import base, types
 
-from ModifiedNEAT.config import base, types
+from .types import Config

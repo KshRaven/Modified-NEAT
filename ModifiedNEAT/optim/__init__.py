@@ -1,2 +1,2 @@
 
-from ModifiedNEAT.optim import scheduler
+from . import scheduler

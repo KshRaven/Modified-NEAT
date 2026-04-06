@@ -1,9 +1,9 @@
 
 # ---------- Package that holds all methods required to manipulate genomes ---------- #
 
-from ModifiedNEAT.base.cpu.initialization import initialize
-from ModifiedNEAT.base.cpu.reproduction import reproduce
-from ModifiedNEAT.base.cpu.speciation import speciate
-from ModifiedNEAT.base.cpu.mutation import mutate
+from .initialization import initialize
+from .reproduction import reproduce
+from .speciation import speciate
+from .mutation import mutate
 
-from ModifiedNEAT.base.cpu import initialization, mutation, reproduction, speciation
+from . import initialization, mutation, reproduction, speciation
