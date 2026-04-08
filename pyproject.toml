@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ModifiedNEAT"
-version = "0.5.14"
+version = "0.5.15"
 description = "Modified version of python NEAT algorithm that uses PyTorch modules"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -48,4 +48,22 @@ Repository = "https://github.com/KshRaven/Modified-NEAT.git"
 Issues = "https://github.com/KshRaven/Modified-NEAT/issues"
 
 [tool.setuptools]
-packages = ["ModifiedNEAT"]
+packages = [
+    "ModifiedNEAT", 
+    "ModifiedNEAT.base", 
+    "ModifiedNEAT.base.cpu", 
+    "ModifiedNEAT.base.cpu.functional", 
+    "ModifiedNEAT.base.gpu", 
+    "ModifiedNEAT.base.gpu.functional", 
+    "ModifiedNEAT.config", 
+    "ModifiedNEAT.cuda", 
+    "ModifiedNEAT.cuda.functional", 
+    "ModifiedNEAT.multproc", 
+    "ModifiedNEAT.nn", 
+    "ModifiedNEAT.nn.modules", 
+    "ModifiedNEAT.optim", 
+    "ModifiedNEAT.reporter", 
+    "ModifiedNEAT.rl", 
+    "ModifiedNEAT.util", 
+    "ModifiedNEAT._repoduction",
+]

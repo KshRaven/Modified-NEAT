@@ -530,16 +530,20 @@ class Conv2d(Convolution):
     def __init__(self, channels_in: int, channels_out: int, kernel_size: Union[int, tuple[int, int]], stride=1,
                  padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
                  device=torch.device('cpu'), dtype=torch.float32):
-        super(Conv2d, self).__init__(channels_in, channels_out, kernel_size, stride, dilation, padding, padding_mode,
-                                     groups, 2, bias, device, dtype)
+        super(Conv2d, self).__init__(
+            channels_in, channels_out, kernel_size, stride, dilation, padding, padding_mode,
+            groups, 2, bias, device, dtype
+        )
 
 
 class Conv3d(Convolution):
     def __init__(self, channels_in: int, channels_out: int, kernel_size: Union[int, tuple[int, int]], stride=1,
                  padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros',
                  device=torch.device('cpu'), dtype=torch.float32):
-        super(Conv3d, self).__init__(channels_in, channels_out, kernel_size, stride, dilation, padding, padding_mode,
-                                     groups, 3, bias, device, dtype)
+        super(Conv3d, self).__init__(
+            channels_in, channels_out, kernel_size, stride, dilation, padding, padding_mode,
+            groups, 3, bias, device, dtype
+        )
 
 
 # ---------- Pooling ----------
