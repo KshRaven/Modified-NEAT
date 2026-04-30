@@ -9,7 +9,11 @@ from .util.fancy_text import CM, Fore
 
 # Initialize device early
 from . import base
-from .base import cuda_is_available, set_device, device, initialize, reproduce, speciate
+from .base import (
+    cuda_is_available, set_device, get_device, 
+    set_tpb, get_tpb,
+    initialize, reproduce, speciate
+)
 
 # Standard imports for commonly used components
 from .nn import modules, activations, NeatModule, NeatParameter, Model, Genome

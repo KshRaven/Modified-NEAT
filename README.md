@@ -14,16 +14,13 @@ It extends NEAT concepts to work with `torch.nn.Module` graphs and provides util
 
 ### 1.1. Requirements
 
-- Python **3.10+** (see `setup.py`).
+- Python **3.11+** (see `pyproject.toml`).
 - A working **PyTorch** installation (CPU or CUDA).
-- Packages in the root `requirements.txt`, including:
-  - `torch`, `numpy`, `numba`, `numba-cuda[cu13]`, `cuda-python`, `cuda-toolkit`, `cupy-cuda13x`,
-  - `matplotlib`, `colorama`, `tensorboard`,
-  - `gymnasium`, `pygame` (needed for the game / RL examples).
+- Core dependencies in `pyproject.toml`:
+  - `torch`, `numpy`, `numba`, `matplotlib`, `tensorboard`, `gymnasium`, `pygame`.
+- Optional GPU/CUDA dependencies for accelerated execution (see section 1.3).
 
-> If you are on CPU-only or a different CUDA version, install an appropriate PyTorch build first and then adapt/remove the GPU-specific lines in `requirements.txt`.
-
-### 1.2. Install from source
+### 1.2. Quick install (CPU-only, recommended default)
 
 Clone the repository and install in editable (development) mode:
 
@@ -31,17 +28,143 @@ Clone the repository and install in editable (development) mode:
 git clone https://github.com/KshRaven/Modified-NEAT.git
 cd Modified-NEAT
 
-python -m pip install -r requirements.txt
-python -m pip install -e .
+# CPU-only installation (default, fastest)
+python install.py
+
+# Or use pip directly
+pip install -e .
 ```
 
 Verify the installation:
 
 ```bash
-python - << "PY"
-import ModifiedNEAT as neat
-print("ModifiedNEAT imported from:", neat.__file__)
-PY
+python -c "import ModifiedNEAT as neat; print('ModifiedNEAT imported from:', neat.__file__)"
+```
+
+### 1.3. GPU/CUDA support (optional)
+
+#### Option 1: Auto-detect CUDA (recommended)
+
+```bash
+python install.py --gpu
+```
+
+This script will:
+1. Probe for NVIDIA CUDA toolkit (via `nvcc`, `nvidia-smi`, or `cuda-python`).
+2. Detect CUDA version and install appropriate GPU packages (`cuda-python`, `cuda-toolkit`, `numba-cuda[cu13]`, `cupy`).
+3. Fall back to CPU-only if no CUDA is detected.
+
+#### Option 2: Install via pip with GPU extras
+
+```bash
+pip install -e .[gpu]
+```
+
+This installs GPU packages as defined in `pyproject.toml`, but does **not** auto-detect CUDA version. You may need to adjust the `cupy` version manually (e.g., `cupy-cuda11x`, `cupy-cuda12x`, `cupy-cuda13x`).
+
+#### Option 3: Manual setup for different CUDA versions
+
+If auto-detection fails or you have a non-standard setup:
+
+```bash
+# Install base ModifiedNEAT
+pip install -e .
+
+# Install GPU packages for your CUDA version
+pip install cuda-python cuda-toolkit numba-cuda[cu13]
+
+# Install cupy for your CUDA version (replace 12x with your version: 11x, 12x, 13x)
+pip install cupy-cuda12x --extra-index-url https://pypi.ngc.nvidia.com
+```
+
+> **Note:** ModifiedNEAT will automatically detect and use GPU acceleration if CUDA packages are installed. CPU-only execution is always supported as a fallback.
+
+### 1.4. Environment variables for device and computation settings
+
+ModifiedNEAT uses environment variables to configure the default device (CPU/GPU) and threads per block settings. These can be set globally and persist across the entire execution:
+
+#### Device configuration: `MODIFIEDNEAT_DEVICE`
+
+Controls whether ModifiedNEAT uses CPU or GPU acceleration:
+
+```bash
+# Use CPU (default)
+export MODIFIEDNEAT_DEVICE=cpu
+python my_script.py
+
+# Use GPU (if CUDA packages are installed)
+export MODIFIEDNEAT_DEVICE=cuda
+python my_script.py
+```
+
+From Python:
+
+```python
+from ModifiedNEAT.base import set_device, get_device, set_device_env, get_device_env
+
+# Get current device
+current = device()  # Returns 'cpu' or 'cuda'
+print(f"Device: {current}")
+
+# Change device (updates environment variable)
+set_device('cuda')
+
+# Set environment variable only (for subprocesses)
+set_device_env('cuda')
+
+# Get environment variable
+env_device = get_device_env()
+```
+
+#### Threads per block: `MODIFIEDNEAT_TPB`
+
+Controls GPU kernel thread configuration (default: `10`). The value determines how many threads execute per block:
+
+- **Default value: 10** — Ensures $10^3 = 1000$ total threads, safely under the CUDA limit of 1024 threads per block
+- **Valid range: 1-32** — Adjust based on GPU capabilities and memory constraints
+- **Typical values:**
+  - `4` – Conservative, lower GPU utilization but stable
+  - `10` – Balanced (default), recommended for most use cases
+  - `16` – Aggressive, higher utilization if GPU supports it
+
+```bash
+# Use custom threads per block
+export MODIFIEDNEAT_TPB=16
+python my_script.py
+```
+
+From Python:
+
+```python
+from ModifiedNEAT.base import get_tpb, set_tpb, set_tpb_env, get_tpb_env
+
+# Get current TPB setting
+current_tpb = get_tpb()  # Returns integer
+print(f"Threads per block: {current_tpb}")
+
+# Change TPB (updates environment variable)
+set_tpb(16)  # Must be in range [1, 32]
+
+# Set environment variable only
+set_tpb_env(16)
+
+# Get environment variable
+env_tpb = get_tpb_env()
+```
+
+#### Combined configuration example
+
+```python
+import os
+os.environ['MODIFIEDNEAT_DEVICE'] = 'cuda'
+os.environ['MODIFIEDNEAT_TPB'] = '16'
+
+# Now import ModifiedNEAT - it will use these settings
+from ModifiedNEAT.base import get_device, get_tpb
+from ModifiedNEAT import Population
+
+print(f"Device: {device()}")  # Output: cuda
+print(f"TPB: {get_tpb()}")    # Output: 16
 ```
 
 ---

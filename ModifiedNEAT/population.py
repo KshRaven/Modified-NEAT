@@ -7,8 +7,7 @@ from ModifiedNEAT.species import SpeciesSet, load_species, GENOME, SPECIES
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.reporter.reporters import StdOutReporter
 from ModifiedNEAT.reproduction import Reproduction
-from ModifiedNEAT.base import reproduce
-from ModifiedNEAT.base import speciate
+from ModifiedNEAT.base import reproduce, speciate, get_tpb
 from ModifiedNEAT.util.qol import manage_params, Indexer
 from ModifiedNEAT.util.storage import save, load
 # from ModifiedNEAT.util.fancy_text import CM, Fore
@@ -38,7 +37,6 @@ class Population(object):
     """
 
     genus_indexer = Indexer(0)
-    threads_per_block = 10
     group_indexer = Indexer(0)
 
     def __init__(self, genomes: int, module: NeatModule, config: Config = None, state_dict: dict[str, Any] = None, **options):
@@ -56,6 +54,7 @@ class Population(object):
         self.config = config
         self.generation = 0
         self.group_up: bool = manage_params(options, 'group_up', True)
+        self.threads_per_block = get_tpb()
 
         # ------------------------------ Debugging ------------------------------ #
         self.reporters = ReporterSet()

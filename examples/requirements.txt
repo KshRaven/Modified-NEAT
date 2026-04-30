@@ -1,0 +1,22 @@
+# -----------------------------------------------------
+# Requirements for examples                           |
+# -----------------------------------------------------
+# Core dependencies (CPU-compatible, always installed)
+numpy
+numba
+matplotlib
+tensorboard
+torch
+
+# # Optional GPU/CUDA dependencies
+# cuda-python
+# cuda-toolkit
+# numba-cuda[cu13]
+# cupy-cuda13x
+
+# Environment dependencies
+gymnasium
+pygame
+
+# # Miscellaneous
+# git+https://github.com/KshRaven/PyTorch-Models.git

@@ -31,7 +31,7 @@ torch.set_printoptions(threshold=10)
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 DTYPE  = torch.float64
 neat.set_device(DEVICE)
-print(f"Using torch device: '{DEVICE}'. neat device: '{neat.device()}'")
+print(f"Using torch device: '{DEVICE}'. neat device: '{neat.get_device()}'")
 
 
 class BaseModel(Model):

@@ -1,20 +1,15 @@
-
-# --extra-index-url https://download.pytorch.org/whl/cu130
-
-cuda-python
-cuda-toolkit
-numba
-numba-cuda[cu13]
+# Core dependencies (CPU-compatible, always installed)
 numpy
-# cupy
-cupy-cuda13x
+numba
 matplotlib
-colorama
 tensorboard
-
 torch
-
 gymnasium
 pygame
 
-# git+https://github.com/KshRaven/PyTorch-Models.git
+# GPU/CUDA dependencies (optional, install via: pip install -e .[gpu] or python install.py)
+# Only needed if you have NVIDIA GPU and want GPU acceleration
+# cuda-python
+# cuda-toolkit
+# numba-cuda[cu13]
+# cupy-cuda13x

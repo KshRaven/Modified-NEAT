@@ -12,6 +12,14 @@ var/
 
 storage/
 build/
+.md/
+.tests/
+frames/
+experimental/
+tests/
+
+*.mp4
+*copy*
 
 *.pyc
 *.pyo

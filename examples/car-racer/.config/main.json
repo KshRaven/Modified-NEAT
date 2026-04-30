@@ -1,0 +1,61 @@
+{
+  "grid_size": [11, 11],
+  "cell_size": 60,
+  "layout": null,
+  "max_attempts": 1000,
+  "min_tiles": 40,
+  "seed": null,
+  "lives": 10,
+  "max_hiatus": 60,
+  "max_frames": 1000,
+  "min_laps": 3,
+  "tile": {
+    "gravel": 0.05,
+    "grass": 0.10,
+    "curb": 0.10,
+    "curb_pattern_splits": 16,
+    "start_checker_size": null,
+    "finish_line_back_offset_ratio": 0.2
+  },
+  "grid": {
+    "granularity": "pixels"
+  },
+  "car": {
+    "max_linear_velocity": 6.0,
+    "max_angular_velocity": null,
+    "linear_acceleration": 0.1,
+    "angular_velocity": 15.0,
+    "reverse_coeff": 0.5,
+    "brake_coeff": 1.0,
+    "car_scale": 0.10,
+    "use_lidar": true,
+    "toggle_reverse": false,
+    "restrict_movement": true,
+    "discrete": false,
+    "full_restart": false,
+    "min_brake_steps": 5,
+    "cutoff": 0.5,
+    "frames_per_tile": 100,
+    "friction_road": 1.0,
+    "friction_curb": 0.97,
+    "friction_grass": 0.94,
+    "friction_gravel": 0.91,
+    "handling_road": 1.0,
+    "handling_curb": 0.90,
+    "handling_grass": 0.75,
+    "handling_gravel": 0.90,
+    "slip_road": 0.25,
+    "slip_curb": 0.50,
+    "slip_grass": 0.90,
+    "slip_gravel": 0.75,
+    "lidar_angle": 4,
+    "lidar_max_dist": null,
+    "lidar_step": 4,
+    "endless": true
+  },
+  "window": {
+    "title": "Car Racer Environment",
+    "fps": null,
+    "font_size": 24
+  }
+}
