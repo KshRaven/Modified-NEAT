@@ -21,7 +21,7 @@ import time as clock
 import gc
 import math
 
-NP_FLOAT = types.float64
+NP_FLOAT = float # np.float64
 GENOME   = Genome.class_type.instance_type
 GENOME_LIST = types.ListType(GENOME)
 
@@ -78,6 +78,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
     if len(spawn_amounts) != len(remaining_species):
         raise ValueError(f"Mismatch in reproduction data")
 
+    # TODO: Fix and re-enable
     def fix_infinities(specie_population: list[Genome], full_population: list[Genome], ufp: bool = False):
         if np.any(np.array([g.fitness is None for g in specie_population])):
             raise ValueError(f"A genome's fitness has not been set")
@@ -149,29 +150,35 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
                         genomes[j], genomes[j + 1] = genomes[j + 1], genomes[j]
         return genomes
 
-    def choice(main_genus: int, genomes: list[Genome], multiplier_cross: float, multiplier_fitness: float,
-               # Using global limits to ensure when genome count low, this func doesn't focus on a given genome only
-               global_min: float, global_max: float, last_choice: Genome = None):
-        if multiplier_cross is None:
-            multiplier_cross = 0
-        multiplier_cross = max(-1, min(+1, multiplier_cross))
-        if multiplier_fitness is None:
-            multiplier_fitness = 0
-        multiplier_fitness = max(-1, min(+1, multiplier_fitness))
-        if global_max == global_min:
-            global_min += 1e-12
+    def choice(main_genus: int, genomes: list[Genome], coeff_cross: float, coeff_fitness: float,
+               last_choice: Genome = None, global_min: float | None = None, global_max: float | None = None):
         probabilities = np.random.rand(len(genomes))
-        if multiplier_fitness != 0:
-            for i, g in enumerate(genomes):
-                factor = (g.fitness - global_min) / (global_max - global_min) * multiplier_fitness
-                if multiplier_cross > 0 and g.genus != main_genus:
-                    factor *= multiplier_cross
-                if multiplier_cross < 0 and g.genus == main_genus:
-                    factor *= 1 - multiplier_cross
-                if last_choice is not None and g.key == last_choice.key:
-                    factor *= 0.01
-                probabilities[i] += factor
-        return genomes[np.argmax(probabilities)]
+        fitnesses     = np.zeros_like(probabilities)
+        for i, g in enumerate(genomes): fitnesses[i] = g.fitness if g.fitness is not None else -np.inf
+        if coeff_cross is None: coeff_cross = 0.
+        coeff_cross   = max(-1, min(+1, coeff_cross))
+        if coeff_fitness is None: coeff_fitness = 0.
+        coeff_fitness = max(-1, min(+1, coeff_fitness))
+        if global_max is None: global_max = np.max(fitnesses)
+        if global_min is None: global_min = np.min(fitnesses)
+        assert global_max >= global_min, f"Invalid fitness limits"
+        diff = global_max - global_min
+        
+        for i, g in enumerate(genomes):
+            if coeff_fitness != 0 and global_max != global_min:
+                factor = (g.fitness - global_min) / diff * coeff_fitness
+                if coeff_cross > 0 and g.genus != main_genus:
+                    factor *= coeff_cross
+                if coeff_cross < 0 and g.genus == main_genus:
+                    factor *= 1 - coeff_cross
+            else:
+                factor = 0
+            fitnesses[i] = factor
+            if last_choice is not None and g.key == last_choice.key:
+                probabilities[i] *= 0.1
+                fitnesses[i]     *= 0.0 # 0.1
+        full_factors = probabilities + fitnesses # NOTE: Values separated for debugging purposes
+        return genomes[np.argmax(full_factors)]
 
     # Populate global genera members
     genera: dict[int, list[Genome]] = Dict.empty(INT, GENOME_LIST)
@@ -184,9 +191,9 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         spawn  = spawn_amounts[idx]
         specie = remaining_species[idx]
         # If elitism is enabled, each species always at least gets to retain its elites.
-        elite_total = np.ceil(elitism * len(specie.members))
-        spawn = max(spawn, elite_total)
-        assert spawn > 0
+        elite_total = max(1, math.ceil(elitism * len(specie.members)))
+        spawn = max(spawn, elite_total + 1)
+        assert spawn >= 2
 
         # Get fitness limits
         sg, ag = List(specie.members.values()), List(population.values())
@@ -225,7 +232,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         # Only use the survival threshold fraction to use as parents for the next generation.
         member_count = len(old_members)
         repro_cutoff = max(2, math.ceil(survival_threshold * member_count))
-        clone_cutoff = max(0, math.ceil(min(0.75, clone_threshold) * member_count))
+        clone_cutoff = max(0, math.ceil(min(clone_threshold, 0.75) * spawn))
         # Use at least two parents no matter what the threshold fraction result is.
         old_members = old_members[:repro_cutoff]
 
@@ -233,21 +240,34 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         if cross_threshold > 0:
             for gn, genus_members in genera.items():
                 if gn != genus and len(genus_members) > 0:
+                    # Sort genus members in descending order and keep the best n members
+                    genus_members = sort({g.key: g for g in genus_members}, criteria)
                     cross_cutoff = math.ceil(cross_threshold * len(genus_members))
                     extra_members.extend(genus_members[:cross_cutoff])
         if len(extra_members) > 1:
             extra_members = sort({g.key: g for g in extra_members}, criteria)
+            # Get new global minimum and maximum from all members
             extra_min, extra_max = get_limits(extra_members)
             minimum, maximum = min(minimum, extra_min), max(maximum, extra_max)
+            
+        # NOTE:
+        #   survival_threshold: Fraction of old population used to produce offspring for the next generation.
+        #   cross_threshold: Fraction of each other genus' population used to produce offspring for the next generation.
+        #   elitism: Fraction of old population that is retained in the next generation.
+        #   clone_threshold: Fraction of remaining spawn produced through direct cloning instead of crossover.
 
         # Randomly choose parents and produce the number of offspring allotted to the species.
+        pool = List(list(old_members) + list(extra_members)) # TODO: Numba currently cannot add typed lists
         for spawn_index in prange(spawn):
-            # At least one genome has to be from the same genus in order to preserve genus integrity
-            parent1: Genome = choice(genus, old_members, cross_multiplier, darwin_multiplier, minimum, maximum)
+            # NOTE: Previously, at least one genome has to be from the same genus in order to preserve genus integrity. 
+            # Now you can fill current genus with foreign ones with hopes that they get filtered out by fitness if they do not perform
+            parent1: Genome = choice(genus, pool, cross_multiplier, darwin_multiplier, None) # minimum, maximum) # pool -> old_members
+            # Cloning
             if spawn_index < clone_cutoff:
                 parent2 = parent1
+            # Interbreeding or crossbreeding
             else:
-                parent2: Genome = choice(genus, List(list(old_members)+list(extra_members)), cross_multiplier, darwin_multiplier, minimum, maximum, parent1)
+                parent2: Genome = choice(genus, pool, cross_multiplier, darwin_multiplier, parent1) # minimum, maximum)
 
             # Note that if the parents are not distinct, crossover will produce a genetically identical clone of the parent (but with a different ID).
             gid = available_gid

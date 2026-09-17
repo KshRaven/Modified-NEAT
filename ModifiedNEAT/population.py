@@ -1,6 +1,6 @@
 """Implements the core evolution algorithm."""
 
-from ModifiedNEAT.nn.base import NeatModule
+from ModifiedNEAT.nn.base import NeatModule, NeatParameter
 from ModifiedNEAT.nn.genome import Genome, load_genome, INT
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.species import SpeciesSet, load_species, GENOME, SPECIES
@@ -40,6 +40,9 @@ class Population(object):
     group_indexer = Indexer(0)
 
     def __init__(self, genomes: int, module: NeatModule, config: Config = None, state_dict: dict[str, Any] = None, **options):
+        # self.genus_indexer = Indexer(0)
+        if config is None: config = Config()
+        
         # ------------------------------ Globals ------------------------------ #
         self.genus: int = next(self.genus_indexer)
         self.genera = [self.genus]
@@ -69,16 +72,13 @@ class Population(object):
 
         # ------------------------------ Data Loading ------------------------------ #
         self._initialized = False
-        verbose = manage_params(options, 'verbose', 2)
+        verbose: bool | int = manage_params(options, 'verbose', False)
         if state_dict is None:
-            # TODO: Implement initialization for CPU functions
             # Create a population from scratch, then partition into species.
             self.genomes = self.reproduction.create_new(
                 self.genus, self.size, self.modules[self.genus],
                 tpb=self.threads_per_block, verbose=verbose
             )
-            # TODO: Implement initial speciation for CPU functions
-            # self.species.speciate(self.genomes, self.generation, True)
             speciate(
                 self.config, self.genera, self.modules, self.species_set, self.genomes, self.generation,
                 tpb=self.threads_per_block, verbose=verbose
@@ -404,12 +404,19 @@ class Population(object):
             pass
 
         return self.best_genome, self.ranking
+    
+    def reset_keys(self):
+        pass
 
     def save_dict(self, name: str = None, directory: str = None, file_no: int = None, replace=False):
         # ------------------------------ Taxonomy Info ------------------------------ #
         genera = self.genera
-        # ------------------------------ Modules' Params ------------------------------ #
-        module_state = {genus: module.state_dict() for genus, module in self.modules.items()}
+        # ------------------------------ Modules' State and Architecture ------------------------------ #
+        module_state_dicts = {}
+        for genus, module in self.modules.items():
+            # Use new state_dict_with_metadata() to save both weights and architecture
+            serialized = module.neat_dict()
+            module_state_dicts[genus] = serialized
         # ------------------------------ Genomes and Evaluations ------------------------------ #
         genomes = []
         for genome in self.genomes.values():
@@ -458,9 +465,10 @@ class Population(object):
             species.append(specie_dict)
         # ------------------------------ State ------------------------------ #
         state: dict[str, Any] = {
+            'version': 1,
             'genera': genera,
             'generation': self.generation,
-            'module_state': module_state,
+            'module_state_dicts': module_state_dicts,
             'genomes': genomes,
             'genome_indexer': self.reproduction.genome_indexer.get(),
             'best_genomes': best_keys,
@@ -476,7 +484,10 @@ class Population(object):
 
         return state, file_no
 
-    def load_dict(self, save_state: dict = None, name: str = None, directory: str = None, file_no: int = None, verbose: int = None):
+    def load_dict(
+        self, save_state: dict = None, name: str = None, directory: str = None, file_no: int = None, 
+        strict: bool = True, verbose: int = None
+    ):
         if save_state is None:
             if name is not None:
                 if directory is None:
@@ -508,9 +519,9 @@ class Population(object):
         self.reproduction.genome_indexer.set(save_state['genome_indexer'])
         if verbose:
             print(f"\rloaded genomes in {round(clock.perf_counter() - ts, 2)}s")
-        # ------------------------------ Modules' Params ------------------------------ #
-        modules_params = save_state['module_state']
-        for (genus_depr, module), (genus, params) in zip(list(self.modules.items()), list(modules_params.items())):
+        # ------------------------------ Modules' Params and Architecture ------------------------------ #
+        module_state_dicts = save_state['module_state_dicts']
+        for (genus_depr, module), (genus, neat_dict) in zip(list(self.modules.items()), list(module_state_dicts.items())):
             del self.modules[genus_depr]
             module.genus = genus
             for m in module.neat_modules():
@@ -518,9 +529,14 @@ class Population(object):
                 m.updated = False
             for p in module.neat_parameters():
                 p.reset()
+            
+            module.load_neat_dict(
+                neat_dict,
+                strict=strict,
+                verbose=verbose and verbose >= 2
+            )
+            
             module.update({g.key: g for g in self.genomes.values() if g.genus == genus})
-            module.load_state_dict(params)
-            del modules_params[genus]
             self.modules[genus] = module
         # ------------------------------ Evaluations ------------------------------ #
         best_genome_keys = save_state.get('best_genomes')
@@ -605,3 +621,88 @@ class Population(object):
             remove(self.genomes, key)
 
         torch.cuda.empty_cache()
+
+    def save(self, filename: str, directory: str = None, file_no: int = None, replace: bool = False, debug: bool = True):
+        """Save the entire Population including all modules and config to a .neat.pkl file.
+        
+        This saves the complete Population state using save_dict() logic but with module
+        architecture included. Uses state_dict_with_metadata() for reliable serialization.
+        
+        Args:
+            filename: Base filename (without .neat.pkl extension)
+            directory: Directory to save to (default: 'neat_save')
+            file_no: Specific file number to save (auto-increments if None)
+            replace: If True, replace the latest numbered file
+            debug: If True, print debug messages
+        
+        Returns:
+            Tuple of (success: bool, file_no: int)
+        """
+        if directory is None:
+            directory = 'neat_save'
+        
+        # Use save_dict() to get the serializable state
+        save_data, _ = self.save_dict()
+        
+        # Add config and other metadata
+        save_data['config'] = self.config
+        
+        # Use .neat.pkl extension
+        success, file_no = save(
+            save_data, 
+            filename, 
+            directory, 
+            file_no=file_no, 
+            replace=replace,
+            extension='.neat.pkl',
+            items_name='NEAT Population',
+            debug=debug
+        )
+        return success, file_no
+
+    def load(self, filename: str, directory: str = None, file_no: int = None, strict: bool = True, debug: bool = True) -> 'Population':
+        """Load a complete Population from a .neat.pkl file.
+        
+        Loads the full Population state using save_dict/load_dict logic with proper
+        module weight restoration using the new state_dict_with_metadata() approach.
+        
+        Args:
+            filename: Base filename (without .neat.pkl extension)
+            directory: Directory to load from (default: 'neat_save')
+            file_no: Specific file number to load (auto-finds latest if None)
+            strict: If True, require exact module architecture; if False, match by shape only
+            debug: If True, print debug messages
+        
+        Returns:
+            Loaded Population object with all state restored
+        
+        Raises:
+            FileNotFoundError: If the file does not exist
+            RuntimeError: If config or critical data is missing
+        """
+        if directory is None:
+            directory = 'neat_save'
+        
+        # Use .neat.pkl extension
+        save_data = load(
+            filename, 
+            directory, 
+            file_no=file_no,
+            extension='.neat.pkl',
+            items_name='NEAT Population',
+            debug=debug
+        )
+        
+        if save_data is None:
+            # raise FileNotFoundError(
+            #     f"Failed to load Population from {directory}/{filename}.neat.pkl"
+            # )
+            return None
+        
+        # Use load_dict() to restore all state with proper module weight restoration
+        self.load_dict(save_state=save_data, strict=strict, verbose=2 if debug else 0)
+        
+        if debug:
+            print(f"Successfully loaded Population with {len(self.genomes)} genomes and {len(self.species_set.species)} species")
+        
+        return self

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from ModifiedNEAT.config.base import Configuration
 from ModifiedNEAT.util.storage import STORAGE_DIR
 
@@ -25,10 +27,10 @@ class GenomeConfig(Configuration):
         self.weight_init_std        = 1.0
         self.weight_max_value       = +math.inf
         self.weight_min_value       = -math.inf
-        self.weight_mutate_power    = 0.5
-        self.weight_mutate_rate     = 0.50
+        self.weight_mutate_power    = 0.50
+        self.weight_mutate_rate     = 0.60
         self.weight_replace_rate    = 0.01
-        self.weight_add_prob        = 0.01
+        self.weight_add_prob        = 0.25
         self.weight_del_prob        = 0.01
         self.param_epsilon          = 1e-12
 
@@ -59,12 +61,12 @@ class ReproductionConfig(Configuration):
     def __init__(self):
         super(ReproductionConfig, self).__init__('reproduction config')
 
-        self.elitism            = 0.10
-        self.clone_threshold    = 0.00
+        self.elitism            = 0.33
+        self.clone_threshold    = 0.50
         self.survival_threshold = 0.20
         self.cross_threshold    = 0.00
-        self.cross_multiplier   = 0.50
-        self.darwin_multiplier  = 0.10
+        self.cross_multiplier   = 0.80
+        self.darwin_multiplier  = 0.20
         self.min_species_size   = 100
         self.purge              = 0
         self.preserve_elite     = False

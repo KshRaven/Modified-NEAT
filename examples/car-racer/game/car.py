@@ -57,21 +57,24 @@ class Cars:
         self.init_x, self.init_y, self.init_angle = 0.0, 0.0, 0.0
         
         # Physics and control configuration
-        self.use_lidar: bool    = config.use_lidar
-        self.max_vel_lin: float = config.max_linear_velocity
-        self.max_vel_ang: float = config.max_angular_velocity
-        self.acc_lin: float     = config.linear_acceleration
-        self.vel_ang: float     = config.angular_velocity
-        self.coeff_reverse: float = config.reverse_coeff
-        self.coeff_brake: float = config.brake_coeff
-        self.min_brake_steps: int = config.min_brake_steps
-        self.cutoff: float     = config.cutoff
-        self.toggle_reverse: bool = config.toggle_reverse
-        self.full_restart: bool = config.full_restart
+        self.use_lidar: bool        = config.use_lidar
+        self.max_vel_lin: float     = config.max_linear_velocity
+        self.max_vel_ang: float     = config.max_angular_velocity
+        self.acc_lin: float         = config.linear_acceleration
+        self.acc_ang: float         = config.angular_acceleration
+        self.coeff_reverse: float   = config.reverse_coeff
+        self.coeff_brake: float     = config.brake_coeff
+        self.coeff_checker: float   = config.checker_coeff
+        self.min_brake_steps: int   = config.min_brake_steps
+        self.min_straight_steps: int = config.min_straight_steps
+        self.straight_alignment_tolerance: float = config.straight_alignment_tolerance
+        self.cutoff: float          = config.cutoff
+        self.toggle_reverse: bool   = config.toggle_reverse
+        self.full_restart: bool     = config.full_restart
         self.restrict_movement: bool = config.restrict_movement
-        self.frames_per_tile: int = config.frames_per_tile
-        self.discrete: bool     = config.discrete
-        self.endless: bool      = config.endless
+        self.frames_per_tile: int   = config.frames_per_tile
+        self.discrete: bool         = config.discrete
+        self.endless: bool          = config.endless
 
         # Surface friction: velocity multiplier applied every frame (1.0 = no decay)
         self.friction_road:   float = config.friction_road
@@ -106,19 +109,19 @@ class Cars:
         # ------------------------------------------------------------------
         # LiDAR configuration
         # ------------------------------------------------------------------
-        # lidar_angle: number of evenly-spaced beams cast from the car centre.
+        # lidar_angles: number of evenly-spaced beams cast from the car centre.
         #   Beams are relative to the car's own heading (0° = forward,
         #   90° = right, 180° = behind, 270° = left).
         # lidar_max_dist: maximum ray length in pixels (default = 2.5 tiles).
         # lidar_step: sampling stride in pixels; smaller = more accurate but slower.
-        self.lidar_angle: int   = config.lidar_angle
+        self.lidar_angles: int   = config.lidar_angles
         self.lidar_max_dist: float = config.lidar_max_dist if config.lidar_max_dist is not None else float(self.grid.cell_size) * 2.5
         self.lidar_step: int    = config.lidar_step
         self._lidar_n_steps: int = max(1, int(self.lidar_max_dist / self.lidar_step))
 
         # Fixed, car-relative beam offsets (degrees, evenly spaced over 360°)
         self._lidar_beam_offsets: Array = np.linspace(
-            0.0, 360.0, self.lidar_angle, endpoint=False, dtype=NP_FLOAT
+            0.0, 360.0, self.lidar_angles, endpoint=False, dtype=NP_FLOAT
         )
 
         # Cached numpy bool arrays extracted from grid masks (filled in reset())
@@ -145,6 +148,7 @@ class Cars:
         self.disp_x     = np.full((self.total,), 0.0, dtype=NP_FLOAT)
         self.disp_y     = np.full((self.total,), 0.0, dtype=NP_FLOAT)
         self.vel_lin    = np.full((self.total,), 0.0, dtype=NP_FLOAT)
+        self.vel_ang    = np.full((self.total,), 0.0, dtype=NP_FLOAT)
         self.angle      = np.full((self.total,), self.init_angle, dtype=NP_FLOAT)
         self.crashed    = np.full((self.total,), False, dtype=bool)
         self.finished   = np.full((self.total,), False, dtype=bool)
@@ -156,6 +160,7 @@ class Cars:
         self.tile_stag_steps = np.full((self.total,), 0, dtype=NP_INT)
         self.brake_steps = np.full((self.total,), 0, dtype=NP_INT)
         self.turn_steps = np.full((self.total,), 0, dtype=NP_INT)
+        self.straight_steps = np.full((self.total,), 0, dtype=NP_INT)
         self.on_road    = np.full((self.total,), False, dtype=bool)
         self.on_curb    = np.full((self.total,), False, dtype=bool)
         self.on_grass   = np.full((self.total,), False, dtype=bool)
@@ -163,11 +168,12 @@ class Cars:
         self.on_track   = np.full((self.total,), True, dtype=bool)
         self.on_finish  = np.full((self.total,), False, dtype=bool)
         self.tile: Array[tuple[int], Tile] = np.full((self.total,), None, dtype=object)
-        self.friction: Array | None = np.full_like(self.vel_lin, 1.0)
-        self.handling: Array | None = np.full_like(self.vel_lin, 1.0)
-        self.slip: Array | None = np.full_like(self.vel_lin, 0.0)
+        self.friction: Array | None = np.full_like(self.vel_lin, config.friction_road)
+        self.handling: Array | None = np.full_like(self.vel_lin, config.handling_road)
+        self.slip: Array | None = np.full_like(self.vel_lin, config.slip_road)
         self.ranking: Array | None = None
         self.used_brake = np.full((self.total,), False, dtype=bool)
+        self.tile_crash = np.full((self.total,), False, dtype=bool)
 
         # Corner-entry speed: recorded once when the car first enters a corner
         # tile; held constant until the car moves to the next tile.  Used by
@@ -175,14 +181,14 @@ class Cars:
         self.corner_entry_speed: Array = np.full((self.total,), 0.0, dtype=NP_FLOAT)
 
         # LiDAR output arrays
-        # lidar_distances     (N, lidar_angle) float32, each beam's hit distance [0, 1]
-        # lidar_surface_hits  (N, lidar_angle) int8, surface code at hit point
+        # lidar_distances     (N, lidar_angles) float32, each beam's hit distance [0, 1]
+        # lidar_surface_hits  (N, lidar_angles) int8, surface code at hit point
         # surface             (N,) int8, dominant surface under car centre
         self.lidar_distances:    Array = np.ones(
-            (self.total, self.lidar_angle), dtype=NP_FLOAT
+            (self.total, self.lidar_angles), dtype=NP_FLOAT
         )
         self.lidar_surface_hits: Array = np.full(
-            (self.total, self.lidar_angle), SURFACE_VOID, dtype=np.int8
+            (self.total, self.lidar_angles), SURFACE_VOID, dtype=np.int8
         )
         self.surface: Array = np.zeros((self.total,), dtype=np.int8)  # default: road
 
@@ -324,7 +330,7 @@ class Cars:
 
     def _update_lidar(self) -> None:
         """
-        Cast `lidar_angle` rays from each active car's centre and record the
+        Cast `lidar_angles` rays from each active car's centre and record the
         distance (and surface type) at the edge of the car's current surface
         layer, with three hard guarantees:
 
@@ -374,7 +380,7 @@ class Cars:
 
         gw, gh = self._lidar_gw, self._lidar_gh
         N  = self.total
-        B  = self.lidar_angle
+        B  = self.lidar_angles
         st = self.lidar_step
         md = self.lidar_max_dist
 
@@ -582,6 +588,7 @@ class Cars:
                                     self.laps_done[idx] += 1
                                 self.checks_done[idx] += 1
                                 self.tile_stag_steps[idx] = 0
+                                self.tile_crash[idx] = False
                             else:
                                 self.tile_stag_steps[idx] += 1
                             self.tile[idx] = new_tile
@@ -616,11 +623,6 @@ class Cars:
             # ------------------------------------------------------------------
             # 0. Inputs
             # ------------------------------------------------------------------
-            # inputs = np.clip(inputs, -1.0, +1.0)
-            # accelerate, brake, left, right = np.transpose(inputs, (-1, -2))
-            # acceleration = accelerate - brake
-            # rotation = left - right
-            # inputs = np.clip(inputs, -1.0, +1.0)
             acceleration, rotation = np.transpose(inputs, (-1, -2))
 
             # ------------------------------------------------------------------
@@ -651,23 +653,36 @@ class Cars:
             # ------------------------------------------------------------------
             # 2. Rotate (steering degraded on loose/slippery surfaces)
             # ------------------------------------------------------------------
-            self.angle[:] += self.vel_ang * rotation * self.handling
-            self.angle[:] %= 360
-            self.angle[self.on_gravel] += np.random.uniform(
-                -2, 2, size=np.count_nonzero(self.on_gravel)
+            rot = rotation.copy()
+            ang_norm = np.abs(self.vel_ang / self.max_vel_ang)
+            ang_diff = np.sign(rotation) != np.sign(self.vel_ang)
+            rot[ang_diff] *= 1 + (ang_norm[ang_diff] * self.coeff_checker)
+            self.vel_ang[:] = np.clip(
+                self.vel_ang + (self.acc_ang * rot),
+                -self.max_vel_ang, +self.max_vel_ang,
             )
 
             # ------------------------------------------------------------------
-            # 3. Accelerate / brake
+            # 3. Surface handling (passive velocity decay)
             # ------------------------------------------------------------------
+            self.vel_ang[:] *= self.handling
+
+            # ------------------------------------------------------------------
+            # 4. Accelerate / brake
+            # ------------------------------------------------------------------
+            acc = acceleration.copy()
+            lin_norm = np.abs(self.vel_lin / self.max_vel_lin)
+            lin_diff = np.sign(acceleration) != np.sign(self.vel_lin)
+            acc[lin_diff] *= 1 + (lin_norm[lin_diff] * self.coeff_brake)
             self.vel_lin[:] = np.clip(
-                self.vel_lin + (self.acc_lin * acceleration),
+                self.vel_lin + (self.acc_lin * acc),
                 -self.max_vel_lin if self.toggle_reverse else 0.0,
                 +self.max_vel_lin,
             )
+            if self.toggle_reverse: self.vel_lin[self.vel_lin < 0] *= self.reverse_coeff
 
             # ------------------------------------------------------------------
-            # 4. Surface friction (passive velocity decay)
+            # 5. Surface friction (passive velocity decay)
             # ------------------------------------------------------------------
             self.vel_lin[:] *= self.friction
 
@@ -678,6 +693,11 @@ class Cars:
         vel_norm = np.clip(self.vel_lin / self.max_vel_lin, -1.0, 1.0).astype(NP_FLOAT)
 
         # Move
+        self.angle += self.vel_ang
+        self.angle %= 360
+        self.angle[self.on_gravel] += np.random.uniform(
+            -2, 2, size=np.count_nonzero(self.on_gravel)
+        )
         radians = np.radians(self.angle)
         self.disp_x = np.clip(
             (np.sin(radians) * self.vel_lin) 
@@ -732,10 +752,12 @@ class Cars:
         right = -135 + offset
         moved_forward = (self.vel_lin > 0) & (phase_curr < left) & (phase_curr > right)
         out_of_bounds = ~self.on_track
+        if self.restrict_movement >= 2: out_of_bounds |= self.on_grass | self.on_gravel # | self.on_curb
 
         # Tile-type masks
         tile_type_curr   = np.array([t.type.value for t in self.tile])
         corner_tile_curr = np.isin(tile_type_curr, [Type.LEFT.value, Type.RIGHT.value])
+        straight_tile_curr = ~corner_tile_curr
         tile_type_next   = np.array([self.grid.continuity[t].type.value for t in self.tile])
         corner_tile_next = np.isin(tile_type_next, [Type.LEFT.value, Type.RIGHT.value])
 
@@ -749,14 +771,16 @@ class Cars:
 
         # Steps
         delayed_reset = checked | out_of_bounds
-        turning = ((turned_in_curr & corner_tile_curr) | (turned_in_next & corner_tile_next)) & on_road
-        # turning = turned_in_curr | turned_in_next
+        turning = ((turned_in_curr & corner_tile_curr)) & on_road # | (turned_in_next & corner_tile_next)
         self.turn_steps[turning] += 1
         self.turn_steps[delayed_reset] = 0
         braking = acceleration < 0 
         self.brake_steps[braking]  += 1
         self.brake_steps[~braking]  = 0
         self.used_brake |= braking
+        straight_aligned = (np.abs(phase_curr) <=  self.straight_alignment_tolerance) & straight_tile_curr & on_road
+        self.straight_steps[straight_aligned] += 1
+        self.straight_steps[delayed_reset] = 0
         
         # Check if brakes were used on checkpoint
         brake_check = (
@@ -816,6 +840,8 @@ class Cars:
         # if True:
         #     eliminate |= ~brake_check
         self.crashed[eliminate] |= True
+        # Set tile crash flag when car crashes on current tile
+        self.tile_crash[eliminate] = True
 
         self.crashes_done[self.crashed] += 1
         self.hiatus[~moved_forward] += 1
@@ -829,12 +855,15 @@ class Cars:
             self.crashed.copy(), self.hiatus.copy(),
             moved_forward, tile_stag,
             corner_tile_curr, corner_tile_next,
+            straight_tile_curr,
             vel_norm, phase_align,
             on_road,
             turning, self.turn_steps.copy(), self.min_brake_steps,
             braking, self.brake_steps.copy(), self.min_brake_steps, brake_check,
+            straight_aligned, self.straight_steps.copy(), self.min_straight_steps,
             turn_align,
             self.corner_entry_speed.copy(),
+            self.tile_crash.copy(),
             None, verbose,
         )
 
@@ -879,7 +908,7 @@ class Cars:
         use_lidar : bool
             False (default) → 9-feature geometric state (backward-compatible).
             True            → geometric state + LiDAR distances + surface code,
-                              shape (N, 9 + lidar_angle + 1).
+                              shape (N, 9 + lidar_angles + 1).
 
         Default (geometric) features
         -----------------------------
@@ -907,7 +936,7 @@ class Cars:
         tile_check_next  = np.array([list(tile.center_check_abs) for tile in tile_next])
         x_c1, y_c1       = np.transpose(tile_check_next)
         tile_check_next_1  = np.array([list(tile.center_check_abs) for tile in tile_next_1])
-        x_c2, y_c2       = np.transpose(tile_check_next)
+        x_c2, y_c2       = np.transpose(tile_check_next_1)
 
         a_r  = np.array([tile.rotation for tile in self.tile])
         a_t0 = np.array([tile.orientation for tile in self.tile]) # angle [0, 360]
@@ -929,7 +958,7 @@ class Cars:
             _normalize_dist(np.hypot(x_c0 - x_p, y_c0 - y_p), half),
             _normalize_dist(np.hypot(x_c1 - x_p, y_c1 - y_p), half * 2),
             _normalize_dist(np.hypot(x_c2 - x_p, y_c2 - y_p), half * 3),
-            _normalize_dist(np.hypot(x_t  - x_p, y_t  - y_p), half / 2),
+            # _normalize_dist(np.hypot(x_t  - x_p, y_t  - y_p), half / 2),
         ], axis=-1)
 
         # --- phases: how far the player's heading deviates from each tile ---
@@ -937,16 +966,18 @@ class Cars:
             _signed_diff(a_t0, a_p),
             _signed_diff(a_t1, a_p),
             _signed_diff(a_t2, a_p),
-            _signed_diff(a_r , a_p),
+            # _signed_diff(a_r , a_p),
         ], axis=-1) / 180.0
 
         # --- vehicle state ---
         linear_velocity = self.vel_lin / self.max_vel_lin
+        angular_velocity = self.vel_ang / self.max_vel_ang
         # if not self.toggle_reverse: (linear_velocity * 2) - 1 # NOTE: Disabled because of confusion when reverse is enabled post-training
         # friction = (self.friction - self.friction_min) / (self.friction_max - self.friction_min)
         # handling = (self.handling - self.handling_min) / (self.handling_max - self.handling_min)
         vehicle = np.stack([
             linear_velocity,
+            angular_velocity,
             (self.angle - 180) / (- 180.0), # Ensures 1.0=UP, 0.5=LEFT and -0.5=RIGHT
             # friction,
             # handling, # TODO: Might replace with surface
@@ -1162,11 +1193,11 @@ class Cars:
         }
         
         car_angle = self.angle[car_idx]
-        distances = self.lidar_distances[car_idx]  # (lidar_angle,)
-        surface_hits = self.lidar_surface_hits[car_idx]  # (lidar_angle,)
+        distances = self.lidar_distances[car_idx]  # (lidar_angles,)
+        surface_hits = self.lidar_surface_hits[car_idx]  # (lidar_angles,)
         
         # Draw each LiDAR beam
-        for beam_idx in range(self.lidar_angle):
+        for beam_idx in range(self.lidar_angles):
             # Calculate the absolute angle of this beam in world space
             beam_offset = self._lidar_beam_offsets[beam_idx]
             absolute_angle = car_angle + beam_offset
@@ -1219,6 +1250,7 @@ class Cars:
         self.disp_x      = np.full((self.total,), 0.0, dtype=NP_FLOAT)
         self.disp_y      = np.full((self.total,), 0.0, dtype=NP_FLOAT)
         self.vel_lin     = np.full((self.total,), 0.0, dtype=NP_FLOAT)
+        self.vel_ang     = np.full((self.total,), 0.0, dtype=NP_FLOAT)
         self.angle       = np.full((self.total,), self.init_angle, dtype=NP_FLOAT)
         self.crashed     = np.full((self.total,), False, dtype=bool)
         self.finished    = np.full((self.total,), False, dtype=bool)
@@ -1226,10 +1258,12 @@ class Cars:
         self.laps_done   = np.full((self.total,), 0, dtype=NP_INT)
         self.checks_done = np.full((self.total,), 0, dtype=NP_INT)
         self.crashes_done= np.full((self.total,), 0, dtype=NP_INT)
+        self.tile_crash = np.full((self.total,), False, dtype=bool)
         self.hiatus      = np.full((self.total,), 0, dtype=NP_INT)
         self.tile_stag_steps = np.full((self.total,), 0, dtype=NP_INT)
         self.brake_steps = np.full((self.total,), 0, dtype=NP_INT)
         self.turn_steps  = np.full((self.total,), 0, dtype=NP_INT)
+        self.straight_steps = np.full((self.total,), 0, dtype=NP_INT)
         self.on_road     = np.full((self.total,), False, dtype=bool)
         self.on_curb     = np.full((self.total,), False, dtype=bool)
         self.on_grass    = np.full((self.total,), False, dtype=bool)
@@ -1238,15 +1272,16 @@ class Cars:
         self.on_finish   = np.full((self.total,), False, dtype=bool)
         self.tile        = np.full((self.total,), self.grid.start_cell, dtype=object)
         self.ranking     = None
-        self.friction    = np.full_like(self.vel_lin, 1.0)
-        self.handling    = np.full_like(self.vel_lin, 1.0)
+        self.friction    = np.full_like(self.vel_lin, self.config.friction_road)
+        self.handling    = np.full_like(self.vel_lin, self.config.handling_road)
+        self.slip        = np.full_like(self.vel_lin, self.config.slip_road)
         self.used_brake  = np.full((self.total,), False, dtype=bool)
 
         # LiDAR arrays (resized for new total)
         self.corner_entry_speed = np.full((self.total,), 0.0, dtype=NP_FLOAT)
 
-        self.lidar_distances    = np.ones((self.total, self.lidar_angle), dtype=NP_FLOAT)
-        self.lidar_surface_hits = np.full((self.total, self.lidar_angle), SURFACE_VOID, dtype=np.int8)
+        self.lidar_distances    = np.ones((self.total, self.lidar_angles), dtype=NP_FLOAT)
+        self.lidar_surface_hits = np.full((self.total, self.lidar_angles), SURFACE_VOID, dtype=np.int8)
         self.surface            = np.zeros((self.total,), dtype=np.int8)
 
         # (Re-)build cached mask numpy arrays from the freshly-built grid
@@ -1278,10 +1313,15 @@ class Cars:
             self.disp_x    [restart_part] = 0
             self.disp_y    [restart_part] = 0
             self.vel_lin   [restart_part] = 0
+            self.vel_ang   [restart_part] = 0
             self.surface   [restart_part] = SURFACE_ROAD # assume road on respawn # TODO: Make it have a direct update method like the surface masks
+            self.friction  [restart_part] = self.config.friction_road
+            self.handling  [restart_part] = self.config.handling_road
+            self.slip      [restart_part] = self.config.slip_road
 
             self.brake_steps[restart_part] = 0
             self.turn_steps [restart_part] = 0
+            self.straight_steps[restart_part] = 0
             self.crashed    [restart_all]  = False
             self.started    [self.finished] = False
             self.finished   [restart_all]  = False

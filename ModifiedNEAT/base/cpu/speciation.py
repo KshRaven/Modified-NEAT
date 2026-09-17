@@ -90,9 +90,9 @@ def get_distance(parameter: CPUArray, total_distance: CPUArray,
                     print(f"Was running genomes '{genome0}', and '{genome1}', "
                           f"distances = {total_distance[genome0, genome1]}, {total_distance[genome1, genome0]}, ")
                     raise ValueError(
-                        f"The genetic distance between 2 separate genomes cannot exist, "
-                        f"since crossover and mutation exists. "
-                        f"\nWith the config file:"
+                        f"The genetic distance between two different genomes cannot be 0, "
+                        f"\nsince crossover and mutation exists. Even clones are mutated after creation"
+                        f"\nWithin the config file:"
                         f"\n1. Check the weight and disjoint coefficient values."
                         f"\n2. Check mutation coefficients' values  ")
                 total_distance[genome0, genome1] = distance

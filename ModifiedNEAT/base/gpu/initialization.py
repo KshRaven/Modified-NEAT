@@ -99,7 +99,7 @@ def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
         #     raise e
 
         # Copy data back to parameter
-        param.data.copy_(torch.from_dlpack(array.reshape(original_shape)))
+        param.data = torch.from_dlpack(array.reshape(original_shape))
 
         # Remove data from GPU
         del rng_states, array

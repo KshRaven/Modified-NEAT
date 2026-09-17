@@ -2,7 +2,6 @@ import ModifiedNEAT as neat
 import ModifiedNEAT.nn as mn
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import os, sys
 import warnings
 import random
@@ -15,6 +14,7 @@ import pygame
 from ModifiedNEAT.rl import NEAT
 from ModifiedNEAT.optim.scheduler import BinaryAnnealing, CosineAnnealing
 from ModifiedNEAT.util.datetime import unix_to_datetime_file, clock
+from ModifiedNEAT.util.fancy_text import CM, Fore
 from torch import Tensor
 from typing import Union
 from numba.core.errors import NumbaPerformanceWarning
@@ -33,8 +33,10 @@ neat.util.storage.set_storage_location("../../storage/")
 
 
 class BaseModel(mn.Model):
-    def __init__(self, inputs: int, outputs: int, dim_size: int, layers: int, coefficients=1, activation: nn.Module = nn.SiLU(),
-                 probabilistic=False, bias=True, device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options):
+    def __init__(
+        self, inputs: int, outputs: int, dim_size: int, layers: int, coefficients=1, activation: nn.Module = nn.SiLU(),
+        probabilistic=False, bias=True, device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options
+    ):
         super().__init__()
         # Attributes
         self.inputs         = inputs
@@ -45,29 +47,28 @@ class BaseModel(mn.Model):
         self.stride         = 1
         self.coefficients   = coefficients
         self.probabilistic  = probabilistic
+        self.normalize      = options.get('normalize', True)
         self.clip_min       = options.get('clip_min', -2)
         self.clip_max       = options.get('clip_max', -0)
         self.clip_range     = self.clip_max - self.clip_min
+        self.lower          = 10 ** self.clip_min
+        self.upper          = 10 ** self.clip_max
 
         # Build
-        self.projection = mn.Sequential(*[
-            # mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
+        self.lat_proj = mn.Sequential(*[
             mn.Linear(inputs, dim_size, True, device, dtype),
             *sum([
                 [
-                    mn.RMSNorm(dim_size, device=device, dtype=dtype),
+                    mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
                     activation,
-                    # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
                     mn.Linear(dim_size, dim_size, bias, device, dtype),
                 ]
                 for _ in range(layers)
             ], []),
         ])
         self.pol_proj = mn.Sequential(*[
-            # mn.Linear(dim_size, dim_size, bias, device, dtype),
-            mn.RMSNorm(dim_size, device=device, dtype=dtype),
+            mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
             activation,
-            # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
             mn.Linear(dim_size, 2*outputs, True, device, dtype),
         ])
 
@@ -80,40 +81,41 @@ class BaseModel(mn.Model):
     def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
         mean_std        = self.pol_proj(latent, keys=keys)
         mean, log_std   = torch.chunk(mean_std, 2, -1)
-        # mean            = F.sigmoid(mean) * 6 + -3
-        # std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
-        std = torch.exp(log_std)
+        if self.normalize:
+            mean = torch.tanh(mean) * self.upper
+            std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
+        else:
+            std = torch.exp(log_std)
         return mean, std
 
-    def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
-        latent      = self.projection(state, keys=keys)
-        mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
-        action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)
-        log_prob    = dist.log_prob(action)
-        return action, log_prob
+    # def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
+    #     latent      = self.projection(state, keys=keys)
+    #     mean, std   = self.get_mean_std(latent, keys=keys)
+    #     dist        = torch.distributions.Normal(mean, std)
+    #     action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)
+    #     log_prob    = dist.log_prob(action)
+    #     return action, log_prob
 
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None):
-        latent      = self.projection(state, keys=keys)
-        mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
-        log_prob    = dist.log_prob(action)
-        entropy     = dist.entropy()
-        return log_prob, entropy
+    # def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None):
+    #     latent      = self.projection(state, keys=keys)
+    #     mean, std   = self.get_mean_std(latent, keys=keys)
+    #     dist        = torch.distributions.Normal(mean, std)
+    #     log_prob    = dist.log_prob(action)
+    #     entropy     = dist.entropy()
+    #     return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        latent      = self.projection(state, keys=keys)
+        latent      = self.lat_proj(state, keys=keys)
         mean, std   = self.get_mean_std(latent, keys=keys)
         # dist        = torch.distributions.Normal(mean, std)
         # action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)
+        action = mean
         if options.get('normal', self.probabilistic):
-            action = mean + (std * torch.randn_like(std))
-        else:
-            action = mean
+            action = action + (std * torch.randn_like(std))
         if self.distribution == 'discrete':
             action = torch.argmax(action, dim=-1)
         else:
-            action = torch.tanh(action)
+            action = torch.tanh(action) # Ensure values are between (-1, +1) for acceleration and braking limits
         return action
 
     # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
@@ -200,19 +202,21 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
 
     print("\n\n---------- RUNNING TEST ON CAR-RACER ----------")
     print(f"best_genome = {POPULATION.best_genome}")
-    ENV.players.lives_total = 10
-    ENV.render_mode = 'human'
-    ENV.window.fps = 60
-    ENV.cars.usr_enganged = False
-    ENV.min_laps = 4
-    ENV.max_frames = 3000
+    ENV.players.lives_total     = 20
+    ENV.render_mode             = 'human'
+    ENV.window.fps              = 20
+    ENV.cars.usr_enganged       = False
+    ENV.cars.restrict_movement  = False
+    ENV.min_laps                = 5
+    ENV.max_frames              = 3000
 
     WIDTH, HEIGHT = ENV.window.width, ENV.window.height  # or screen.get_size()
-    FPS = 20
+    FPS = 30
     RECORD_DIR = f"{EXMP_DIR}/recordings"
-    print(f"Recording @ {RECORD_DIR}")
-    if not os.path.exists(RECORD_DIR):
-        os.mkdir(RECORD_DIR)
+    if record:
+        if not os.path.exists(RECORD_DIR):
+            os.mkdir(RECORD_DIR)
+        print(f"Recording @ {RECORD_DIR}")
     
 
     for i in range(25):
@@ -255,7 +259,6 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
                 probs = None
             keys = [g.key for g in np.random.choice(ranking, size=count, replace=False, p=probs)]
 
-        print(f"Running on Genomes {keys[:10]}")
         if probs is None:
             random.shuffle(keys)
         best_genome = POPULATION.best_genome
@@ -264,6 +267,7 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
         mapping = {k: idx for idx, k in enumerate(keys)}
         reverse = {idx: k for k, idx in mapping.items()}
         print(f"\nStarting test no {i}")
+        print(f"Running on Genomes {keys[:10]}")
         if record:
             process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
         with torch.no_grad():
@@ -273,7 +277,21 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
             while not done:
                 states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
                 actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
-                next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
+                try:
+                    next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
+                except ValueError as e:
+                    print(CM(
+                        (
+                            f"States =>\n{states}\n\tshape: {states.shape}\n"
+                            f"Actions =>\n{actions}\n\tshape: {actions.shape}\n"
+                            f"PlayerTotal => {ENV.cars.total}\n"
+                            f"Prev Displacement X = {ENV.cars.disp_x.shape}\n"
+                            f"Prev Shape = {ENV.cars.slip.shape}\n"
+                            f"Prev Friction = {ENV.cars.friction.shape}\n"
+                        )
+                        , Fore.LIGHTYELLOW_EX
+                    ))
+                    raise e
                 states = next_states
                 ENV.render()
                 ranking = np.argsort(-ENV.players.fitness)
@@ -317,7 +335,9 @@ def fix(value: float, default: float = 1):
         return value
 
 
-if __name__ == '__main__':
+def run():
+    global ENV, MODEL, POPULATION, FILE_NAME, FILE_NO, INIT_GEN
+    
     parser = argparse.ArgumentParser(description='Run NEAT algorithm on CarRacer game')
     parser.add_argument('--render_mode', type=str, default="human", 
                         help='Render mode for the game (e.g., "human", None)')
@@ -344,27 +364,27 @@ if __name__ == '__main__':
     CONFIG = neat.Config('racer', '../../storage/configs')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 0.5e-0
-    CONFIG.genome.weight_min_value          = -math.pi
-    CONFIG.genome.weight_max_value          = +math.pi
+    CONFIG.genome.weight_init_std           = 0.75e-0
+    CONFIG.genome.weight_min_value          = -math.inf
+    CONFIG.genome.weight_max_value          = +math.inf
     CONFIG.genome.weight_mutate_power       = 5.0e-1
-    CONFIG.genome.weight_mutate_rate        = 0.50
-    CONFIG.genome.weight_replace_rate       = 0.05
-    CONFIG.genome.weight_add_prob           = 1.00
-    CONFIG.genome.weight_del_prob           = 1e-12
+    CONFIG.genome.weight_mutate_rate        = 0.65
+    CONFIG.genome.weight_replace_rate       = 0.15
+    CONFIG.genome.weight_add_prob           = 0.75
+    CONFIG.genome.weight_del_prob           = 1e-12 # 0.05
     CONFIG.genome.single_structural_mutation = True
-    CONFIG.genome.param_epsilon             = 1e-12
+    CONFIG.genome.param_epsilon             = 1e-9
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
-    CONFIG.reproduction.clone_threshold     = 0.10
+    CONFIG.reproduction.clone_threshold     = 0.05
     CONFIG.reproduction.survival_threshold  = 0.10
     CONFIG.reproduction.cross_threshold     = 0.00
     CONFIG.reproduction.elitism             = 0.33
-    CONFIG.species.compatibility_threshold  = 3.142
+    CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.25
-    CONFIG.reproduction.cross_multiplier    = 0.50
+    CONFIG.reproduction.darwin_multiplier   = 0.50
+    CONFIG.reproduction.cross_multiplier    = 0.00
     CONFIG.reproduction.preserve_elite      = False
 
     CONFIG.save()
@@ -378,23 +398,31 @@ if __name__ == '__main__':
     COEFFICIENTS    = 1
     ACTIVATION      = nn.SiLU()
     BIAS            = True
-    PROBABILISTIC   = False
+    PROBABILISTIC   = True
     DISCRETE        = False
-    FILE_NAME       = f"RacerModel-E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_"\
-                      f"A-{ACTIVATION.__class__.__name__}_"\
-                      f"B{int(BIAS)}_P{int(PROBABILISTIC)}"
+    CLIP_MIN        = -2
+    CLIP_MAX        = -0
+    FILE_NAME       = (
+        f"RacerModel-E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_"
+        f"A-{ACTIVATION.__class__.__name__}_"
+        f"B{int(BIAS)}_P{int(PROBABILISTIC)}_"
+        f"R{int(CLIP_MIN)}~{int(CLIP_MAX)}"
+    )
     
-    MEMORY_SIZE     = 10
-    GAMMA           = np.exp(np.log(0.01) / 128)
-    ALPHA           = fix(np.exp(np.log(1.5) / (MEMORY_SIZE - 1)), 1.0)
-    KAPPA           = 0.0 # fix(np.exp(np.log(0.10) / 4), 0.0)
+    MEMORY_SIZE     = 8
+    GAMMA           = np.exp(np.log(0.01) / 64)
+    KAPPA           = np.exp(np.log(0.01) / 64)
+    ALPHA           = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
     ALPHA_ORDER     = 0
     REW_NORM        = 4
-    POL_REG         = 0.00
+    POL_REG         = 0.99
     STD_REG         = 0.75
+    print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
 
-    MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
-                      ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE)
+    MODEL = BaseModel(
+        INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
+        ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE,
+    )
     print(MODEL)
 
     POPULATION = neat.Population(GENOMES, MODEL, CONFIG, init_rep=True)
@@ -448,7 +476,7 @@ if __name__ == '__main__':
             POPULATION,
             schedulers=[
                 # RandomAnnealing(CONFIG, 1e-1, 1e+1, 3, ['weight_init_std', 'weight_mutate_power'], True),
-                CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
+                # CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
                 # CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_rate', True, True),
                 # CosineAnnealing(CONFIG, 10, 0.1, 'weight_replace_rate', True, True),
                 # CosineAnnealing(CONFIG, 15, 0.05, 'weight_add_prob', True, True),
@@ -463,7 +491,7 @@ if __name__ == '__main__':
                      f"rn{REW_NORM}-p{round(POL_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
                      f"type{int(DISCRETE)}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=None, # 10,
+            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=10,
             max_episodes=MEMORY_SIZE,
         )
 
@@ -481,3 +509,7 @@ if __name__ == '__main__':
         print(f"{'='*50}\n")
 
     test_best_network(count=10)
+    
+    
+if __name__ == "__main__":
+    run()

@@ -16,20 +16,6 @@ class ReplayBuffer(object):
         self.mapping: dict[int, int] = {}
         self.reverse: dict[int, int] = {}
 
-    def max_size(self):
-        if len(self.data) > 0:
-            maximum = np.max([np.max([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
-            return maximum
-        else:
-            return 0
-
-    def min_size(self):
-        if len(self.data) > 0:
-            maximum = np.min([np.min([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
-            return maximum
-        else:
-            return 0
-
     def episodes(self):
         listing = []
         if 'ep_map' in self.buffer_names:
@@ -48,6 +34,20 @@ class ReplayBuffer(object):
             else:
                 lengths = {key: 1.0 for key in lengths.keys()}
         return lengths
+
+    def max_size(self):
+        if len(self.data) > 0:
+            maximum = np.max([np.max([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
+            return maximum
+        else:
+            return 0
+
+    def min_size(self):
+        if len(self.data) > 0:
+            maximum = np.min([np.min([len(buffer) for buffer in buffers.values()]) for buffers in self.data.values()])
+            return maximum
+        else:
+            return 0
 
     def _init_buffers(self, key: int):
         self.data[key] = {b: list() for b in self.buffer_names if self.data.get(key) is None or b not in self.data[key]}

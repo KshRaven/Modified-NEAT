@@ -383,7 +383,10 @@ class Genome(object):
 
     def __str__(self):
         with objmode(res='unicode_type'):
-            res = "Genome(key="+str(self.key)+", genus="+str(self.genus)+", fitness="+str(self.fitness)+")"
+            res = (
+                "Genome(key="+str(self.key)+", genus="+str(self.genus)+", "
+                "fitness="+str(self.fitness)+")"
+            )
         return res
 
     def add_network(self, network_key: int, inputs: int, outputs: int, hidden_layers: list[int] = None):

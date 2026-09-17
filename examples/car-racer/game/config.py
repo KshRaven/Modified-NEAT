@@ -85,14 +85,16 @@ class CarConfig(Configuration):
         super().__init__(params=params, file=file)
         
         # Movement physics
-        self.max_linear_velocity: float = self.params.get("max_linear_velocity", 7.5)
-        self.max_angular_velocity: float | None = self.params.get("max_angular_velocity", None)
-        self.linear_acceleration: float = self.params.get("linear_acceleration", 0.25)
-        self.angular_velocity: float = self.params.get("angular_velocity", 7.5)
+        self.max_linear_velocity: float  = self.params.get("max_linear_velocity", 7.5)
+        self.max_angular_velocity: float = self.params.get("max_angular_velocity", 5.0)
+        self.linear_acceleration: float  = self.params.get("linear_acceleration", 0.25)
+        self.angular_acceleration: float = self.params.get("angular_acceleration", 1.0)
+        # self.angular_velocity: float     = self.params.get("angular_velocity", 7.5) # TODO: Depracate
         
         # Control coefficients
         self.reverse_coeff: float = self.params.get("reverse_coeff", 0.50)
-        self.brake_coeff: float = self.params.get("brake_coeff", 1.00)
+        self.brake_coeff: float   = self.params.get("brake_coeff",   1.00)
+        self.checker_coeff: float = self.params.get("checker_coeff", 1.00)
         
         # Visual/behavioral
         self.scale: float = self.params.get("car_scale", 0.40)
@@ -100,12 +102,14 @@ class CarConfig(Configuration):
         
         # Control settings
         self.toggle_reverse: bool = self.params.get("toggle_reverse", False)
-        self.restrict_movement: bool = self.params.get("restrict_movement", True)
+        self.restrict_movement: bool | int = self.params.get("restrict_movement", True)
         self.discrete: bool = self.params.get("discrete", False)
         self.full_restart: bool = self.params.get("full_restart", False)
         
         # Thresholds and limits
         self.min_brake_steps: int = self.params.get("min_brake_steps", 5)
+        self.min_straight_steps: int = self.params.get("min_straight_steps", 5)
+        self.straight_alignment_tolerance: float = self.params.get("straight_alignment_tolerance", 10.0)
         self.cutoff: float = self.params.get("cutoff", 0.5)
         self.frames_per_tile: int = self.params.get("frames_per_tile", 100)
         
@@ -128,7 +132,7 @@ class CarConfig(Configuration):
         self.slip_gravel: float = self.params.get("slip_gravel", 0.50)
         
         # LiDAR configuration
-        self.lidar_angle: int = self.params.get("lidar_angle", 8)
+        self.lidar_angles: int = self.params.get("lidar_angles", 8)
         self.lidar_max_dist: float | None = self.params.get("lidar_max_dist", None)  # If None, uses grid.cell_size * 2.5
         self.lidar_step: int = self.params.get("lidar_step", 4)
         

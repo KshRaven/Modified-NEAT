@@ -1,4 +1,8 @@
 # Core dependencies (CPU-compatible, always installed)
+# Install with: pip install -r requirements.txt
+# For a full editable install with dashboard build support, use:
+#   python install.py
+#   python setup.py develop
 numpy
 numba
 matplotlib
@@ -6,6 +10,7 @@ tensorboard
 torch
 gymnasium
 pygame
+colorama
 
 # GPU/CUDA dependencies (optional, install via: pip install -e .[gpu] or python install.py)
 # Only needed if you have NVIDIA GPU and want GPU acceleration

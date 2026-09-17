@@ -10,16 +10,18 @@ parts/
 sdist/
 var/
 
-storage/
-build/
-.md/
-.tests/
-frames/
-experimental/
-tests/
+*storage/
+*.md/
+*.tests/
+*.memory
+# *.config/
+*frames/
+*experimental/
 
 *.mp4
 *copy*
+*.pkl
+*.mnc.json
 
 *.pyc
 *.pyo
@@ -32,3 +34,4 @@ tests/
 *.egg
 *.egg-info/
 *.lock
+*.zip

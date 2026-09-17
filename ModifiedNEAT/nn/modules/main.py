@@ -4,8 +4,8 @@ from . import SequenceEncoding, BufferEncoding, BufferEmbedding, TransformerBase
 from . import Sequential, Linear, Transpose, Ignore
 from . import Conv1d, Conv2d, Conv3d, ResidualBlock, ConverBase
 from . import LayerNorm, RMSNorm, GroupNorm, BatchNorm
-from .base import get_conv
-from .util import get_tensor_info
+# from .base import get_conv
+from .base.util import get_tensor_info
 from ...util.qol import manage_params
 from ...util.fancy_text import CM, Fore
 

@@ -21,6 +21,9 @@ warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
 
 
+GAME_DIR = os.path.dirname(os.path.abspath(__file__))
+IMAGE_DIR = f"{GAME_DIR}/imgs"
+
 class Window(object):
     image: pygame.Surface = None
 
@@ -38,7 +41,7 @@ class Window(object):
         self.end_font   = pygame.font.SysFont("comicsans", 70)
         if self.image is None:
             self.image      = pygame.transform.scale(pygame.image.load(
-                os.path.join("./imgs", "bg.png")).convert_alpha(), (width, height))
+                os.path.join(IMAGE_DIR, "bg.png")).convert_alpha(), (width, height))
         # -------------------- States -------------------- #
         self.draw_lines = False
         self.initialized = True
@@ -50,7 +53,7 @@ class Window(object):
         self.stat_font  = pygame.font.SysFont("comicsans", 50)
         self.end_font   = pygame.font.SysFont("comicsans", 70)
         self.image      = pygame.transform.scale(pygame.image.load(
-            os.path.join("./imgs", "bg.png")
+            os.path.join(IMAGE_DIR, "bg.png")
         ).convert_alpha(), (self.width, self.height))
         self.initialized = True
 
@@ -70,7 +73,7 @@ class Floor(object):
     def __init__(self, window: Window, x: int, level: int, velocity: int = 6):
         # -------------------- PyGame -------------------- #
         if self.image is None:
-            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join("./imgs", "base.png")).convert_alpha())
+            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join(IMAGE_DIR, "base.png")).convert_alpha())
         # -------------------- Attributes -------------------- #
         self.window     = window
         self.height     = self.image.get_height()
@@ -158,7 +161,7 @@ class Pipe(object):
         self.y_bot: int     = None
         # -------------------- PyGame -------------------- #
         if self.image is None:
-            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join("./imgs", "pipe.png")).convert_alpha())
+            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join(IMAGE_DIR, "pipe.png")).convert_alpha())
         self.pxt = 1.0
         self.pipe_top       = pygame.transform.flip(self.image, False, True)
         self.pipe_bottom    = self.image
@@ -315,8 +318,8 @@ class Birds(object):
                  device: torch.device = 'cpu', dtype: torch.dtype = torch.float32):
         # -------------------- PyGame -------------------- #
         if self.images is None:
-            self.images: list       = [pygame.transform.scale2x(pygame.image.load(os.path.join("./imgs", f"bird{x}.png"))) for x in range(1, 4)]
-            self.images_anti: list  = [pygame.transform.scale2x(pygame.image.load(os.path.join("./imgs", f"anti{x}.png"))) for x in range(1, 4)]
+            self.images: list       = [pygame.transform.scale2x(pygame.image.load(os.path.join(IMAGE_DIR, f"bird{x}.png"))) for x in range(1, 4)]
+            self.images_anti: list  = [pygame.transform.scale2x(pygame.image.load(os.path.join(IMAGE_DIR, f"anti{x}.png"))) for x in range(1, 4)]
         self.image_num          = len(self.images)
         assert self.image_num == 3
         self.ANIMATIONS: list[int] = list(range(self.image_num)) + list(reversed(list(range(self.image_num-1))))
@@ -326,6 +329,7 @@ class Birds(object):
         self.floors     = floors
         self.pipes      = pipes
         self.init_x, self.init_y = init_x, init_y
+        self.anti_offset = type2offset # TODO: Bird Type 2 offset is only visual and not logical yet because of Pipe collision handling
         self.x          = torch.full((num,), init_x, device=device, dtype=dtype)
         self.y          = torch.full((num,), init_y, device=device, dtype=dtype)
         self.tilt       = torch.full((num,), 0, device=device, dtype=dtype)
@@ -343,16 +347,17 @@ class Birds(object):
         self.mapping: dict[int, int] = Dict([(idx, idx) for idx in range(num)])
         if type2count:
             self.is_anti[-type2count:] = True
-        self.x[self.is_anti] -= type2offset
+        self.x[self.is_anti] -= self.anti_offset
 
         self.bird_num = num
         self.velocity = velocity
-        self.threshold = threshold
+        self.threshold = max(0., min(1., threshold))
         self.full_state = full_state
 
     def reset(self):
         self.x[:] = self.init_x
         self.y[:] = self.init_y
+        self.x[self.is_anti] -= self.anti_offset
         self.height = self.y.clone()
         self.tilt[:] = self.tick_count[:] = self.vel[:] = 0.0
         self.img_count[:] = self.img_ref[:] = self.score[:] = 0.0
@@ -366,12 +371,14 @@ class Birds(object):
     def jump(self, activation: Tensor):
         if len(activation) != self.bird_num:
             raise ValueError(f"Activation num do not match; Got {len(activation)}, expected {self.bird_num}")
-        if activation.ndim == 3:
+        if activation.ndim == 3: # shape(genomes, seq_len, features)
             activation = activation[:, -1]
         elif activation.ndim >= 4:
             raise ValueError(f"Unsupported activation shape; Got {activation.shape}, expected 3 or 2")
+        if activation.ndim == 2: # shape(genomes, features)
+            activation = activation[:, 0]
         # activation shape (batch_size / seq_len, genomes, features)
-        activation                  = ~self.dead & (activation[:, 0] >= self.threshold)
+        activation                  = ~self.dead & (activation >= self.threshold)
         self.vel[activation]        = -self.velocity
         self.tick_count[activation] = 0
         self.height[activation]     = self.y[activation].clone()
@@ -663,6 +670,7 @@ class Game(Env):
         return self.birds.get_reward()
 
     def reset(self, keys: list[int] = None, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[Tensor, dict[str, Any]]:
+        # TODO: Implement keys paramter
         self.initialize()
         state = self.get_state()
         if self.sequential:

@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.util.fancy_text import *
 
 from typing import Any, Union
@@ -39,6 +38,7 @@ for trial_idx in range(TRIES):
                 PROJECT_DIR = base_dir + '/PythonProjectData'
                 break
 STORAGE_DIR = PROJECT_DIR + "/storage/"
+FILE_INDEX_PADDING = 3  # Zero-padding for file indices (e.g., '003', '004')
 
 
 def set_storage_location(directory: str = STORAGE_DIR):
@@ -46,45 +46,115 @@ def set_storage_location(directory: str = STORAGE_DIR):
     STORAGE_DIR = directory
 
 
-def save(items: dict[str, Any], filename: str, directory: str, file_no: int = None, replace=False,
-         subdirectory: str = None, save_location: str = None, extension: str = None,
-         items_name: str = None, time: int = None, debug=True):
-    if isinstance(file_no, int) and file_no == 0:
-        file_no = None
-    # Use default directory and name as subdirectory
+def get_last_index(filename: str, directory: str, extension: str = '.pkl', 
+                   save_location: str = None) -> int:
+    """Get the latest index available for a filename in a directory.
+    
+    Searches for all numbered files matching the pattern: filename-N<extension>
+    Returns the highest N found, or 0 if no numbered files exist.
+    
+    Args:
+        filename: Base filename (without extension or number)
+        directory: Directory to search
+        extension: File extension to search for (default: '.pkl')
+        save_location: Base save location (default: STORAGE_DIR)
+    
+    Returns:
+        int: The highest index found (0 if no numbered files exist)
+    """
     if save_location is None:
         save_location = STORAGE_DIR
-    directory = save_location + f"{directory}/"
-    if subdirectory is not None:
-        directory = directory + f"{subdirectory}/"
+    
+    full_dir = save_location + f"{directory}/"
+    
+    if not os.path.exists(full_dir):
+        return 0
+    
+    max_index = 0
+    try:
+        for file in os.listdir(full_dir):
+            # Match pattern: filename-<number><extension>
+            if file.startswith(filename + "-") and file.endswith(extension):
+                # Extract the number part
+                number_part = file[len(filename) + 1:-len(extension)]
+                try:
+                    index = int(number_part)
+                    max_index = max(max_index, index)
+                except ValueError:
+                    continue
+    except (OSError, PermissionError):
+        pass
+    
+    return max_index
 
-    # Get  file_path
-    if extension is None:
-        extension = '.pkl'
-    if file_no is None:
-        filepath = directory + filename + extension
-        # Get the latest filepath if replace
-        if replace:
-            file_no = 0
-            while True:
-                file_no += 1
-                filepath_to_check = f'{directory+filename}-{file_no}{extension}'
-                if os.path.exists(filepath_to_check):
-                    filepath = filepath_to_check
-                else:
-                    break
-        # Else get the next name
-        else:
-            file_no = 0
-            while os.path.exists(filepath):
-                file_no += 1
-                filepath = f'{directory + filename}-{file_no}{extension}'
+
+def get_next_index(filename: str, directory: str, extension: str = '.pkl', 
+                   save_location: str = None) -> int:
+    """Get the next available index for a filename in a directory.
+    
+    Returns the next index to use for saving. If only one or zero files exist,
+    starts at 100; otherwise increments the latest found index.
+    
+    Args:
+        filename: Base filename (without extension or number)
+        directory: Directory to search
+        extension: File extension (default: '.pkl')
+        save_location: Base save location (default: STORAGE_DIR)
+    
+    Returns:
+        int: The next available index, formatted with FILE_INDEX_PADDING
+    """
+    last_idx = get_last_index(filename, directory, extension, save_location)
+    
+    if last_idx == 0:
+        # If no files exist, start at 100
+        return 1 # 100
     else:
-        # Get specific file
-        filepath = f'{directory + filename}-{file_no}{extension}'
+        # Increment the last index
+        return last_idx + 1
 
-    # Serialize and save genome info
 
+def save(items: dict[str, Any], filename: str = '', directory: str = '', file_no: int = None, replace=False,
+         subdirectory: str = None, save_location: str = None, extension: str = None,
+         items_name: str = None, time: int = None, debug=True, filepath: str = None):
+    if filepath is None:
+        if isinstance(file_no, int) and file_no == 0:
+            file_no = None
+        # Use default directory and name as subdirectory
+        if save_location is None:
+            save_location = STORAGE_DIR
+        directory = save_location + f"{directory}/"
+        if subdirectory is not None:
+            directory = directory + f"{subdirectory}/"
+
+        # Get  file_path
+        if extension is None:
+            extension = '.pkl'
+        if file_no is None:
+            filepath = directory + filename + extension
+            # Get the latest filepath if replace
+            if replace:
+                file_no = get_last_index(filename, directory.replace(save_location, '').rstrip('/'), 
+                                        extension, save_location)
+                if file_no == 0: _file_no = ''
+                else: _file_no = f"-{file_no:0{FILE_INDEX_PADDING}d}"
+                filepath = f'{directory}{filename}{_file_no}{extension}'
+            # Else get the next name
+            else:
+                file_no = get_next_index(filename, directory.replace(save_location, '').rstrip('/'),
+                                        extension, save_location)
+                if file_no == 0: _file_no = ''
+                else: _file_no = f"-{file_no:0{FILE_INDEX_PADDING}d}"
+                filepath = f'{directory}{filename}{_file_no}{extension}'
+        else:
+            # Get specific file - use zero-padding if file_no is provided
+            if file_no == 0: _file_no = ''
+            else: _file_no = f"-{file_no:0{FILE_INDEX_PADDING}d}"
+            filepath = f'{directory}{filename}{_file_no}{extension}'
+    else:
+        assert isinstance(filepath, str)
+
+    # Serialize and save info
     try:
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
         save_data = {
@@ -92,7 +162,7 @@ def save(items: dict[str, Any], filename: str, directory: str, file_no: int = No
             'time': time if time is not None else int(clock.time())
         }
         with open(filepath, 'wb') as file:
-            if extension == '.json':
+            if extension is not None and '.json' in extension:
                 json.dump(save_data, file)
             else:
                 pickle.dump(save_data, file)
@@ -106,52 +176,59 @@ def save(items: dict[str, Any], filename: str, directory: str, file_no: int = No
         return False, file_no
 
 
-def load(filename: str, directory: str, file_no: int = None,
+def load(filename: str = '', directory: str = '', file_no: int = None,
          subdirectory: str = None, save_location: str = None, extension: str = None,
-         items_name: str = None, time: int = None, cooldown: int = None, debug=True):
+         items_name: str = None, time: int = None, cooldown: int = None, debug=True,
+         filepath: str = None):
     try:
-        if isinstance(file_no, int) and file_no == 0:
-            file_no = None
-        # Use default directory and name as subdirectory
-        if save_location is None:
-            save_location = STORAGE_DIR
-        directory = save_location + f"{directory}/"
-        if subdirectory is not None:
-            directory = directory + f"{subdirectory}/"
+        if filepath is None:
+            if isinstance(file_no, int) and file_no == 0:
+                file_no = None
+            # Use default directory and name as subdirectory
+            if save_location is None:
+                save_location = STORAGE_DIR
+            directory = save_location + f"{directory}/"
+            if subdirectory is not None:
+                directory = directory + f"{subdirectory}/"
 
-        # Check if Save folder exists
-        if os.path.exists(directory) is False:
-            raise NotADirectoryError(f"Failed to load save folder; '{directory}' does no exist")
+            # Check if Save folder exists
+            if os.path.exists(directory) is False:
+                raise NotADirectoryError(f"Failed to load save folder; '{directory}' does no exist")
 
-        # Get filepath
-        if extension is None:
-            extension = '.pkl'
-        filepath = directory + filename + extension
-
-        if file_no == 0:
+            # Get filepath
+            if extension is None:
+                extension = '.pkl'
             filepath = directory + filename + extension
-        elif file_no is None:
-            counter = 0
-            while True:
-                counter += 1
-                filepath_to_check = f'{directory+filename}-{counter}{extension}'
-                if os.path.exists(filepath_to_check):
-                    filepath = filepath_to_check
+
+            if file_no == 0:
+                filepath = directory + filename + extension
+            elif file_no is None:
+                # Get the latest file number
+                last_idx = get_last_index(filename, directory.replace(save_location, '').rstrip('/'), 
+                                        extension, save_location)
+                if last_idx > 0:
+                    filepath = f'{directory}{filename}-{last_idx:0{FILE_INDEX_PADDING}d}{extension}'
                 else:
-                    break
-        elif file_no > 0:
-            filepath = f'{directory+filename}-{file_no}{extension}'
+                    # No numbered files found, use base filename
+                    filepath = directory + filename + extension
+            elif file_no > 0:
+                filepath = f'{directory}{filename}-{file_no:0{FILE_INDEX_PADDING}d}{extension}'
+            else:
+                raise NotADirectoryError(f"Failed to load save folder; invalid 'file_no'")
         else:
-            raise NotADirectoryError(f"Failed to load save folder; invalid 'file_no'")
+            assert isinstance(filepath, str)
 
         # Check if Save file exists
         if os.path.exists(filepath) is False:
             raise NotADirectoryError(f"Failed to load save file; '{filepath}' does no exist")
 
         with open(filepath, 'rb') as file:
-            if extension == '.json':
+            if extension is not None and '.json' in extension:
                 save_data: tuple[dict[str, Any], int] = json.load(file)
             else:
+                # Use standard pickle.load() - the new save/load methods in NeatModule
+                # and Population use proper serialization with neat_dict()/load_neat_dict()
+                # that don't require custom unpickling for class resolution
                 save_data: tuple[dict[str, Any], int] = pickle.load(file)
             items = save_data['items']
             time_of_save = save_data['time']
@@ -167,7 +244,8 @@ def load(filename: str, directory: str, file_no: int = None,
                      f"save file from '{filepath}'.", PRINT_COLOUR))
         return items
     except Exception as e:
-        print(f"\n{CM(f'UtilityError: {e}', Fore.LIGHTRED_EX)}")
+        import traceback
+        print(f"\n{CM(f'UtilityError: {str(e)}\n{traceback.format_exc()}', Fore.LIGHTRED_EX)}")
         return None
 
 
@@ -203,7 +281,7 @@ def delete(filename: str, directory: str, file_no: Union[int, None],
                     return None
             entire_dir = True
         elif file_no > 0:
-            filepath = directory + f"/{filename}-{file_no}{extension}"
+            filepath = directory + f"/{filename}-{file_no:0{FILE_INDEX_PADDING}d}{extension}"
         else:
             raise NotADirectoryError(f"Failed to delete save folder; invalid 'file_no'")
 

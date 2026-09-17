@@ -2,7 +2,6 @@ import ModifiedNEAT as neat
 import ModifiedNEAT.nn as mn
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import os, sys
 import warnings
 import random
@@ -12,6 +11,10 @@ import argparse
 import subprocess as sp
 import pygame
 
+from ModifiedNEAT.rl import NEAT
+from ModifiedNEAT.optim.scheduler import BinaryAnnealing, CosineAnnealing
+from ModifiedNEAT.util.datetime import unix_to_datetime_file, clock
+from ModifiedNEAT.util.fancy_text import CM, Fore
 from torch import Tensor
 from typing import Union
 from numba.core.errors import NumbaPerformanceWarning
@@ -29,44 +32,62 @@ DTYPE  = torch.float32
 neat.util.storage.set_storage_location("../../storage/")
 
 
-class BaseModel(mn.Model):
-    def __init__(self, inputs: int, outputs: int, dim_size: int, layers: int, coefficients=1, activation: nn.Module = nn.SiLU(),
-                 probabilistic=False, bias=True, device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options):
+class BaseModelSeq(mn.Model):
+    def __init__(
+        self, inputs: int, outputs: int, dim_size: int, layers: int, 
+        max_seq_len: int, heads: int, kv_heads: int | None = None,
+        activation: nn.Module = nn.SiLU(), probabilistic=False, bias=True, 
+        device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options
+    ):
         super().__init__()
         # Attributes
-        self.inputs         = inputs
-        self.outputs        = outputs
-        self.dim_size       = dim_size
-        self.layers         = layers
-        self.distribution   = options.get('distribution', 'normal')
-        self.stride         = 1
-        self.coefficients   = coefficients
-        self.probabilistic  = probabilistic
-        self.clip_min       = options.get('clip_min', -2)
-        self.clip_max       = options.get('clip_max', -0)
-        self.clip_range     = self.clip_max - self.clip_min
-
+        self.inputs             = inputs
+        self.outputs            = outputs
+        self.dim_size           = dim_size
+        self.layers             = layers
+        self.distribution       = options.get('distribution', 'normal')
+        self.probabilistic      = probabilistic
+        self.normalize          = options.get('normalize', True)
+        self.clip_min           = options.get('clip_min', -2)
+        self.clip_max           = options.get('clip_max', -0)
+        self.clip_range         = self.clip_max - self.clip_min
+        self.lower              = 10 ** self.clip_min
+        self.upper              = 10 ** self.clip_max
+        self.max_seq_len        = max_seq_len
+        self.heads              = heads
+        self.kv_heads           = kv_heads
+        self.use_swiglu: bool   = options.get('use_swiglu', False)
+        self.attn_bias: bool    = options.get('attn_bias', bias)
+        self.differential: bool | int = options.get('differential', False)
+        
         # Build
-        self.projection = mn.Sequential(*[
-            # mn.Polynomial(inputs, dim_size, coefficients, True, device, dtype),
+        feed_fwd = None if self.use_swiglu else mn.Sequential(
+            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+            mn.RMSNorm(dim_size, device=device, dtype=dtype),
+            activation, 
+            mn.Linear(dim_size, dim_size, self.attn_bias, device, dtype),
+        )
+        transformer = mn.TransformerBase(
+            max_seq_len, dim_size, layers, heads, kv_heads,
+            differential=self.differential, causal_mask=True, 
+            bias=self.attn_bias, ff=feed_fwd, auto_single=True, fwd_exp=1,
+            residual=True, normalize=True, constant=100,
+            device=device, dtype=dtype
+        )
+        self.lat_proj = mn.Sequential(
             mn.Linear(inputs, dim_size, True, device, dtype),
-            *sum([
-                [
-                    mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
-                    activation,
-                    # mn.Polynomial(dim_size, dim_size, coefficients, bias, device, dtype),
-                    mn.Linear(dim_size, dim_size, bias, device, dtype),
-                ]
-                for _ in range(layers)
-            ], []),
-        ])
+            transformer,
+        )
         self.pol_proj = mn.Sequential(*[
-            # mn.Linear(dim_size, dim_size, bias, device, dtype),
-            mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype),
+            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+            mn.RMSNorm(dim_size, device=device, dtype=dtype),
             activation,
-            # mn.Polynomial(dim_size, 2*outputs, coefficients, True, device, dtype),
             mn.Linear(dim_size, 2*outputs, True, device, dtype),
         ])
+       
+    @property 
+    def transformer(self) -> mn.TransformerBase:
+        return self.lat_proj.modules_list[1]
 
     def extra_repr(self) -> str:
         return f"probabilistic={self.probabilistic}, distro='{self.distribution}'"
@@ -77,119 +98,118 @@ class BaseModel(mn.Model):
     def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
         mean_std        = self.pol_proj(latent, keys=keys)
         mean, log_std   = torch.chunk(mean_std, 2, -1)
-        # mean            = F.sigmoid(mean) * 6 + -3
-        # std             = torch.pow(10, F.sigmoid(log_std) * self.clip_range + self.clip_min)
-        std = torch.exp(log_std)
+        if self.normalize:
+            mean = torch.tanh(mean) * max(1, self.upper)
+            std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
+        else:
+            std = torch.exp(log_std)
         return mean, std
 
-    def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
-        latent      = self.projection(state, keys=keys)
-        mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
-        action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)
-        log_prob    = dist.log_prob(action)
-        return action, log_prob
-
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None):
-        latent      = self.projection(state, keys=keys)
-        mean, std   = self.get_mean_std(latent, keys=keys)
-        dist        = torch.distributions.Normal(mean, std)
-        log_prob    = dist.log_prob(action)
-        entropy     = dist.entropy()
-        return log_prob, entropy
-
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        latent      = self.projection(state, keys=keys)
+        latent      = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False))
         mean, std   = self.get_mean_std(latent, keys=keys)
-        # dist        = torch.distributions.Normal(mean, std)
-        # action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)
+        action = mean
         if options.get('normal', self.probabilistic):
-            action = mean + (std * torch.randn_like(std))
-        else:
-            action = mean
+            action = action + (std * torch.randn_like(std))
         if self.distribution == 'discrete':
             action = torch.argmax(action, dim=-1)
         else:
-            action = torch.tanh(action)
+            action = torch.tanh(action) # Ensure values are between (-1, +1) for acceleration and braking limits
         return action
-
-    # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
-    #     latent      = self.projection(state, keys=keys)
-    #     value       = self.val_proj(latent, keys=keys)
-    #     return value
+    
+    def enable_cache(self):
+        """Enable KV caching in attention modules"""
+        self.transformer.force_cache(True)
+        pass
+    
+    def disable_cache(self):
+        """Disable KV caching in attention modules"""
+        self.transformer.force_cache(False)
+        pass
+    
+    def reset_cache(self):
+        """Reset attention cache to initial state"""
+        self.transformer.empty_cache()
+        pass
 
 
 ENV: Game | None = None
-MODEL: BaseModel | None = None
+MODEL: BaseModelSeq | None = None
 POPULATION: neat.Population | None = None
 FILE_NAME: str = "original"
 FILE_NO: int | None = None
 INIT_GEN: int = 0
 
 
-def eval_genomes(population: neat.Population):
+def evaluate(population: neat.Population, **options):
     """
     Run each genome against each other one time to determine the fitness.
     """
+    trainer: neat.rl.NEAT = options['trainer']
     global ENV, MODEL, FILE_NAME, FILE_NO
     mapping: dict[int, int] = population.get_mapping(consolidated=True)
-    _mapping = list(mapping.items())
-    # random.shuffle(_mapping)
-    mapping = dict(_mapping)
     keys = list(mapping.keys())
-    # genomes = list(population.genomes.items())
-    # global MODEL
+    # cons_mapping = population.get_mapping(consolidated=True)
+    trainer.update_mapping(mapping)
 
     print(f"started generation {population.generation}")
     stack = []
     with torch.no_grad():
+        MODEL.enable_cache()
         if population.generation % 10 == 0:
             ENV.render_mode = 'human'
         else:
             ENV.render_mode = None
         states = ENV.reset(keys=keys)[0]
+        MODEL.reset_cache()
         done = False
         step = 0
-        DEBUG_STEP = 10
+        DEBUG_STEP = 32-1
         ENV.render()
         while not done:
             DEBUG = step == DEBUG_STEP and population.generation == INIT_GEN
             states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
             if DEBUG:
                 print(f"\nstates => \n{states} \n\tshape = {states.shape}")
-            actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
+            actions = MODEL.get_policy(states.unsqueeze(1), keys=keys, verbose=1 if DEBUG else 0).squeeze(1) # shape(genomes)
             if DEBUG:
                 print(f"actions => \n{actions} \n\tshape = {actions.shape}")
             next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
-            rewards = torch.tensor(rewards, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+            rewards = torch.tensor(rewards, device=DEVICE, dtype=DTYPE) # shape(genomes, features=1)
             if DEBUG:
                 print(f"rewards => \n{rewards} \n\tshape = {rewards.shape}")
             stack.append(rewards[..., 0])
+            done = trainer.update(states, actions, rewards, done, done)
             states = next_states
-            if step % 10 == 0:
-                pass
             ENV.render()
 
-            print(f"\rLives = {ENV.players.lives.mean().item()}, "
-                  f"Scores={ENV.players.scores.max().item()}, "
-                  f"Alive={ENV.players.active_total}, "
-                  f"Fitness={ENV.players.fitness.mean().item():.1f}"
-                  , end='')
+            print(
+                f"\rLives = {ENV.players.lives.mean().item()}, "
+                f"Scores={ENV.players.scores.max().item()}, "
+                f"Alive={ENV.players.active_total}, "
+                f"Fitness={ENV.players.fitness.mean().item():.1f}, "
+                f"MaxSize={trainer.primary.max_size()}, "
+                f"CacheSize={MODEL.transformer.layers[-1].self_attention.cache_size} "
+                f"{' ' * 5}"
+            , end='')
             step += 1
+        MODEL.disable_cache()
     print("\ndone with env")
+    # sys.exit(1)
 
     scores = torch.mean(torch.stack(stack, dim=0), dim=0)
     for key, index in mapping.items():
         genome = population.genomes[key]
         genome.fitness = scores[index].item()
 
+    score_mean, score_std = tuple(func(ENV.players.fitness).item() for func in [np.mean, np.std])
+    for key, index in mapping.items():
+        if not ENV.cars.used_brake[index] or ENV.players.fitness[index] < (score_mean - (score_std * 1.0)):
+            population.to_delete.append(key)
+
     _, FILE_NO = population.save_dict(
         name=FILE_NAME, directory='racer', file_no=FILE_NO, replace=population.generation != INIT_GEN
     )
-
-
-def run_neat(population: neat.Population, epochs: int):
-    population.run(eval_genomes, epochs, verbose=None)
 
 
 def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bool = False):
@@ -197,21 +217,23 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
 
     print("\n\n---------- RUNNING TEST ON CAR-RACER ----------")
     print(f"best_genome = {POPULATION.best_genome}")
-    ENV.players.lives_total = 10
-    ENV.render_mode = 'human'
-    ENV.window.fps = 60
-    ENV.cars.usr_enganged = False
-    ENV.min_laps = 4
-    ENV.max_frames = 3000
+    ENV.players.lives_total     = 20
+    ENV.render_mode             = 'human'
+    ENV.window.fps              = 20
+    ENV.cars.usr_enganged       = False
+    ENV.cars.restrict_movement  = False
+    ENV.min_laps                = 5
+    ENV.max_frames              = 3000
 
     WIDTH, HEIGHT = ENV.window.width, ENV.window.height  # or screen.get_size()
-    FPS = 20
+    FPS = 30
     RECORD_DIR = f"{EXMP_DIR}/recordings"
-    print(f"Recording @ {RECORD_DIR}")
-    if not os.path.exists(RECORD_DIR):
-        os.mkdir(RECORD_DIR)
+    if record:
+        if not os.path.exists(RECORD_DIR):
+            os.mkdir(RECORD_DIR)
+        print(f"Recording @ {RECORD_DIR}")
     
-
+    MODEL.enable_cache()
     for i in range(25):
         ffmpeg_cmd = [
             "ffmpeg",
@@ -252,7 +274,6 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
                 probs = None
             keys = [g.key for g in np.random.choice(ranking, size=count, replace=False, p=probs)]
 
-        print(f"Running on Genomes {keys[:10]}")
         if probs is None:
             random.shuffle(keys)
         best_genome = POPULATION.best_genome
@@ -261,16 +282,32 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
         mapping = {k: idx for idx, k in enumerate(keys)}
         reverse = {idx: k for k, idx in mapping.items()}
         print(f"\nStarting test no {i}")
+        print(f"Running on Genomes {keys[:10]}")
         if record:
             process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
         with torch.no_grad():
             states = ENV.reset(keys=keys)[0]
+            MODEL.reset_cache()
             done = False
             ENV.render()
             while not done:
                 states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
                 actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
-                next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
+                try:
+                    next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
+                except ValueError as e:
+                    print(CM(
+                        (
+                            f"States =>\n{states}\n\tshape: {states.shape}\n"
+                            f"Actions =>\n{actions}\n\tshape: {actions.shape}\n"
+                            f"PlayerTotal => {ENV.cars.total}\n"
+                            f"Prev Displacement X = {ENV.cars.disp_x.shape}\n"
+                            f"Prev Shape = {ENV.cars.slip.shape}\n"
+                            f"Prev Friction = {ENV.cars.friction.shape}\n"
+                        )
+                        , Fore.LIGHTYELLOW_EX
+                    ))
+                    raise e
                 states = next_states
                 ENV.render()
                 ranking = np.argsort(-ENV.players.fitness)
@@ -305,9 +342,19 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
             process.stdin.close()
             process.wait()
             process.terminate()
+    MODEL.disable_cache()
 
 
-if __name__ == '__main__':
+def fix(value: float, default: float = 1):
+    if np.isinf(value) or np.isnan(value):
+        return default
+    else:
+        return value
+
+
+def run():
+    global ENV, MODEL, POPULATION, FILE_NAME, FILE_NO, INIT_GEN
+    
     parser = argparse.ArgumentParser(description='Run NEAT algorithm on CarRacer game')
     parser.add_argument('--render_mode', type=str, default="human", 
                         help='Render mode for the game (e.g., "human", None)')
@@ -318,79 +365,89 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     GENOMES = 200
-    SHAPE = (6, 6)
-    SIZE = 110
-    LIVES = 10
     
-    # Create environment configuration
-    env_config = EnvironmentConfig(params={
-        'shape': SHAPE,
-        'size': SIZE,
-        'render_mode': args.render_mode,
-        'lives': LIVES,
-        'max_frames': 2000,
-        'max_hiatus': 200,
-        'grid': {
-            'size': SHAPE,
-            'cell_size': SIZE,
-            'track': {
-                'curb': 0.05,
-                'grass': 0.125,
-                'gravel': 0.125,
-            }
-        },
-        'window': {
-            'fps': 60,
-        }
-    })
+    # Create environment configuration from file
+    config_file = os.path.join(EXMP_DIR, '.config', 'main.json')
+    env_config = EnvironmentConfig(file=config_file)
     
     # Create environment with configuration
-    ENV = Game(config=env_config)
+    ENV = Game(render_mode=args.render_mode, config=env_config)
+    # ENV.reset(keys=10)
+    # print(f"{ENV.cars.get_state().shape}")
+    # print(ENV.observation_space.sample().shape)
+    # print(ENV.action_space.sample().shape)
+    # sys.exit()
 
     CONFIG = neat.Config('racer', '../../storage/configs')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 1.5
+    CONFIG.genome.weight_init_std           = 0.75e-0
     CONFIG.genome.weight_min_value          = -math.inf
     CONFIG.genome.weight_max_value          = +math.inf
-    CONFIG.genome.weight_mutate_power       = 7e-1
-    CONFIG.genome.weight_mutate_rate        = 0.60
+    CONFIG.genome.weight_mutate_power       = 5.0e-1
+    CONFIG.genome.weight_mutate_rate        = 0.65
     CONFIG.genome.weight_replace_rate       = 0.00
-    CONFIG.genome.weight_add_prob           = 1.00
-    CONFIG.genome.weight_del_prob           = 1e-9
+    CONFIG.genome.weight_add_prob           = 0.99
+    CONFIG.genome.weight_del_prob           = 1e-12 # 0.05
     CONFIG.genome.single_structural_mutation = True
-    CONFIG.genome.param_epsilon             = 1e-12
+    CONFIG.genome.param_epsilon             = 1e-9
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
     CONFIG.reproduction.clone_threshold     = 0.05
     CONFIG.reproduction.survival_threshold  = 0.10
-    CONFIG.reproduction.cross_threshold
-    CONFIG.reproduction.elitism             = 0.30
+    CONFIG.reproduction.cross_threshold     = 0.00
+    CONFIG.reproduction.elitism             = 0.33
     CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.33
-    CONFIG.reproduction.cross_multiplier    = 0.50
+    CONFIG.reproduction.darwin_multiplier   = 0.50
+    CONFIG.reproduction.cross_multiplier    = 0.00
     CONFIG.reproduction.preserve_elite      = False
 
     CONFIG.save()
     CONFIG.load(verbose=2)
     print(CONFIG)
 
-    INPUTS          = 9
+    DISCRETE        = False
+    MAX_SEQ_LEN     = 1
+    INPUTS          = ENV.observation_space.shape[-1]
     OUTPUTS         = 2
-    EMBED_SIZE      = 64
-    LAYERS          = 3
-    COEFFICIENTS    = 1
-    ACTIVATION      = nn.SiLU()
+    EMBED_SIZE      = 32
+    LAYERS          = 1
+    HEADS           = 1
+    KV_HEADS        = None
     BIAS            = True
-    PROBABILISTIC   = True
-    FILE_NAME       = f"RacerModel-E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_"\
-                      f"A-{ACTIVATION.__class__.__name__}_"\
-                      f"B{int(BIAS)}_P{int(PROBABILISTIC)}"
+    ATTN_BIAS       = BIAS
+    DIFFERENTIAL    = False
+    SWIGLU          = False
+    ACTIVATION      = nn.SiLU()
+    PROBABILISTIC   = False
+    CLIP_MIN        = -2
+    CLIP_MAX        = -0
+    FILE_NAME       = (
+        f"RacerModelSequential-E{EMBED_SIZE}_L{LAYERS}_M{MAX_SEQ_LEN}_"
+        f"H{HEADS}_KVH{KV_HEADS}_D{int(DIFFERENTIAL)}_"
+        f"B{int(BIAS)}_AB{int(ATTN_BIAS)}_SW{int(SWIGLU)}_"
+        f"A-{ACTIVATION.__class__.__name__}_"
+        f"R{int(CLIP_MIN)}~{int(CLIP_MAX)}"
+    )
+    
+    MEMORY_SIZE     = 8
+    GAMMA           = np.exp(np.log(0.01) / 128)
+    KAPPA           = np.exp(np.log(0.01) / 128)
+    ALPHA           = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA_ORDER     = 0
+    REW_NORM        = 4
+    POL_REG         = 0.00
+    STD_REG         = 0.25
+    print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
 
-    MODEL = BaseModel(INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
-                      ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE)
+    MODEL = BaseModelSeq(
+        INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, MAX_SEQ_LEN,
+        HEADS, KV_HEADS, ACTIVATION, PROBABILISTIC,
+        BIAS, DEVICE, DTYPE,
+        differential=DIFFERENTIAL, attn_bias=ATTN_BIAS, use_swiglu=SWIGLU
+    )
     print(MODEL)
 
     POPULATION = neat.Population(GENOMES, MODEL, CONFIG, init_rep=True)
@@ -439,10 +496,46 @@ if __name__ == '__main__':
         print(f"\n{'='*50}")
         print("Starting training...")
         print(f"{'='*50}\n")
-        run_neat(POPULATION, EPOCHS)
+        
+        trainer = NEAT(
+            # TODO: Try PPO trainer instead for pathfinding
+            POPULATION,
+            schedulers=[
+                RandomAnnealing(CONFIG, 1e-1, 1e+1, 3, ['weight_init_std', 'weight_mutate_power'], True),
+                CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
+                # CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_rate', True, True),
+                # CosineAnnealing(CONFIG, 10, 0.1, 'weight_replace_rate', True, True),
+                # CosineAnnealing(CONFIG, 15, 0.05, 'weight_add_prob', True, True),
+                # CosineAnnealing(CONFIG, 15, 0.05, 'weight_del_prob', True, True),
+            ],
+            device=DEVICE, dtype=DTYPE,
+            log_sub_dir='car_racer/',
+            log_name=f"{unix_to_datetime_file(clock.time())}_"
+                     f"e{EMBED_SIZE}-m{MAX_SEQ_LEN}-l{LAYERS}-b{int(BIAS)}-h{HEADS}-"
+                     f"prob{int(PROBABILISTIC)}-"
+                     f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
+                     f"rn{REW_NORM}-p{round(POL_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
+                     f"type{int(DISCRETE)}",
+            gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
+            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=10,
+            max_episodes=MEMORY_SIZE,
+        )
+
+        try:
+            trainer.learn(
+                evaluate, env_config.max_frames, EPOCHS, 128, 0.1,
+                'binary' if not DISCRETE else 'discrete', verbose=True,
+            )
+        except KeyboardInterrupt:
+            pass
+        
     else:
         print(f"\n{'='*50}")
         print("Skipping training...")
         print(f"{'='*50}\n")
 
-    test_best_network(count=4)
+    test_best_network(count=10)
+    
+    
+if __name__ == "__main__":
+    run()

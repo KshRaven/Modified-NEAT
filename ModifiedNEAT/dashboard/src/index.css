@@ -1,0 +1,163 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(34, 211, 238, 0.2);
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(34, 211, 238, 0.4);
+}
+
+.react-flow__node {
+  cursor: pointer;
+}
+
+.react-flow__controls {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.react-flow__controls-button {
+  background: rgba(24, 24, 27, 0.8) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+  fill: #9ca3af !important;
+}
+
+.react-flow__controls-button:hover {
+  background: rgba(34, 211, 238, 0.1) !important;
+  fill: #22d3ee !important;
+}
+
+.react-flow__minimap {
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(24, 24, 27, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Dark mode minimap styling */
+.dark .react-flow__minimap {
+  background: rgba(24, 24, 27, 0.9);
+  border: 1px solid rgba(34, 211, 238, 0.2);
+}
+
+/* Light mode minimap styling */
+.light .react-flow__minimap {
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.ag-root-wrapper {
+  border: none !important;
+}
+
+.ag-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+.ag-row-even {
+  background-color: transparent !important;
+}
+
+.ag-row-hover {
+  background-color: rgba(34, 211, 238, 0.05) !important;
+}
+
+.cell-center {
+  text-align: center;
+  justify-content: center;
+  display: flex;
+  align-items: center;
+}
+
+.ag-cell-value {
+  text-align: center;
+}
+
+/* Heatmap transition */
+.ag-cell {
+  transition: background-color 0.15s ease;
+}
+
+/* Light mode adjustments */
+.light .react-flow__controls-button {
+  background: rgba(255, 255, 255, 0.9) !important;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.1) !important;
+  fill: #6b7280 !important;
+}
+
+.light .react-flow__controls-button:hover {
+  background: rgba(8, 145, 178, 0.1) !important;
+  fill: #0891b2 !important;
+}
+
+/* Input placeholder styling */
+input::placeholder {
+  color: rgba(107, 114, 128, 0.6);
+}
+
+/* Dark mode input placeholder */
+.dark input::placeholder {
+  color: rgba(156, 163, 175, 0.5);
+}
+
+/* Color picker styling */
+input[type="color"] {
+  -webkit-appearance: none;
+  border: none;
+  width: 32px;
+  height: 24px;
+  cursor: pointer;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+input[type="color"]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+input[type="color"]::-webkit-color-swatch {
+  border: none;
+  border-radius: 4px;
+}
+
+/* Number input spinner styling */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  opacity: 0.5;
+}

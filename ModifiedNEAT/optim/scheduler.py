@@ -54,7 +54,7 @@ class Scheduler(object):
 
 
 class CosineAnnealing(Scheduler):
-    def __init__(self, config: Config, period: int, factor: float, params: Union[str, list[str]] = None, warm=False, log=False):
+    def __init__(self, config: Config, period: int, factor: float, params: Union[str, list[str]] = None, warm=False, log=True):
         assert period >= 1
         super(CosineAnnealing, self).__init__(config, params)
 
@@ -93,7 +93,7 @@ class CosineAnnealing(Scheduler):
 
 
 class RandomAnnealing(Scheduler):
-    def __init__(self, config: Config, min: float, max: float, step=1, params: Union[str, list[str]] = None, log=False):
+    def __init__(self, config: Config, min: float, max: float, step=1, params: Union[str, list[str]] = None, log=True):
         assert max > min
         super(RandomAnnealing, self).__init__(config, params)
         for param in self.params:

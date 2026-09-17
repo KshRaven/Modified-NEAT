@@ -74,6 +74,7 @@ class Players(object):
         # ── tile context ──────────────────────────────────────────────────
         corner_tile_curr: Array,   # bool (N,)  current tile is a LEFT/RIGHT turn
         corner_tile_next: Array,   # bool (N,)  next tile in sequence is a turn
+        straight_tile_curr: Array, # bool (N,)  current tile is a straight/start
         # ── continuous driving signals ────────────────────────────────────
         vel_norm: Array,           # float (N,)  speed / max_speed  ∈ [0, 1]
         phase_align: Array,        # float (N,)  cos(car_angle - tile_angle) ∈ [-1, 1]
@@ -85,7 +86,11 @@ class Players(object):
         brake_steps: Array,
         min_brake_steps: int,
         brake_check: Array,
-        # ── NEW: turn-direction and corner-entry signals ───────────────────
+        # ── straight alignment signals ──────────────────────────────
+        straight_aligned: Array,   # bool (N,)  car aligned with straight tile orientation
+        straight_steps: Array,
+        min_straight_steps: int,
+        # ── turn-direction and corner-entry signals ───────────────────
         turn_align: Array,         # float (N,)  ∈ [-1, +1]
                                    #   How correctly the car is steering on a corner tile.
                                    #   Computed in car.py as dot(angular_vel_sign, turn_sign),
@@ -100,6 +105,9 @@ class Players(object):
                                    #   fixed for the duration of the tile transit so
                                    #   the one-off entry bonus (4d-B) has a stable target.
                                    #   Pass current vel_norm for non-corner tiles.
+        # ── crash signal ──────────────────────────────────────────────────
+        tile_crash: Array,    # bool (N,)  car crashed on this tile;
+                                   #   prevents checkpoint rewards on crash tile
         # ── optional / legacy ─────────────────────────────────────────────
         distances: Array | None = None,
         verbose=False
@@ -110,7 +118,6 @@ class Players(object):
         breached_hiatus = hiatus >= self.max_hiatus
         moved_backward  = ~moved_forward
         eliminated      = out_of_bounds | breached_hiatus | tile_stag | moved_backward
-        straight_tile_curr = ~corner_tile_curr
         straight_tile_next = ~corner_tile_next
 
         # On a straight whose next tile is a corner: ideal place to brake
@@ -163,8 +170,8 @@ class Players(object):
         #
         # The 5:1 penalty ratio vs reward means a car cannot recoup losses by
         # driving slightly faster on grass — it simply must stay on the road.
-        self.fitness[on_road]  += 20.0 * _lives[on_road]
-        self.fitness[off_road] -= 10.0 * _deaths[off_road]
+        self.fitness[on_road]  += 5.0 * _lives[on_road]
+        self.fitness[off_road] -= 2.0 * _deaths[off_road]
 
         # # ── 4b. Forward progress — STRAIGHT tile ──────────────────────────
         # #
@@ -212,20 +219,20 @@ class Players(object):
         #     + 0.5 * align_pos[fwd_corner]                 # (iii) heading arc bonus
         # )
 
-        # ── 4d. Braking BEFORE corners (two complementary parts) ──────────
-        #
-        # Part A — Braking *action* on the approach straight.
-        #   Provides a per-frame gradient so the car learns that pressing
-        #   brake on the straight before a corner is good, especially when
-        #   still fast.  Halved from the old 40 → 20 because Part B below
-        #   carries the heavier signal.
-        #   braking + vel_n=0.0 → +20  braking + vel_n=1.0 → +0
-        # brake_action = approaching_corner & braking & on_road
-        # self.fitness[brake_action] += 20.0 * (1.0 - vel_n)[brake_action]
-        started_braking = (brake_steps == 1) & corner_tile_next & on_road
-        self.fitness[started_braking] += 1500 * _lives[started_braking]
-        braking_lim_hit = (brake_steps == min_brake_steps) & corner_tile_next & on_road
-        self.fitness[braking_lim_hit] += 3000 * _lives[braking_lim_hit]
+        # # ── 4d. Braking BEFORE corners (two complementary parts) ──────────
+        # #
+        # # Part A — Braking *action* on the approach straight.
+        # #   Provides a per-frame gradient so the car learns that pressing
+        # #   brake on the straight before a corner is good, especially when
+        # #   still fast.  Halved from the old 40 → 20 because Part B below
+        # #   carries the heavier signal.
+        # #   braking + vel_n=0.0 → +20  braking + vel_n=1.0 → +0
+        # # brake_action = approaching_corner & braking & on_road
+        # # self.fitness[brake_action] += 20.0 * (1.0 - vel_n)[brake_action]
+        # started_braking = (brake_steps == 1) & corner_tile_next & on_road
+        # self.fitness[started_braking] += 50 * _lives[started_braking]
+        # braking_lim_hit = (brake_steps == min_brake_steps) & corner_tile_next & on_road
+        # self.fitness[braking_lim_hit] += 150 * _lives[braking_lim_hit]
 
         # # Part B — Corner-entry speed bonus (one-off at the moment of entry).
         # #   `checked & corner_tile` fires exactly once as the car crosses
@@ -243,10 +250,16 @@ class Players(object):
         # )
 
         # ── 4e. Turning into corners ─────────────────────────────────────
-        started_turning = (turn_steps == 1) # & (corner_tile_next | corner_tile_curr)
-        self.fitness[started_turning] += 500 * _lives[started_turning]
-        turning_lim_hit = (turn_steps == min_turn_steps) # & (corner_tile_next | corner_tile_curr)
-        self.fitness[turning_lim_hit] += 1500 * _lives[turning_lim_hit]
+        started_turning = (turn_steps == 1) & (corner_tile_curr) #  | corner_tile_next)
+        self.fitness[started_turning] += 300 * _lives[started_turning]
+        turning_lim_hit = (turn_steps == min_turn_steps) & (corner_tile_curr) #  | corner_tile_next)
+        self.fitness[turning_lim_hit] += 300 * _lives[turning_lim_hit]
+
+        # ── 4 . Straight tile alignment reward ──────────────────────────
+        started_straight_align = (straight_steps == 1) & straight_tile_curr
+        self.fitness[started_straight_align] += 400 * _lives[started_straight_align]
+        straight_align_lim_hit = (straight_steps == min_straight_steps) & straight_tile_curr
+        self.fitness[straight_align_lim_hit] += 400 * _lives[straight_align_lim_hit]
 
         # # ── 4f. Not-moving-forward penalties ──────────────────────────────
         # #
@@ -260,13 +273,15 @@ class Players(object):
         # ── 4g. Checkpoint and lap rewards ────────────────────────────────
         #
         # Corner checkpoints worth 50% more to reward clean cornering.
-        self.fitness[checked & straight_tile_curr] += 100.0 * _lives[checked & straight_tile_curr]
-        self.fitness[checked & corner_tile_curr] += 1000.0 * _lives[checked & corner_tile_curr]
-        self.fitness[finished] += 10000.0 * _lives[finished]
+        # Do not award checkpoint rewards if car crashed on this tile.
+        checkpoint_valid = checked # & ~tile_crash
+        self.fitness[checkpoint_valid & straight_tile_curr] += 250.0 * _lives[checkpoint_valid & straight_tile_curr]
+        self.fitness[checkpoint_valid & corner_tile_curr] += 300.0 * _lives[checkpoint_valid & corner_tile_curr]
+        self.fitness[finished] += 2000.0 * _lives[finished]
 
         # ── 4h. Elimination (death) one-off penalty ───────────────────────
-        self.fitness[eliminated & straight_tile_curr] -= 500.0 * _deaths[eliminated & straight_tile_curr]
-        self.fitness[eliminated & corner_tile_curr] -= 500.0 * _deaths[eliminated & corner_tile_curr]
+        self.fitness[eliminated & straight_tile_curr] -= 30.0 * _deaths[eliminated & straight_tile_curr]
+        self.fitness[eliminated & corner_tile_curr] -= 30.0 * _deaths[eliminated & corner_tile_curr]
 
         # ------------------------------------------------------------------
         # 5.  Housekeeping
