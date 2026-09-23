@@ -126,6 +126,122 @@ body {
   fill: #0891b2 !important;
 }
 
+/* Keep dark-first utility classes readable when the light theme is active. */
+.light {
+  color: #26343f;
+  background: #dfe6ea;
+}
+
+.light .bg-gradient-to-br {
+  background-image: linear-gradient(135deg, #dfe6ea 0%, #d7e0e5 52%, #e3e9ec 100%) !important;
+}
+
+.light .bg-black\/20,
+.light .bg-black\/30,
+.light .bg-white\/20,
+.light .bg-white\/30,
+.light .bg-gray-800\/20,
+.light .bg-gray-800\/30,
+.light .bg-gray-800\/50,
+.light .bg-gray-800\/80,
+.light .bg-gray-900\/40,
+.light .bg-gray-900\/50 {
+  background-color: rgba(232, 238, 241, 0.88) !important;
+}
+
+.light .bg-gray-700,
+.light .bg-gray-700\/30,
+.light .bg-gray-700\/50 {
+  background-color: #cfd9df !important;
+}
+
+.light .text-white,
+.light .text-gray-200,
+.light .text-gray-300 {
+  color: #26343f !important;
+}
+
+.light .text-gray-400 {
+  color: #3b4c59 !important;
+}
+
+.light .text-gray-500 {
+  color: #465966 !important;
+}
+
+.light .text-gray-600 {
+  color: #394b58 !important;
+}
+
+.light .text-cyan-200,
+.light .text-cyan-300,
+.light .text-cyan-400,
+.light .text-cyan-500 {
+  color: #08758d !important;
+}
+
+.light .text-amber-300,
+.light .text-amber-400 {
+  color: #8a5a08 !important;
+}
+
+.light .text-red-300,
+.light .text-red-400 {
+  color: #a33333 !important;
+}
+
+.light .border-white\/5,
+.light .border-white\/10,
+.light .border-white\/20,
+.light .border-gray-600\/30,
+.light .border-gray-700 {
+  border-color: #c4d0d8 !important;
+}
+
+.light .hover\:bg-white\/5:hover,
+.light .hover\:bg-white\/10:hover,
+.light .hover\:bg-gray-700:hover,
+.light .hover\:bg-gray-700\/50:hover {
+  background-color: #e7f1f4 !important;
+}
+
+.light input,
+.light select,
+.light textarea {
+  background-color: #e7edef !important;
+  border-color: #aebdc6 !important;
+  color: #26343f !important;
+}
+
+.light .react-flow__controls,
+.light .react-flow__minimap {
+  background: rgba(224, 231, 235, 0.96) !important;
+  border-color: #aebdc6 !important;
+}
+
+.light .react-flow__controls-button {
+  color: #435466 !important;
+}
+
+.light .react-flow__background pattern circle {
+  fill: #b8c6cf;
+}
+
+.light .ag-header,
+.light .ag-row,
+.light .ag-cell {
+  color: #17212b !important;
+  border-color: #d1dbe1 !important;
+}
+
+.light .ag-header {
+  background: #d5dfe4 !important;
+}
+
+.light .ag-row-hover {
+  background-color: rgba(8, 145, 178, 0.1) !important;
+}
+
 /* Input placeholder styling */
 input::placeholder {
   color: rgba(107, 114, 128, 0.6);

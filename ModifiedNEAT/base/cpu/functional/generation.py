@@ -1,9 +1,12 @@
+import numpy as np
 
 from numba import njit
 from numpy import ndarray as CPUArray
 
-import numpy as np
-import cupy as cp
+try:
+    import cupy as cp
+except ModuleNotFoundError:
+    cp = np
 
 SEED = int(np.random.randint(0, int(2 ** 20)))
 

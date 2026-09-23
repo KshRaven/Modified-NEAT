@@ -180,7 +180,7 @@ class DevelopWithDashboard(_develop):
 
 setup(
     name="ModifiedNEAT",
-    version="0.7.0",
+    version="0.7.1",
     description="Modified version of python NEAT algorithm that uses PyTorch modules",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
@@ -204,7 +204,10 @@ setup(
             "src/**/*",
         ]
     },
-    install_requires=read_requirements(ROOT / "requirements.txt"),
+    install_requires=(
+        read_requirements(ROOT / "requirements.txt") +
+        read_requirements(ROOT / "ModifiedNEAT" / "dashboard" / "backend" / "requirements.txt")
+    ),
     dependency_links=get_dependency_links(),
     extras_require={
         "cpu": [],

@@ -8,15 +8,19 @@ from itertools import count
 from numba import njit, prange, types
 from numba.cuda.cudadrv.devicearray import DeviceNDArray
 from numpy import ndarray as CPUArray
-from cupy import ndarray as GPUArray
 from typing import Union, Iterable, Any
 
 import torch
 import torch.nn as nn
 import numpy as np
-import cupy as cp
 import traceback
 import warnings
+
+try:
+    import cupy as cp
+    from cupy import ndarray as GPUArray
+except (ModuleNotFoundError, ImportError):
+    cp, GPUArray = np, CPUArray
 
 
 def addindent(text: str, spaces: int):
@@ -391,7 +395,7 @@ class NeatModule(nn.Module):
                 # Store as numpy array for compatibility
                 if isinstance(param, torch.Tensor):
                     param = param.detach().cpu().numpy()
-                if isinstance(param, GPUArray):
+                if isinstance(param, GPUArray) and GPUArray != CPUArray:
                     param = param.get()
                 state_dict[name] = param
         

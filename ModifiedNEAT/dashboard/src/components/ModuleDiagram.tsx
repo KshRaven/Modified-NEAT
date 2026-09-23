@@ -6,6 +6,8 @@ import {
   MiniMap,
   useNodesState,
   useEdgesState,
+  applyNodeChanges,
+  NodeResizer,
   addEdge,
   type Connection,
   type Node,
@@ -17,8 +19,12 @@ import {
   useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { Box, Layers, ChevronDown, ChevronUp, Search } from 'lucide-react';
+import { Box, Layers, ChevronDown, ChevronUp, Search, Maximize2, ChevronsDown, ChevronsUp, Eye, EyeOff } from 'lucide-react';
+import { useTheme } from '../contexts/ThemeContext';
 import type { ModuleNode as ModuleNodeType } from '../types';
+
+// TODO: Fix Dark mode not getting enabled in built files error
+// TODO: Fix Minimap not getting shrunk accordingly on its position and instead translating off module diagram panel along with color scheme error
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -27,9 +33,11 @@ interface ModuleDiagramProps {
   edges: { id: string; source: string; target: string }[];
   selectedNode: string | null;
   onNodeClick: (nodeId: string) => void;
+  onPaneClick?: () => void;
   onExpandAllChange?: (callback: () => void) => void;
   onCollapseAllChange?: (callback: () => void) => void;
   onFitViewChange?: (callback: () => void) => void;
+  onFitSelectedChange?: (callback: () => void) => void;
   /** Called when the user clicks "View Tensors" inside an expanded node */
   onViewTensor?: (nodeId: string) => void;
 }
@@ -164,7 +172,7 @@ function buildLayout(
 
 // ─── Custom node renderers ────────────────────────────────────────────────────
 
-interface BubbleNodeData {
+interface BubbleNodeData extends Record<string, unknown> {
   label: string;
   type: string;
   has_weights: boolean;
@@ -177,30 +185,102 @@ interface BubbleNodeData {
   width: number;
   height: number;
   onToggle: () => void;
+  onSelect: () => void;
+  onExpandAll?: () => void;
+  onCollapseAll?: () => void;
+  onFit?: () => void;
   onViewTensors?: () => void;
+  onResize?: (width: number, height: number) => void;
 }
 
-const BubbleNode: React.FC<{ id: string; data: BubbleNodeData }> = ({ data }) => {
+const BubbleNode: React.FC<{ id: string; data: BubbleNodeData }> = ({ id, data }) => {
+  const { theme } = useTheme();
   const {
     label, type, has_weights, selected, is_neat_module,
     has_children, child_count,
     is_container, width, height,
-    onToggle, onViewTensors,
+    onToggle, onSelect, onExpandAll, onCollapseAll, onFit, onViewTensors, onResize,
   } = data;
+  const toggleClickTimer = useRef<number | null>(null);
+  const handleToggleClick = useCallback(() => {
+    if (toggleClickTimer.current !== null) window.clearTimeout(toggleClickTimer.current);
+    toggleClickTimer.current = window.setTimeout(() => {
+      toggleClickTimer.current = null;
+      onToggle();
+    }, 220);
+  }, [onToggle]);
+  const handleDoubleClick = useCallback(() => {
+    if (toggleClickTimer.current !== null) {
+      window.clearTimeout(toggleClickTimer.current);
+      toggleClickTimer.current = null;
+    }
+    onSelect();
+  }, [onSelect]);
+
+  const actionBar = selected && onExpandAll && onCollapseAll && onFit ? (
+    <div
+      className="absolute right-2 top-2 z-20 flex items-center gap-0.5 rounded-md border border-cyan-400/30 bg-gray-950/90 p-0.5 shadow-lg backdrop-blur-md"
+      onClick={(event) => event.stopPropagation()}
+      onDoubleClick={(event) => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        onClick={onExpandAll}
+        className="rounded p-1 text-cyan-300 transition-colors hover:bg-cyan-400/20"
+        title="Expand all inner modules"
+        aria-label="Expand all inner modules"
+      >
+        <ChevronsDown className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={onCollapseAll}
+        className="rounded p-1 text-gray-300 transition-colors hover:bg-white/10"
+        title="Collapse all inner modules"
+        aria-label="Collapse all inner modules"
+      >
+        <ChevronsUp className="h-3.5 w-3.5" />
+      </button>
+      <button
+        type="button"
+        onClick={onFit}
+        className="rounded p-1 text-gray-300 transition-colors hover:bg-white/10"
+        title="Fit selected module"
+        aria-label="Fit selected module"
+      >
+        <Maximize2 className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  ) : null;
 
   // ── Container (expanded bubble) ───────────────────────────────────────────
   if (is_container) {
     return (
       <div
-        style={{ width, height, position: 'relative' }}
-        className={`rounded-2xl border-2 transition-all duration-300
+        style={{ width: '100%', height: '100%', position: 'relative' }}
+        onClick={onSelect}
+        className={`rounded-2xl border-2 transition-colors duration-300
           ${selected
             ? 'border-cyan-400/70 bg-cyan-500/5 shadow-xl shadow-cyan-500/20'
             : has_weights
-              ? 'border-cyan-400/30 bg-gray-900/40 hover:border-cyan-400/50'
-              : 'border-white/10 bg-gray-800/30 hover:border-white/20'
+              ? theme === 'dark'
+                ? 'border-cyan-400/30 bg-gray-900/40 hover:border-cyan-400/50'
+                : 'border-cyan-700/40 bg-white/65 hover:border-cyan-700/60'
+              : theme === 'dark'
+                ? 'border-white/10 bg-gray-800/30 hover:border-white/20'
+                : 'border-gray-300/80 bg-white/55 hover:border-gray-400'
           }`}
       >
+        {actionBar}
+        <NodeResizer
+          nodeId={id}
+          minWidth={NODE_W}
+          minHeight={NODE_H + CHILD_PAD * 2 + NODE_H}
+          isVisible={selected}
+          onResize={(_, params) => onResize?.(params.width, params.height)}
+          lineClassName="!border-cyan-400/60"
+          handleClassName="!w-2.5 !h-2.5 !bg-cyan-400 !border-gray-950"
+        />
         {/* Top handle */}
         <Handle
           type="target"
@@ -212,19 +292,20 @@ const BubbleNode: React.FC<{ id: string; data: BubbleNodeData }> = ({ data }) =>
         {/* Header bar */}
         <div
           className={`flex items-center justify-between px-3 py-2 cursor-pointer rounded-t-2xl
-            ${selected ? 'bg-cyan-500/20' : 'bg-black/20'}`}
-          onClick={onToggle}
+            ${selected ? 'bg-cyan-500/20' : theme === 'dark' ? 'bg-black/20' : 'bg-white/45'}`}
+          onClick={handleToggleClick}
+          onDoubleClick={handleDoubleClick}
           style={{ height: NODE_H }}
         >
           <div className="flex items-center gap-2 min-w-0">
             {has_weights
               ? <Box className="w-4 h-4 text-cyan-400 shrink-0" />
-              : <Layers className="w-4 h-4 text-gray-400 shrink-0" />}
+              : <Layers className={`w-4 h-4 shrink-0 ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`} />}
             <div className="min-w-0">
-              <div className={`text-xs font-medium truncate ${selected ? 'text-cyan-300' : 'text-gray-400'}`}>
+              <div className={`text-xs font-medium truncate ${selected ? 'text-cyan-300' : theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
                 {type}
               </div>
-              <div className={`text-sm font-semibold truncate ${selected ? 'text-white' : 'text-gray-200'}`}>
+              <div className={`text-sm font-semibold truncate ${selected ? 'text-white' : theme === 'dark' ? 'text-gray-200' : 'text-gray-800'}`}>
                 {label || 'root'}
               </div>
             </div>
@@ -285,8 +366,10 @@ const BubbleNode: React.FC<{ id: string; data: BubbleNodeData }> = ({ data }) =>
             ? 'bg-gradient-to-br from-gray-800/80 to-gray-900/80 border-cyan-400/30 hover:border-cyan-400/50 hover:shadow-lg hover:shadow-cyan-500/10'
             : 'bg-gradient-to-br from-gray-700/60 to-gray-800/60 border-white/10 hover:border-white/30'
         } ${has_children ? 'border-2' : ''}`}
-      onClick={onToggle}
+      onClick={handleToggleClick}
+      onDoubleClick={handleDoubleClick}
     >
+      {actionBar}
       <Handle
         type="target"
         position={Position.Top}
@@ -297,8 +380,8 @@ const BubbleNode: React.FC<{ id: string; data: BubbleNodeData }> = ({ data }) =>
         <div className="flex items-center gap-2 min-w-0">
           {has_weights
             ? <Box className="w-4 h-4 text-cyan-400 shrink-0" />
-            : <Layers className="w-4 h-4 text-gray-400 shrink-0" />}
-          <span className={`text-xs font-medium truncate ${selected ? 'text-cyan-300' : 'text-gray-400'}`}>
+            : <Layers className={`w-4 h-4 shrink-0 ${theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`} />}
+          <span className={`text-xs font-medium truncate ${selected ? 'text-cyan-300' : theme === 'dark' ? 'text-gray-400' : 'text-gray-600'}`}>
             {type}
           </span>
         </div>
@@ -310,7 +393,7 @@ const BubbleNode: React.FC<{ id: string; data: BubbleNodeData }> = ({ data }) =>
         )}
       </div>
 
-      <div className={`font-semibold text-sm truncate ${selected ? 'text-white' : 'text-gray-200'}`}>
+      <div className={`font-semibold text-sm truncate ${selected ? 'text-white' : theme === 'dark' ? 'text-gray-200' : 'text-gray-800'}`}>
         {label || 'root'}
       </div>
 
@@ -352,6 +435,10 @@ function buildReactFlowElements(
   expanded: ExpandedState,
   selectedNode: string | null,
   onToggle: (id: string) => void,
+  onSelect: (id: string) => void,
+  onExpandAll: (id: string) => void,
+  onCollapseAll: (id: string) => void,
+  onFit: (id: string) => void,
   onViewTensor: ((id: string) => void) | undefined,
 ): { rfNodes: Node[]; rfEdges: Edge[] } {
   const { positions, sizes, parentId, childMap } = buildLayout(allNodes, allEdges, expanded);
@@ -362,7 +449,7 @@ function buildReactFlowElements(
   // Nodes that are visible (have a computed position)
   const visible = new Set(positions.keys());
 
-  const rfNodes: Node[] = [];
+  const rfNodes: Node<BubbleNodeData>[] = [];
 
   positions.forEach((pos, id) => {
     const meta = nodeMap.get(id);
@@ -373,16 +460,15 @@ function buildReactFlowElements(
     const children  = childMap.get(id) ?? [];
     const isCont    = isExp && children.length > 0;
 
-    // Position is absolute; ReactFlow parent-relative positioning is done by
-    // setting `parentId` + `extent: 'parent'` — but that requires parent to
-    // be sized first, and ReactFlow's group nodes require explicit `style` with
-    // width/height. We handle containment visually via bubble borders and
-    // absolute co-ordinates instead.
-
+    const parent = parentId.get(id);
+    const parentPosition = parent ? positions.get(parent) : undefined;
     rfNodes.push({
       id,
       type: 'bubble',
-      position: pos,
+      position: parentPosition
+        ? { x: pos.x - parentPosition.x, y: pos.y - parentPosition.y }
+        : pos,
+      ...(parent ? { parentId: parent, extent: 'parent' as const } : {}),
       zIndex: isCont ? 0 : 1,
       style: {
         width:  isCont ? sz.w : NODE_W,
@@ -403,6 +489,10 @@ function buildReactFlowElements(
         width:         sz.w,
         height:        sz.h,
         onToggle:      () => onToggle(id),
+        onSelect:      () => onSelect(id),
+        onExpandAll:   () => onExpandAll(id),
+        onCollapseAll: () => onCollapseAll(id),
+        onFit:         () => onFit(id),
         onViewTensors: meta.has_weights ? () => onViewTensor?.(id) : undefined,
       } as BubbleNodeData,
     });
@@ -447,9 +537,11 @@ export const ModuleDiagram: React.FC<ModuleDiagramProps> = ({
   edges,
   selectedNode,
   onNodeClick,
+  onPaneClick,
   onExpandAllChange,
   onCollapseAllChange,
   onFitViewChange,
+  onFitSelectedChange,
   onViewTensor,
 }) => {
   // Initialise all nodes collapsed except the root
@@ -458,6 +550,9 @@ export const ModuleDiagram: React.FC<ModuleDiagramProps> = ({
     nodes.forEach(n => { s[n.id] = n.id === 'root'; });
     return s;
   });
+  const [layoutResetVersion, setLayoutResetVersion] = useState(0);
+  const appliedLayoutResetVersion = useRef(0);
+  const fitSelectedRef = useRef<(() => void) | null>(null);
 
   // Reset expansion when the node list changes (new file loaded)
   const prevNodesKey = useRef('');
@@ -480,9 +575,17 @@ export const ModuleDiagram: React.FC<ModuleDiagramProps> = ({
     }
   }, [onNodeClick, nodes, edges]);
 
+  const handleSelect = useCallback((nodeId: string) => {
+    onNodeClick(nodeId);
+  }, [onNodeClick]);
+
   const handleViewTensor = useCallback((nodeId: string) => {
     onViewTensor?.(nodeId);
   }, [onViewTensor]);
+
+  const handleFitSelected = useCallback(() => {
+    fitSelectedRef.current?.();
+  }, []);
 
   const expandAll = useCallback(() => {
     const s: ExpandedState = {};
@@ -491,10 +594,46 @@ export const ModuleDiagram: React.FC<ModuleDiagramProps> = ({
   }, [nodes]);
 
   const collapseAll = useCallback(() => {
+    setLayoutResetVersion(version => version + 1);
     const s: ExpandedState = {};
     nodes.forEach(n => { s[n.id] = n.id === 'root'; });
     setExpanded(s);
   }, [nodes]);
+
+  const getDescendants = useCallback((nodeId: string) => {
+    const descendants = new Set<string>();
+    const pending = [nodeId];
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      edges.filter(edge => edge.source === current).forEach(edge => {
+        if (!descendants.has(edge.target)) {
+          descendants.add(edge.target);
+          pending.push(edge.target);
+        }
+      });
+    }
+    return descendants;
+  }, [edges]);
+
+  const expandSelected = useCallback(() => {
+    if (!selectedNode) return;
+    const descendants = getDescendants(selectedNode);
+    setExpanded(previous => {
+      const next = { ...previous, [selectedNode]: true };
+      descendants.forEach(id => { next[id] = true; });
+      return next;
+    });
+  }, [getDescendants, selectedNode]);
+
+  const collapseSelected = useCallback(() => {
+    if (!selectedNode) return;
+    const descendants = getDescendants(selectedNode);
+    setExpanded(previous => {
+      const next = { ...previous, [selectedNode]: false };
+      descendants.forEach(id => { next[id] = false; });
+      return next;
+    });
+  }, [getDescendants, selectedNode]);
 
   // Expose callbacks to parent (toolbar buttons)
   useEffect(() => {
@@ -503,18 +642,227 @@ export const ModuleDiagram: React.FC<ModuleDiagramProps> = ({
   }, [expandAll, collapseAll, onExpandAllChange, onCollapseAllChange]);
 
   const { rfNodes, rfEdges } = useMemo(
-    () => buildReactFlowElements(nodes, edges, expanded, selectedNode, handleToggle, handleViewTensor),
-    [nodes, edges, expanded, selectedNode, handleToggle, handleViewTensor],
+    () => buildReactFlowElements(nodes, edges, expanded, selectedNode, handleToggle, handleSelect, expandSelected, collapseSelected, handleFitSelected, handleViewTensor),
+    [nodes, edges, expanded, selectedNode, handleToggle, handleSelect, expandSelected, collapseSelected, handleFitSelected, handleViewTensor],
   );
 
-  const [reactNodes, setReactNodes, onNodesChange] = useNodesState(rfNodes);
+  const [reactNodes, setReactNodes] = useNodesState(rfNodes);
   const [reactEdges, setReactEdges, onEdgesChange] = useEdgesState(rfEdges);
+
+  const onNodesChange = useCallback((changes: import('@xyflow/react').NodeChange[]) => {
+    setReactNodes(currentNodes => {
+      const nextNodes = applyNodeChanges(changes, currentNodes);
+      const byId = new Map(nextNodes.map(node => [node.id, node]));
+      const dimension = (node: Node) => ({
+        width: node.measured?.width ?? node.width ?? Number(node.style?.width ?? NODE_W),
+        height: node.measured?.height ?? node.height ?? Number(node.style?.height ?? NODE_H),
+      });
+
+      for (let pass = 0; pass < nextNodes.length; pass += 1) {
+        let changed = false;
+        const childrenByParent = new Map<string, Node[]>();
+        nextNodes.forEach(node => {
+          if (!node.parentId) return;
+          const siblings = childrenByParent.get(node.parentId) ?? [];
+          siblings.push(node);
+          childrenByParent.set(node.parentId, siblings);
+        });
+
+        childrenByParent.forEach((siblings, parentId) => {
+          const parent = byId.get(parentId);
+          if (!parent) return;
+          const parentSize = dimension(parent);
+          const ordered = siblings.slice().sort((left, right) => left.position.x - right.position.x);
+          ordered.forEach((node, index) => {
+            if (index === 0) return;
+            const previous = ordered[index - 1];
+            const previousSize = dimension(previous);
+            const nodeSize = dimension(node);
+            const overlapsVertically = node.position.y < previous.position.y + previousSize.height
+              && node.position.y + nodeSize.height > previous.position.y;
+            const minimumX = previous.position.x + previousSize.width + CHILD_GAP_X;
+            if (overlapsVertically && node.position.x < minimumX) {
+              node.position = { ...node.position, x: minimumX };
+              changed = true;
+            }
+          });
+
+          const requiredWidth = Math.max(
+            NODE_W,
+            ...siblings.map(node => node.position.x + dimension(node).width + CHILD_PAD),
+          );
+          const requiredHeight = Math.max(
+            NODE_H + CHILD_PAD,
+            ...siblings.map(node => node.position.y + dimension(node).height + CHILD_PAD),
+          );
+          const styledParent = parent as Node & { style?: Record<string, unknown> };
+          const parentStyle = { ...styledParent.style };
+          if (requiredWidth > parentSize.width) {
+            parentStyle.width = requiredWidth;
+            parent.width = requiredWidth;
+            changed = true;
+          }
+          if (requiredHeight > parentSize.height) {
+            parentStyle.height = requiredHeight;
+            parent.height = requiredHeight;
+            changed = true;
+          }
+          styledParent.style = parentStyle;
+        });
+
+        nextNodes.slice().reverse().forEach(node => {
+          const parent = node.parentId ? byId.get(node.parentId) : undefined;
+          if (!parent) return;
+
+          const parentSize = dimension(parent);
+          const nodeSize = dimension(node);
+          const x = Math.max(CHILD_PAD, Math.min(node.position.x, Math.max(CHILD_PAD, parentSize.width - nodeSize.width - CHILD_PAD)));
+          const y = Math.max(NODE_H, Math.min(node.position.y, Math.max(NODE_H, parentSize.height - nodeSize.height - CHILD_PAD)));
+          if (x !== node.position.x || y !== node.position.y) {
+            node.position = { x, y };
+            changed = true;
+          }
+
+          const requiredWidth = x + nodeSize.width + CHILD_PAD;
+          const requiredHeight = y + nodeSize.height + CHILD_PAD;
+          const styledParent = parent as Node & { style?: Record<string, unknown> };
+          const parentStyle = { ...styledParent.style };
+          if (requiredWidth > parentSize.width) {
+            parentStyle.width = requiredWidth;
+            parent.width = requiredWidth;
+            changed = true;
+          }
+          if (requiredHeight > parentSize.height) {
+            parentStyle.height = requiredHeight;
+            parent.height = requiredHeight;
+            changed = true;
+          }
+          styledParent.style = parentStyle;
+        });
+        if (!changed) break;
+      }
+
+      return nextNodes;
+    });
+  }, [setReactNodes]);
 
   // Keep ReactFlow state in sync with computed layout
   useEffect(() => {
-    setReactNodes(rfNodes);
+    setReactNodes(currentNodes => {
+      const currentById = new Map(currentNodes.map(node => [node.id, node]));
+      const shouldResetLayout = layoutResetVersion !== appliedLayoutResetVersion.current;
+      if (shouldResetLayout) appliedLayoutResetVersion.current = layoutResetVersion;
+      const reconciled = rfNodes.map(computed => {
+        const current = currentById.get(computed.id);
+        if (!current || shouldResetLayout) return computed;
+
+        const currentStyle = current.style ?? {};
+        const computedStyle = computed.style ?? {};
+        const computedWidth = Number(computedStyle.width ?? NODE_W);
+        const computedHeight = Number(computedStyle.height ?? NODE_H);
+        const currentWidth = current.width ?? Number(currentStyle.width ?? NODE_W);
+        const currentHeight = current.height ?? Number(currentStyle.height ?? NODE_H);
+        const width = Math.max(currentWidth, computedWidth);
+        const height = Math.max(currentHeight, computedHeight);
+        return {
+          ...computed,
+          position: current.position,
+          width,
+          height,
+          measured: current.measured,
+          style: {
+            ...computedStyle,
+            width,
+            height: computedStyle.height !== undefined || currentStyle.height !== undefined ? height : undefined,
+          },
+        };
+      });
+
+      const byId = new Map(reconciled.map(node => [node.id, node]));
+      reconciled.filter(node => !currentById.has(node.id)).forEach(node => {
+        if (!node.parentId) return;
+        const parent = byId.get(node.parentId);
+        if (!parent) return;
+
+        const siblings = reconciled.filter(sibling => sibling.parentId === node.parentId && sibling.id !== node.id);
+        const nodeWidth = node.width ?? Number(node.style?.width ?? NODE_W);
+        const nodeHeight = node.height ?? Number(node.style?.height ?? NODE_H);
+        let x = node.position.x;
+        let y = node.position.y;
+        let overlaps = true;
+        while (overlaps) {
+          overlaps = siblings.some(sibling => {
+            const siblingWidth = sibling.width ?? Number(sibling.style?.width ?? NODE_W);
+            const siblingHeight = sibling.height ?? Number(sibling.style?.height ?? NODE_H);
+            return x < sibling.position.x + siblingWidth
+              && x + nodeWidth > sibling.position.x
+              && y < sibling.position.y + siblingHeight
+              && y + nodeHeight > sibling.position.y;
+          });
+          if (overlaps) x += nodeWidth + CHILD_GAP_X;
+        }
+        node.position = { x: Math.max(CHILD_PAD, x), y: Math.max(NODE_H, y) };
+
+        const requiredWidth = node.position.x + nodeWidth + CHILD_PAD;
+        const requiredHeight = node.position.y + nodeHeight + CHILD_PAD;
+        const parentWidth = parent.width ?? Number(parent.style?.width ?? NODE_W);
+        const parentHeight = parent.height ?? Number(parent.style?.height ?? NODE_H);
+        if (requiredWidth > parentWidth) {
+          parent.width = requiredWidth;
+          parent.style = { ...parent.style, width: requiredWidth };
+        }
+        if (requiredHeight > parentHeight) {
+          parent.height = requiredHeight;
+          parent.style = { ...parent.style, height: requiredHeight };
+        }
+      });
+
+      // A deep expansion can increase a child several levels below the root.
+      // Revisit the hierarchy until every ancestor contains its direct children.
+      for (let pass = 0; pass < reconciled.length; pass += 1) {
+        let changed = false;
+        reconciled.slice().reverse().forEach(node => {
+          if (!node.parentId) return;
+          const parent = byId.get(node.parentId);
+          if (!parent) return;
+
+          const nodeWidth = node.width ?? Number(node.style?.width ?? NODE_W);
+          const nodeHeight = node.height ?? Number(node.style?.height ?? NODE_H);
+          const requiredWidth = node.position.x + nodeWidth + CHILD_PAD;
+          const requiredHeight = node.position.y + nodeHeight + CHILD_PAD;
+          const parentWidth = parent.width ?? Number(parent.style?.width ?? NODE_W);
+          const parentHeight = parent.height ?? Number(parent.style?.height ?? NODE_H);
+
+          if (requiredWidth > parentWidth) {
+            parent.width = requiredWidth;
+            parent.style = { ...parent.style, width: requiredWidth };
+            changed = true;
+          }
+          if (requiredHeight > parentHeight) {
+            parent.height = requiredHeight;
+            parent.style = { ...parent.style, height: requiredHeight };
+            changed = true;
+          }
+        });
+        if (!changed) break;
+      }
+
+      return reconciled;
+    });
     setReactEdges(rfEdges);
-  }, [rfNodes, rfEdges, setReactNodes, setReactEdges]);
+  }, [rfNodes, rfEdges, layoutResetVersion, setReactNodes, setReactEdges]);
+
+  useEffect(() => {
+    setReactNodes(currentNodes => currentNodes.map(node => {
+      const computed = rfNodes.find(candidate => candidate.id === node.id);
+      if (!computed) return node;
+      return {
+        ...node,
+        zIndex: computed.zIndex,
+        data: computed.data,
+      };
+    }));
+  }, [rfNodes, setReactNodes]);
 
   const onConnect = useCallback(
     (params: Connection) => setReactEdges(eds => addEdge(params, eds)),
@@ -529,6 +877,9 @@ export const ModuleDiagram: React.FC<ModuleDiagramProps> = ({
       onEdgesChange={onEdgesChange}
       onConnect={onConnect}
       onFitViewChange={onFitViewChange}
+      onFitSelectedChange={(callback) => { fitSelectedRef.current = callback; }}
+      selectedNode={selectedNode}
+      onPaneClick={onPaneClick}
     />
   );
 };
@@ -542,10 +893,16 @@ interface DiagramCanvasProps {
   onEdgesChange: (changes: import('@xyflow/react').EdgeChange[]) => void;
   onConnect: (p: Connection) => void;
   onFitViewChange?: (cb: () => void) => void;
+  onFitSelectedChange?: (cb: () => void) => void;
+  selectedNode: string | null;
+  onPaneClick?: () => void;
 }
 
 const DiagramCanvas: React.FC<DiagramCanvasProps> = ({
   nodes, edges, onNodesChange, onEdgesChange, onConnect, onFitViewChange,
+  onFitSelectedChange,
+  selectedNode,
+  onPaneClick,
 }) => {
   return (
     <ReactFlow
@@ -554,6 +911,7 @@ const DiagramCanvas: React.FC<DiagramCanvasProps> = ({
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onConnect={onConnect}
+      onPaneClick={onPaneClick}
       nodeTypes={nodeTypes}
       fitView
       fitViewOptions={{ padding: 0.15 }}
@@ -562,24 +920,61 @@ const DiagramCanvas: React.FC<DiagramCanvasProps> = ({
       // Disable drag so expansion feels snappy (users zoom/pan with mouse)
       nodesDraggable={true}
       nodesConnectable={false}
-      elementsSelectable={false}
+      elementsSelectable={true}
       proOptions={{ hideAttribution: true }}
     >
-      <CanvasControls onFitViewChange={onFitViewChange} />
+      <CanvasControls
+        onFitViewChange={onFitViewChange}
+        onFitSelectedChange={onFitSelectedChange}
+        selectedNode={selectedNode}
+      />
     </ReactFlow>
   );
 };
 
 // ─── Controls panel (uses hook so must be inside ReactFlow context) ───────────
 
-const CanvasControls: React.FC<{ onFitViewChange?: (cb: () => void) => void }> = ({
-  onFitViewChange,
-}) => {
+const CanvasControls: React.FC<{
+  onFitViewChange?: (cb: () => void) => void;
+  onFitSelectedChange?: (cb: () => void) => void;
+  selectedNode: string | null;
+}> = ({ onFitViewChange, onFitSelectedChange, selectedNode }) => {
   const { fitView } = useReactFlow();
+  const { theme } = useTheme();
+  const [isMiniMapVisible, setIsMiniMapVisible] = useState(true);
+  const [miniMapSize, setMiniMapSize] = useState(180);
+  const [isResizingMiniMap, setIsResizingMiniMap] = useState(false);
+
+  const handleStartMiniMapResize = useCallback((event: React.PointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsResizingMiniMap(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isResizingMiniMap) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      setMiniMapSize((currentSize) => Math.max(120, Math.min(320, currentSize + event.movementX + event.movementY)));
+    };
+    const handlePointerUp = () => setIsResizingMiniMap(false);
+
+    document.addEventListener('pointermove', handlePointerMove);
+    document.addEventListener('pointerup', handlePointerUp);
+    return () => {
+      document.removeEventListener('pointermove', handlePointerMove);
+      document.removeEventListener('pointerup', handlePointerUp);
+    };
+  }, [isResizingMiniMap]);
 
   useEffect(() => {
     if (onFitViewChange) onFitViewChange(() => fitView({ padding: 0.15, duration: 400 }));
-  }, [fitView, onFitViewChange]);
+    if (onFitSelectedChange) {
+      onFitSelectedChange(() => {
+        if (selectedNode) fitView({ nodes: [selectedNode], padding: 0.25, duration: 400 });
+      });
+    }
+  }, [fitView, onFitViewChange, onFitSelectedChange, selectedNode]);
 
   return (
     <>
@@ -589,17 +984,54 @@ const CanvasControls: React.FC<{ onFitViewChange?: (cb: () => void) => void }> =
         size={1}
         color="rgba(255,255,255,0.08)"
       />
-      <Controls className="!border-white/10 !bg-gray-800/80 !shadow-xl" />
-      <MiniMap
-        nodeColor={(n) => {
-          const d = n.data as BubbleNodeData;
-          if (d?.selected)     return '#22d3ee';
-          if (d?.has_weights)  return '#0e7490';
-          return '#374151';
-        }}
-        className="!border-white/10 !bg-gray-900/80"
-        maskColor="rgba(0,0,0,0.5)"
-      />
+      <Controls className={theme === 'dark'
+        ? '!border-white/10 !bg-gray-800/80 !shadow-xl'
+        : '!border-gray-300 !bg-white/90 !shadow-xl'} />
+      {isMiniMapVisible ? (
+        <div
+          className="absolute bottom-3 right-3 z-10 rounded-lg shadow-xl"
+          style={{ width: miniMapSize, height: miniMapSize }}
+        >
+          <MiniMap
+            nodeColor={(n) => {
+              const d = n.data as BubbleNodeData;
+              if (d?.selected)     return '#22d3ee';
+              if (d?.has_weights)  return '#0e7490';
+              return '#374151';
+            }}
+            className={theme === 'dark'
+              ? '!static !h-full !w-full !border-white/10 !bg-gray-900/80 transition-colors duration-300'
+              : '!static !h-full !w-full !border-gray-300 !bg-white/90 transition-colors duration-300'}
+            maskColor={theme === 'dark' ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.48)'}
+          />
+          <button
+            type="button"
+            onClick={() => setIsMiniMapVisible(false)}
+            className={`absolute right-1 top-1 rounded p-1 transition-colors hover:bg-cyan-400/20 hover:text-cyan-300 ${theme === 'dark' ? 'bg-gray-950/80 text-gray-300' : 'bg-white/90 text-gray-600'}`}
+            title="Hide minimap"
+            aria-label="Hide minimap"
+          >
+            <EyeOff className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onPointerDown={handleStartMiniMapResize}
+            className="absolute bottom-0 right-0 h-4 w-4 cursor-se-resize rounded-tl bg-cyan-400/80"
+            title="Resize minimap"
+            aria-label="Resize minimap"
+          />
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setIsMiniMapVisible(true)}
+          className={`absolute bottom-3 right-3 z-10 rounded border p-2 shadow-xl transition-colors hover:border-cyan-400/40 hover:text-cyan-300 ${theme === 'dark' ? 'border-white/10 bg-gray-900/90 text-gray-300' : 'border-gray-300 bg-white/90 text-gray-600'}`}
+          title="Show minimap"
+          aria-label="Show minimap"
+        >
+          <Eye className="h-4 w-4" />
+        </button>
+      )}
     </>
   );
 };

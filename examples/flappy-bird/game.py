@@ -24,27 +24,32 @@ torch.set_printoptions(threshold=10)
 GAME_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGE_DIR = f"{GAME_DIR}/imgs"
 
+
+def load_image(path: str) -> pygame.Surface:
+    image = pygame.image.load(path)
+    if pygame.display.get_surface() is not None:
+        image = image.convert_alpha()
+    return image
+
+
 class Window(object):
     image: pygame.Surface = None
 
-    def __init__(self, height: int = 800, width: int = 600, width_ext: int = 300, hitbox: int = 10):
+    def __init__(self, height: int = 800, width: int = 600, width_ext: int = 300, hitbox: int = 10,
+                 initialize: bool = True):
         # -------------------- Attributes -------------------- #
         self.height     = height
         self.width      = width + width_ext
         self.width_ext  = width_ext
         self.hitbox     = hitbox # TODO: Find its original effect
-        # -------------------- PyGame -------------------- #
-        self.display    = pygame.display.set_mode((width, height))
-        pygame.font.init()  # init font
-        pygame.display.set_caption("Flappy Bird")
-        self.stat_font  = pygame.font.SysFont("comicsans", 50)
-        self.end_font   = pygame.font.SysFont("comicsans", 70)
-        if self.image is None:
-            self.image      = pygame.transform.scale(pygame.image.load(
-                os.path.join(IMAGE_DIR, "bg.png")).convert_alpha(), (width, height))
         # -------------------- States -------------------- #
-        self.draw_lines = False
-        self.initialized = True
+        self.draw_lines: bool = False
+        self.display: pygame.Surface | None             = None
+        self.stat_font: pygame.sysfont.SysFont | None   = None
+        self.end_font: pygame.sysfont.SysFont | None    = None
+        self.initialized: bool                          = False
+        if initialize:
+            self.initialize()
 
     def initialize(self):
         self.display    = pygame.display.set_mode((self.width, self.height))
@@ -52,15 +57,15 @@ class Window(object):
         pygame.display.set_caption("Flappy Bird")
         self.stat_font  = pygame.font.SysFont("comicsans", 50)
         self.end_font   = pygame.font.SysFont("comicsans", 70)
-        self.image      = pygame.transform.scale(pygame.image.load(
+        self.image      = pygame.transform.scale(load_image(
             os.path.join(IMAGE_DIR, "bg.png")
-        ).convert_alpha(), (self.width, self.height))
+        ), (self.width, self.height))
         self.initialized = True
 
     def close(self):
-        # TODO: Implement so that there are no errors
-        # pygame.font.quit()
-        # pygame.display.quit()
+        if self.display is not None:
+            pygame.display.quit()
+        self.display = None
         self.initialized = False
 
     def render(self):
@@ -73,7 +78,7 @@ class Floor(object):
     def __init__(self, window: Window, x: int, level: int, velocity: int = 6):
         # -------------------- PyGame -------------------- #
         if self.image is None:
-            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join(IMAGE_DIR, "base.png")).convert_alpha())
+            self.image = pygame.transform.scale2x(load_image(os.path.join(IMAGE_DIR, "base.png")))
         # -------------------- Attributes -------------------- #
         self.window     = window
         self.height     = self.image.get_height()
@@ -161,7 +166,7 @@ class Pipe(object):
         self.y_bot: int     = None
         # -------------------- PyGame -------------------- #
         if self.image is None:
-            self.image = pygame.transform.scale2x(pygame.image.load(os.path.join(IMAGE_DIR, "pipe.png")).convert_alpha())
+            self.image = pygame.transform.scale2x(load_image(os.path.join(IMAGE_DIR, "pipe.png")))
         self.pxt = 1.0
         self.pipe_top       = pygame.transform.flip(self.image, False, True)
         self.pipe_bottom    = self.image
@@ -544,40 +549,18 @@ class Renderer(object):
     def __init__(self, obj, timeout=10):
         self.obj = obj
         self.timeout = timeout
-        self.data = {'obj': obj, 'timeout': timeout}
-        self.states = {'terminated': False, 'started': False, 'running': False}
-        self.process: mp.Process = None
-
-    @staticmethod
-    def run(data, states):
-        states['started'] = True
-        while not states['terminated']:
-            states['running'] = True
-            # data['obj'].draw()
-        # clock.sleep(data['timeout'])
-        states['running'] = False
+        self.states = {'started': False, 'running': False}
 
     def running(self):
         return self.states['running']
 
     def start(self):
-        if self.process is not None:
-            print(f"\n")
-            ts = clock.perf_counter()
-            while self.process.is_alive():
-                print(f"\r... waiting for process to end", end='')
-                if clock.perf_counter() - ts >= self.timeout:
-                    print(f"\n... forcefully terminating the process")
-                    self.process.terminate()
-            print(f"\n")
-
-        self.process = mp.Process(target=self.run, args=(self.data, self.states), daemon=True)
-        self.process.start()
+        # NOTE: Pygame surfaces are not picklable on Windows; rendering also belongs
+        #       on the main thread, so do not spawn a process for this state change.
+        self.states['started'] = True
+        self.states['running'] = True
 
     def stop(self):
-        self.states['terminated'] = True
-        # if self.process.is_alive():
-        #     raise RuntimeError(f"Failed to stop process.")
         self.states['started'] = self.states['running'] = False
 
 
@@ -595,7 +578,8 @@ class Game(Env):
         if init_pipe_x is None:
             init_pipe_x = init_x * 3
         # -------------------- Attributes -------------------- #
-        self.window     = Window(height, width, width_ext, hitbox,)
+        render_mode     = options.get('render_mode', None)
+        self.window     = Window(height, width, width_ext, hitbox, initialize=False)
         self.floor      = FloorHandler(self.window, floor, velocity)
         self.pipes      = PipesHandler(self.window, self.floor, init_pipe_x, spawn_width, gap_offset, gap_size,
                                        velocity, pipe_y_velocity)
@@ -609,6 +593,7 @@ class Game(Env):
         self.seq_len    = seq_len
         self.tick_value = tick
         self.offset     = min(seq_len - 1, max(0, delay)) if delay is not None and seq_len is not None else 0
+        self.reward_scale = 0.001
         # -------------------- Gym -------------------- #
         inputs = (3 if not full_state else 5 + (2 if pipe_y_velocity != 0 else 0))
         self.observation_space = spaces.Box(
@@ -627,9 +612,7 @@ class Game(Env):
         self.device = device
         self.dtype = dtype
         self.steps = 0
-        self.render_mode: str | None = options.get('render_mode', None)
-
-        self.window.close()
+        self.render_mode: str | None = render_mode
         self.initialized = False
 
     def tick(self, val=240):
@@ -637,11 +620,12 @@ class Game(Env):
 
     def initialize(self, keys: list[int] = None):
         # TODO: Make the keys initialization work
-        if not (self.initialized or self.window.initialized):
-            # if self.render_mode == 'human':
+        if self.render_mode == 'human' and not self.window.initialized:
             self.window.initialize()
             pygame.display.iconify()
-            self.initialized = True
+        elif self.render_mode != 'human' and self.window.initialized:
+            self.window.close()
+        self.initialized = True
         self.floor.reset()
         self.pipes.reset()
         self.birds.reset()
@@ -649,7 +633,6 @@ class Game(Env):
         self.score = 0
         self.terminated = False
         self.steps = 0
-        self.window.close()
 
     def update(self, activation: Tensor):
         self.birds.score[:] = 0 # prev_score = self.birds.score
@@ -667,7 +650,7 @@ class Game(Env):
         return self.birds.get_state()
 
     def get_reward(self):
-        return self.birds.get_reward()
+        return self.birds.get_reward() * self.reward_scale
 
     def reset(self, keys: list[int] = None, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[Tensor, dict[str, Any]]:
         # TODO: Implement keys paramter
@@ -699,6 +682,7 @@ class Game(Env):
                 self.birds.score[~self.birds.dead] += 10000
                 self.birds.score[self.birds.dead] -= 2000
                 self.generation += 1
+                self.close()
 
             reward = self.get_reward().clone()
 
@@ -707,9 +691,17 @@ class Game(Env):
             raise RuntimeError(f"Game has ended")
 
     def _draw(self, debug=False, testing=False):
+        if self.render_mode != 'human':
+            return
         if not self.window.initialized:
             self.window.initialize()
-        if self.window.initialize:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.terminated = True
+                self.close()
+                return
+
+        if self.window.initialized:
             # if not testing and self.steps % 20 == 0: # and self.steps % 30 == 0:
             #     pygame.display.quit()
             #     self.window.initialize()
@@ -766,12 +758,16 @@ class Game(Env):
     def render(self, debug=False, testing=False):
         if not self.terminated:
             if self.render_mode == 'human':
-                # if not self.renderer.running():
-                #     self.renderer.start()
+                if not self.renderer.running():
+                    self.renderer.start()
                 self._draw(debug=debug, testing=testing)
             self.steps += 1
         if self.terminated:
-            self.renderer.stop()
+            self.close()
+
+    def close(self):
+        self.renderer.stop()
+        self.window.close()
 
     def test(self):
         state = self.reset()[0]

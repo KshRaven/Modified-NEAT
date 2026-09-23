@@ -578,7 +578,7 @@ class AttentionLambda(NeatModule):
     def __init__(
         self, heads: int, head_dim: int, layer_idx: int = None,
         lambdas: int = 1, init_mean: float = 0., init_std: float = 0.5,
-        max_gain: float = 10.0, affine: bool = True, epsilon: float = 1e-8,
+        max_gain: float = 2.0, affine: bool = True, epsilon: float = 1e-8,
         device: DEVICE = 'cpu', dtype: DTYPE = torch.float32
     ):
         super().__init__(
@@ -595,15 +595,16 @@ class AttentionLambda(NeatModule):
         self.epsilon    = epsilon
         self.range      = abs(self.u_lim - self.l_lim)
 
-        self.q1 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
-        self.q2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
-        self.k1 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
-        self.k2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
-        self.init = (
-            self.u_lim - (self.range * math.exp(-0.3 * self.layer_idx))
-            if not affine else
-            NeatParameter((heads, 1), requires_grad=False, device=device, dtype=dtype) # .unsqueeze(2)
-        )
+        # self.q1 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
+        # self.q2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
+        # self.k1 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
+        # self.k2 = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
+        # self.init = (
+        #     self.u_lim - (self.range * math.exp(-0.3 * self.layer_idx))
+        #     if not affine else
+        #     NeatParameter((heads, 1), requires_grad=False, device=device, dtype=dtype) # .unsqueeze(2)
+        # )
+        self.scalars = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
         # shape (1, lambdas) — broadcasts with gain (heads, lambdas)
         self.exponents = (torch.arange(lambdas, device=device, dtype=dtype) + 1).unsqueeze(0).unsqueeze(1)
         self.multipliers = torch.pow(-1, self.exponents)
@@ -618,9 +619,9 @@ class AttentionLambda(NeatModule):
         self.min_val = init_mean - init_std * 2
         self.max_val = init_mean + init_std * 2
 
-        with torch.no_grad():
-            for p in [self.q1, self.q2, self.k1, self.k2]:
-                p.data.normal_(init_mean, init_std)
+        # with torch.no_grad():
+        #     for p in [self.q1, self.q2, self.k1, self.k2]:
+        #         p.data.normal_(init_mean, init_std)
 
     def extra_repr(self):
         return (
@@ -629,30 +630,32 @@ class AttentionLambda(NeatModule):
         )
 
     def init_affine(self, keys: Union[int, list[int], None]):
-        if isinstance(self.init, NeatParameter):
-            return self.l_lim + (self.range * torch.sigmoid(self.init[keys]))
-        else:
-            return self.init
+        # if isinstance(self.init, NeatParameter):
+        #     return self.l_lim + (self.range * torch.sigmoid(self.init[keys]))
+        # else:
+        #     return self.init
+        return 0.0
 
     def post_attention_shift(self, keys: Union[int, list[int], None], offset: int | None = None, verbose: int = False):
         """Returns a scalar/tensor broadcastable with attended (batch, q_len, heads, head_dim)."""
-        # TODO: Fix the parameterized implementation of init
-        # return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, offset=offset, keys=keys)
-        if not isinstance(self.init, NeatParameter):
-            shift = self.init
-        else:
-            # reshape (heads, 1) -> (1, 1, heads, 1) to broadcast over (b, q, h, d)
-            parameters = self.init[keys]
-            shift = self.l_lim + (self.range * torch.sigmoid(parameters))
-            shift = shift.unsqueeze(1).unsqueeze(2)
+        # # TODO: Fix the parameterized implementation of init
+        # # return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, offset=offset, keys=keys)
+        # if not isinstance(self.init, NeatParameter):
+        #     shift = self.init
+        # else:
+        #     # reshape (heads, 1) -> (1, 1, heads, 1) to broadcast over (b, q, h, d)
+        #     parameters = self.init[keys]
+        #     shift = self.l_lim + (self.range * torch.sigmoid(parameters))
+        #     shift = shift.unsqueeze(1).unsqueeze(2)
+        shift = torch.tensor(0.0, device=self.scalars.device, dtype=self.scalars.dtype)
         if verbose:
             print(get_tensor_info(shift, 'Shift', verbose))
         return shift
 
-    def update_limit(self):
-        for param in self.neat_parameters():
-            with torch.no_grad():
-                param.data[:] = torch.clamp(param.data, self.min_val, self.max_val)
+    # def update_limit(self):
+    #     for param in self.neat_parameters():
+    #         with torch.no_grad():
+    #             param.data[:] = torch.clamp(param.data, self.min_val, self.max_val)
 
     def forward(self, keys: Union[int, Iterable[int]] = None):
         """
@@ -663,16 +666,20 @@ class AttentionLambda(NeatModule):
         # query:     (batch_size, q_len, heads, head_dim)
         # key:       (batch_size, k_len, heads, head_dim)
         # attention: (batch_size, heads, q_len, k_len)
-        # TODO: Might want to verify the need of clamping the parameters
-        q1 = self.q1[keys] # * self.std # F.tanh(self.q1[keys], self.min_val, self.max_val)
-        k1 = self.k1[keys] # * self.std # F.tanh(self.k1[keys], self.min_val, self.max_val)
-        q2 = self.q2[keys] # * self.std # F.tanh(self.q2[keys], self.min_val, self.max_val)
-        k2 = self.k2[keys] # * self.std # F.tanh(self.k2[keys], self.min_val, self.max_val)
-        gain = (
-            torch.exp(torch.sum(q1 * k1, dim=-2)) -
-            torch.exp(torch.sum(q2 * k2, dim=-2))
-        )
-        gain = torch.sigmoid(gain) * self.max_gain
+        # # TODO: Might want to verify the need of clamping the parameters
+        # q1 = self.q1[keys] # * self.std # F.tanh(self.q1[keys], self.min_val, self.max_val)
+        # k1 = self.k1[keys] # * self.std # F.tanh(self.k1[keys], self.min_val, self.max_val)
+        # q2 = self.q2[keys] # * self.std # F.tanh(self.q2[keys], self.min_val, self.max_val)
+        # k2 = self.k2[keys] # * self.std # F.tanh(self.k2[keys], self.min_val, self.max_val)
+        # gain = (
+        #     torch.exp(torch.sum(q1 * k1, dim=-2)) -
+        #     torch.exp(torch.sum(q2 * k2, dim=-2))
+        # )
+        # gain = torch.sigmoid(gain) * self.max_gain
+        # TODO: Most implementations of NEAT weight mutation do not scale well so exponential calculations are to be avoided
+        gain = torch.clamp(torch.mean(torch.tanh(self.scalars[keys]) * self.max_gain, dim=-2), -self.max_gain, +self.max_gain)
+        gain = (gain + self.max_gain) / 2
+        assert torch.all((gain >= 0) & (gain <= self.max_gain))
         # self.exponents: (1, lambdas), self._init_affine(): (heads, 1) or scalar
         scalars = (
             # (base + self.biases(base, keys, 0)) * self.multipliers # ** self.exponents * self.multipliers
@@ -934,7 +941,7 @@ class Attention(NeatModule):
                 print(get_tensor_info(self.att_coeff_indices, 'Coeff Indices', verbose+2))
             # Index '-3' is the lambdas' coefficients dimension
             # Collapse the coefficient dimension: (g, b, h, c, q, k) -> (g, b, h, q, k)
-            energy = self.softmax(energy) #  / math.sqrt(self.head_dim))
+            # energy = self.softmax(energy) #  / math.sqrt(self.head_dim))
             energy = torch.select(energy, dim=-3, index=0) + torch.sum(
                 torch.index_select(energy, dim=-3, index=self.att_coeff_indices) * lambdas, dim=-3
             )

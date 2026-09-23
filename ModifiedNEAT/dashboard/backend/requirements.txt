@@ -3,4 +3,3 @@ uvicorn
 torch
 numpy
 python-multipart
-git+https://github.com/KshRaven/Modified-NEAT.git

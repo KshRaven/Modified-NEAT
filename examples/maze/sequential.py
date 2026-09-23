@@ -317,8 +317,9 @@ class ConvModelSeq(_PolicyMixin, mn.Model):
             nn.SiLU(),
         )
         self.pol_proj = mn.Sequential(*[
+            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
             mn.Linear(dim_size, dim_size, bias, device, dtype),
-            nn.Tanh(),
+            nn.SiLU(),
             mn.Linear(dim_size, 2 * outputs, True, device, dtype),
         ])
 
@@ -389,10 +390,10 @@ def build_env_config(return_grid: bool, discrete_states: bool = False, discrete_
 ENV: Game | None = None
 
 # ---- Model properties ----
-DISCRETE_STATES = True
+DISCRETE_STATES = False
 DISCRETE_ACTIONS = False
 GENOMES         = 200
-MAX_SEQ_LEN     = 8          # one grid-cell decision per step; no lookback needed
+MAX_SEQ_LEN     = 6          # one grid-cell decision per step; no lookback needed
 OUTPUTS         = 4          # 4-way discrete movement (Direction enum)
 EMBED_SIZE      = 32
 LAYERS          = 1
@@ -400,7 +401,7 @@ HEADS           = 1
 KV_HEADS        = None
 BIAS            = True
 DIFFERENTIAL    = False
-SWIGLU          = True
+SWIGLU          = False
 ACTIVATION      = nn.SiLU()
 PROBABILISTIC   = True
 DISTRIBUTION    = 'discrete' if DISCRETE_ACTIONS else 'normal'
@@ -529,7 +530,7 @@ def run():
             return False
         raise ValueError(f"Cannot convert '{value}' to boolean")
 
-    RETURN_GRID = True # str_to_bool(args.return_grid)
+    RETURN_GRID = False # str_to_bool(args.return_grid)
 
     # ---- Game settings: 8x8 starter maze ----
     env_config = build_env_config(RETURN_GRID, DISCRETE_STATES, DISCRETE_ACTIONS)
@@ -586,11 +587,11 @@ def run():
     CONFIG.genome.weight_init_std            = 0.15
     CONFIG.genome.weight_min_value           = -np.inf
     CONFIG.genome.weight_max_value           = +np.inf
-    CONFIG.genome.weight_mutate_power        = 0.008
+    CONFIG.genome.weight_mutate_power        = 0.008 
     CONFIG.genome.weight_mutate_rate         = 0.65
     CONFIG.genome.weight_replace_rate        = 0.0
-    CONFIG.genome.weight_add_prob            = 0.25
-    CONFIG.genome.weight_del_prob            = 0.01
+    CONFIG.genome.weight_add_prob            = 0.00
+    CONFIG.genome.weight_del_prob            = 0.00
     CONFIG.genome.param_epsilon              = 1e-12
     CONFIG.genome.single_structural_mutation = True
     CONFIG.reproduction.min_species_size     = GENOMES
@@ -629,14 +630,14 @@ def run():
     GAMMA        = fix(np.exp(np.log(0.01) / 128), 0.0)
     KAPPA        = 0.0
     ALPHA        = fix(np.exp(np.log(10.0) / (MEMORY_SIZE - 1)), 1.0)
-    BETA         = float(np.exp(np.log(10.0) / max(1, MEMORY_SIZE - 1)))
+    BETA         = 1.0 # float(np.exp(np.log(10.0) / max(1, MEMORY_SIZE - 1)))
     ALPHA_ORDER  = 0
     BETA_ORDER   = 0
     REW_NORM     = 3
     REW_REG      = 1.0
-    PPO_REG      = 0.0
-    POL_REG      = 0.0
-    ENT_REG      = 0.0
+    PPO_REG      = 0.33
+    POL_REG      = 0.33
+    ENT_REG      = 0.99
     CPY_REG      = 0.0
     DIV_REG      = 0.0
     SEGR_SIZE    = None

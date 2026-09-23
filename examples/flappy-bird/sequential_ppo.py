@@ -1,28 +1,31 @@
-import ModifiedNEAT as neat
-import ModifiedNEAT.nn as mn
+import os, sys
 import torch
 import torch.nn as nn
-import os, sys
 import time as clock
 import numpy as np
 import warnings
 import multiprocessing as mp
 import argparse
 
-from ModifiedNEAT.nn.base import Model
-from ModifiedNEAT.optim import scheduler
-from ModifiedNEAT.util.fancy_text import CM, Fore
-from ModifiedNEAT.util.datetime import unix_to_datetime_file
-from ModifiedNEAT.util.qol import manage_params
 from torch import Tensor, device as TDEVICE, dtype as TDTYPE
 from torch.nn import Module
 from typing import Union
 from numba.core.errors import NumbaPerformanceWarning
 
 EXMP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJ_DIR = os.path.dirname(os.path.dirname(EXMP_DIR))
 print(f"Example path = {EXMP_DIR}")
-if EXMP_DIR not in sys.path:
-    sys.path.insert(0, EXMP_DIR)
+if EXMP_DIR not in sys.path: sys.path.insert(0, EXMP_DIR)
+if PROJ_DIR not in sys.path: sys.path.insert(0, PROJ_DIR)
+
+import ModifiedNEAT as neat
+import ModifiedNEAT.nn as mn
+
+from ModifiedNEAT.nn.base import Model
+from ModifiedNEAT.optim import scheduler
+from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.datetime import unix_to_datetime_file
+from ModifiedNEAT.util.qol import manage_params
 
 from game import Game
 
@@ -67,7 +70,7 @@ class BaseModelSeq(mn.Model):
         self.fwd_exp: int       = options.get('fwd_exp', 2)
         self.constant: int      = options.get('constant', 1000)
         self.differential: bool | int = options.get('differential', False)
-        self.epsilon            = options.get('epsilon', 1e-6)
+        self.epsilon            = options.get('epsilon', 1e-9)
         
         if activation is None:
             activation = nn.SiLU()
@@ -75,8 +78,9 @@ class BaseModelSeq(mn.Model):
             dtype = torch.float32
         
         # Build
+        # NOTE: SwiGLU seems to work well for backpropagated networks but not for NEAT weight crossover & mutation
         feed_fwd = None if self.use_swiglu else mn.Sequential(
-            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
             # mn.RMSNorm(dim_size, device=device, dtype=dtype),
             mn.Linear(dim_size, dim_size, bias, device, dtype),
             activation, 
@@ -95,12 +99,21 @@ class BaseModelSeq(mn.Model):
             transformer,
         )
         self.pol_proj = mn.Sequential(*[
-            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
             # mn.RMSNorm(dim_size, device=device, dtype=dtype),
             mn.Linear(dim_size, dim_size, bias, device, dtype),
-            nn.Tanh(),
+            nn.SiLU(),
             mn.Linear(dim_size, 2*outputs, True, device, dtype),
         ])
+        # self.val_proj = mn.Sequential(*[
+        #     mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+        #     # mn.RMSNorm(dim_size, device=device, dtype=dtype),
+        #     mn.Linear(dim_size, dim_size, bias, device, dtype),
+        #     nn.SiLU(),
+        #     mn.Linear(dim_size, dim_size, bias, device, dtype),
+        #     nn.SiLU(),
+        #     mn.Linear(dim_size, 1, bias, device, dtype),
+        # ])
        
     @property 
     def transformer(self) -> mn.TransformerBase:
@@ -125,14 +138,15 @@ class BaseModelSeq(mn.Model):
         return mean, std
 
     def _get_std(self, latent: Tensor, keys: Union[int, list[int]] = None, raw: bool = False):
-        mean_std   = self.pol_proj(latent, keys=keys)
-        _, log_std = torch.chunk(mean_std, 2, -1)
-        if self.normalize:
-            std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
-            if raw: std = torch.log10(std)
-        else:
-            if raw: std = log_std
-            else: std = torch.exp(log_std)
+        mean_std = self.pol_proj(latent, keys=keys)
+        _, _std = torch.chunk(mean_std, 2, -1)
+        # if self.normalize:
+        #     std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
+        #     if raw: std = torch.log10(std)
+        # else:
+        #     if raw: std = log_std
+        #     else: std = torch.exp(log_std)
+        std = torch.abs(_std)
         return std
 
     def get_action(self, state: Tensor, keys: int | list[int] = None, **options) -> tuple[Tensor, Tensor]:
@@ -142,8 +156,11 @@ class BaseModelSeq(mn.Model):
         latent      = latent.squeeze(-2) # Since single token mode should be enabled
         mean, std   = self._get_mean_std(latent, keys=keys)
         dist: torch.distributions.Distribution = self.dist(mean, std)
-        action = dist.sample()
-        # if self.distribution != "discrete": action = torch.tanh(action) # NOTE: Breaks PPO loss with infinities
+        if self.probabilistic:
+            action = dist.sample()
+        else:
+            action = mean
+            if self.distribution == "discrete": action = action.argmax(-1)
         log_prob = dist.log_prob(action)
         return action, log_prob
 
@@ -171,6 +188,14 @@ class BaseModelSeq(mn.Model):
         else:
             action = torch.tanh(action)
         return action
+
+    # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
+    #     assert state.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len, features) but got {state.shape}"
+    #     latent = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False))
+    #     assert latent.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
+    #     latent = latent.squeeze(-2) # Since single token mode should be enabled
+    #     value  = self.val_proj(latent, keys=keys)
+    #     return value
     
     def get_mean(self, state: Tensor, keys: Union[int, list[int], None] = None):
         assert state.ndim == 4 # state(1, batch_size, seq_len, features)
@@ -222,35 +247,36 @@ SEQ_LEN_TRAIN       = min(max(1, 1), SEQ_LEN)
 SEQ_LEN_EVAL        = min(max(SEQ_LEN, 1), SEQ_LEN)
 INPUTS              = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
 OUTPUTS             = 1 if not DISCRETE else 2
-EMBED_SIZE          = 32
-LAYERS              = 1
+EMBED_SIZE          = 64
+LAYERS              = 2
 HEADS               = 1
 KV_HEADS            = None
 FWD_EXP             = 1
 DIFFERENTIAL        = False
 BIAS                = True
-PROBABILISTIC       = False
+PROBABILISTIC       = True
 PROJ_NORM           = False
 CONSTANT            = 1000
 TEST_ACTIVATION     = nn.SiLU()
-SWIGLU              = True
+SWIGLU              = False
 CLIP_MIN            = -4
 CLIP_MAX            = +0
 DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
-MODEL_NUM           = 3
+MODEL_NUM           = 2
 
 # Trainer properties
 MEMORY_SIZE         = 5
-GAMMA               = fix(np.exp(np.log(0.01) / 128), 0.0)
+GAMMA               = fix(np.exp(np.log(0.01) / 256), 0.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.01) / 128), 0.0)
 ALPHA               = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
 ALPHA_ORDER         = 0
 REW_NORM            = 3
-REW_REG             = 1.0
-LOSS_REG            = 0.67
-POL_REG             = 0.67
-ENT_REG             = 0.10
-DIV_REG             = 0.01
+REW_REG             = 1.00
+LOSS_REG            = 0.33
+VAL_REG             = 0.0
+POL_REG             = 0.33
+ENT_REG             = 0.99
+DIV_REG             = 0.0
 CPY_REG             = 0 # 0.75
 
 # Training 
@@ -286,22 +312,23 @@ INIT_GEN: int | None = None
 print(f"\ncreating config")
 CONFIG = neat.Config('sequential', '.config')
 
+MULTIPLIER = 0.75
 CONFIG.genome.init_type                     = 'normal'
 CONFIG.genome.weight_init_mean              = 0.0
-CONFIG.genome.weight_init_std               = 1.0
+CONFIG.genome.weight_init_std               = 1.0 * MULTIPLIER
 CONFIG.genome.weight_min_value              = -np.inf
 CONFIG.genome.weight_max_value              = +np.inf
-CONFIG.genome.weight_mutate_power           = 0.6
-CONFIG.genome.weight_mutate_rate            = 0.50
+CONFIG.genome.weight_mutate_power           = 0.25 * MULTIPLIER
+CONFIG.genome.weight_mutate_rate            = 0.60
 CONFIG.genome.weight_replace_rate           = 0.0
-CONFIG.genome.weight_add_prob               = 0.0
-CONFIG.genome.weight_del_prob               = 0.0
+CONFIG.genome.weight_add_prob               = 0.00
+CONFIG.genome.weight_del_prob               = 0.00
 CONFIG.genome.single_structural_mutation    = True
 CONFIG.reproduction.min_species_size        = GENOMES
 CONFIG.reproduction.purge                   = 1
 CONFIG.reproduction.elitism                 = 0.33
 CONFIG.reproduction.clone_threshold         = 0.50
-CONFIG.reproduction.survival_threshold      = 0.20
+CONFIG.reproduction.survival_threshold      = 0.10
 CONFIG.reproduction.cross_threshold         = 0.00
 CONFIG.species.compatibility_threshold      = np.inf
 CONFIG.stagnation.max_stagnation            = 1
@@ -377,7 +404,8 @@ def evaluate(population: neat.Population, **options):
                     print(f"\nactions =>\n{actions}\n\tshape = {actions.shape}")
 
                 # Get rewards
-                next_states, rewards, _, done, _ = ENV.step(actions)
+                _actions = torch.tanh(actions)
+                next_states, rewards, _, done, _ = ENV.step(_actions)
                 if DEBUG:
                     print(f"\nrewards =>\n{rewards}\n\tshape = {rewards.shape}")
 
@@ -492,7 +520,7 @@ def run():
 
     ENV = Game(
         POPULATION.size, goal=GOAL, seq_len=SEQ_LEN,
-        height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
+        height=700, width=700, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
         delay=DELAY, type2count=GENOMES, type2offset=0, device=DEVICE, dtype=DTYPE,
         render_mode=args.rm,
@@ -514,19 +542,21 @@ def run():
             POPULATION,
             # ghosts={g: 0 for g in POPULATION.genera[1:]},
             schedulers=[
-                scheduler.CosineAnnealing(CONFIG, 20, 0.5, 'weight_mutate_power', False, True),
+                scheduler.CosineAnnealing(CONFIG, 20, 0.1, ['weight_mutate_power', 'weight_init_std'], True, True),
                 scheduler.BinaryAnnealing(CONFIG, 20, 0.10, 'cross_threshold'),
             ],
             device=DEVICE, dtype=DTYPE,
             log_sub_dir='flappy_bird/',
             log_name=f"{unix_to_datetime_file(clock.time())}-sequential_"
                      f"seq{SEQ_LEN}_e{EMBED_SIZE}-l{LAYERS}_h{HEADS}-kv{KV_HEADS}-b{int(BIAS)}"
-                     f"g{round(GAMMA, 4)}-k{round(KAPPA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
-                     f"rn{REW_NORM}-p{round(POL_REG, 4)}-s{round(ENT_REG, 4)}-d{round(DIV_REG, 4)}-c{round(CPY_REG, 4)}-"
+                     f"g{round(GAMMA, 4)}-k{round(KAPPA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-rn{REW_NORM}-"
+                     f"p{round(LOSS_REG, 4)}-v{round(VAL_REG, 4)}-m{round(POL_REG, 4)}-"
+                     f"s{round(ENT_REG, 4)}-d{round(DIV_REG, 4)}-c{round(CPY_REG, 4)}-"
                      f"mem{MEMORY_SIZE}-delay{DELAY}-type{int(DISCRETE)}-gt{GAME_TYPE}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            rew_reg=REW_REG, loss_reg=LOSS_REG, pol_reg=POL_REG, ent_reg=ENT_REG, div_reg=DIV_REG, cpy_reg=CPY_REG,
-            validate=True, segr_size=None, use_entropy=True,
+            rew_reg=REW_REG, loss_reg=LOSS_REG, val_reg=VAL_REG, pol_reg=POL_REG, ent_reg=ENT_REG,
+            div_reg=DIV_REG, cpy_reg=CPY_REG,
+            validate=True, segr_size=None, use_entropy=True, use_critic=False,
             max_episodes=MEMORY_SIZE, max_steps=None,
         )
         print("Regularizations:")
@@ -571,7 +601,7 @@ def run():
     
     env = Game(
         POPULATION.size, goal=100, seq_len=SEQ_LEN,
-        height=800, width=1200, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY * 1.50, velocity=7,
+        height=700, width=1000, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY * 1.50, velocity=7,
         spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=tuple(int(s * 0.95) for s in GAP_SIZE),
         delay=DELAY, render_mode='human',
         type2count=last_genus_size, type2offset=0, device=DEVICE, dtype=DTYPE
@@ -586,6 +616,7 @@ def run():
     for model in MODELS: model.eval(); model.disable_cache()
     
     for i in range(5):
+        print(f"Running test {i+1}")
         done = False
         step = 0
         states = env.reset()[0]
@@ -604,7 +635,8 @@ def run():
             actions = torch.cat(split_actions, dim=0).squeeze(1)
 
             # Get rewards
-            next_states, rewards, _, done, _ = env.step(actions)
+            _actions = torch.tanh(actions)
+            next_states, rewards, _, done, _ = env.step(_actions)
             states = next_states
             
             env.render()

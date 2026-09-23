@@ -43,6 +43,17 @@ const AppContent: React.FC = () => {
   // Auto refresh
   const autoRefreshRef = useRef<number | null>(null);
 
+  const handleRefreshTensor = useCallback(async () => {
+    if (selectedNode && selectedFile) {
+      try {
+        const tensors = await api.listTensors(selectedFile, selectedNode, selectedModelId || undefined);
+        setTensorList(tensors);
+      } catch (err) {
+        console.error('Failed to refresh tensors:', err);
+      }
+    }
+  }, [selectedNode, selectedFile, selectedModelId]);
+
   useEffect(() => {
     if (settings.autoRefresh && selectedFile) {
       autoRefreshRef.current = window.setInterval(() => {
@@ -102,17 +113,6 @@ const AppContent: React.FC = () => {
     }
   }, []);
 
-  const handleRefreshTensor = useCallback(async () => {
-    if (selectedNode && selectedFile) {
-      try {
-        const tensors = await api.listTensors(selectedFile, selectedNode, selectedModelId || undefined);
-        setTensorList(tensors);
-      } catch (err) {
-        console.error('Failed to refresh tensors:', err);
-      }
-    }
-  }, [selectedNode, selectedFile, selectedModelId]);
-
   const handleNodeClick = useCallback(async (nodeId: string) => {
     if (nodeId === selectedNode) {
       setSelectedNode(null);
@@ -165,6 +165,13 @@ const AppContent: React.FC = () => {
       setViewingTensor(false);
     }
   }, [selectedFile, selectedNode, selectedModelId, moduleGraph, settings.maxDisplay]);
+
+  const handleDiagramPaneClick = useCallback(() => {
+    setSelectedNode(null);
+    setTensorList([]);
+    setSelectedTensorData(null);
+    setViewingTensor(false);
+  }, []);
 
   const handleCloseTensorViewer = useCallback(() => {
     setViewingTensor(false);
@@ -431,6 +438,7 @@ const AppContent: React.FC = () => {
                     edges={currentModuleGraph?.edges || []}
                     selectedNode={selectedNode}
                     onNodeClick={handleNodeClick}
+                    onPaneClick={handleDiagramPaneClick}
                     onExpandAllChange={(fn) => { expandAllRef.current = fn; }}
                     onCollapseAllChange={(fn) => { collapseAllRef.current = fn; }}
                     onFitViewChange={(fn) => { fitViewRef.current = fn; }}

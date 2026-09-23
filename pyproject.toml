@@ -1,2 +1,0 @@
-# Packaging is intentionally handled by setup.py.
-# This file is kept inert so pip/uv do not prefer it over the setup.py entry point.
