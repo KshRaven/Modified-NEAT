@@ -569,7 +569,7 @@ class Population(object):
         if not isinstance(keys, Iterable):
             keys = [keys]
         if device is None:
-            device = list(self.modules.values())[0].dev
+            device = list(list(self.modules.values())[0].parameters())[0].device
 
         def remove(dictionary: dict, key):
             if key in dictionary:

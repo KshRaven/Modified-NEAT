@@ -425,6 +425,8 @@ class RoPE(NeatModule):
         Returns:
             Same shape as input.
         """
+        if tensor.numel() == 0:
+            return tensor
         # NOTE: For uncached sequence, might want to start at 0.
         #       For instance use its absolute position in that sequence (be wary when the sequence is cached)
         # shape(genomes, batch_size, seq_len, heads, head_dim)
@@ -459,6 +461,8 @@ class RoPE(NeatModule):
 
     def decode(self, tensor: Tensor, pos_idx: int = 0, verbose: int = None):
         """Invert a RoPE-encoded tensor (multiply by complex conjugate)."""
+        if tensor.numel() == 0:
+            return tensor
         seq_len = tensor.shape[-3]
 
         # [..., head_dim] -> complex [..., head_dim/2]
@@ -538,7 +542,7 @@ class Repositioning(NeatModule):
         Returns:
             Same shape as input.
         """
-        if offset == 0: # No need for model to learn to guess the same values
+        if tensor.numel() == 0 or offset == 0: # No need for model to learn to guess the same values
             return tensor
 
         if self.layer_idx == 0 and self.rope is not None:
@@ -869,8 +873,10 @@ class Attention(NeatModule):
             try:
                 # TODO: Modify to use tensor.select to properly cater for ex dims
                 if key.ndim >= 6: raise NotImplementedError()
-                self.cache_k[:, :, :-excess] = self.repo_k(self.cache_k[:, :, excess:], excess, keys=None, verbose=verbose)
-                self.cache_v[:, :, :-excess] = self.repo_v(self.cache_v[:, :, excess:], excess, keys=None)
+                # TODO: Use negative indexing in for the sake of extra batch dimensions
+                if self.cache_k.shape[2] > excess:
+                    self.cache_k[:, :, :-excess] = self.repo_k(self.cache_k[:, :, excess:], excess, keys=None, verbose=verbose)
+                    self.cache_v[:, :, :-excess] = self.repo_v(self.cache_v[:, :, excess:], excess, keys=None)
             except Exception as e:
                 print(f"excess = {excess}")
                 print(f"K: {key.shape} -> {self.cache_k.shape}")

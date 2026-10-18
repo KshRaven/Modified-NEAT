@@ -38,7 +38,7 @@ neat.set_device(DEVICE)
 print(f"Using PyTorch device: '{DEVICE}'. NEAT device: '{neat.get_device()}'")
 PROJECT_DIR = os.path.dirname(os.path.dirname(EXMP_DIR))
 neat.util.storage.set_storage_location(f"{PROJECT_DIR}/storage/")
-print(f"Example path = {neat.util.storage.STORAGE_DIR}")
+print(f"Storage path = {neat.util.storage.STORAGE_DIR}")
 
 
 class BaseModelSeq(mn.Model):
@@ -58,8 +58,8 @@ class BaseModelSeq(mn.Model):
         self.distribution       = options.get('distribution', 'normal')
         self.probabilistic      = probabilistic
         self.normalize          = options.get('normalize', True)
-        self.clip_min           = options.get('clip_min', -2)
-        self.clip_max           = options.get('clip_max', -0)
+        self.clip_min: int | None = options.get('clip_min', -24) # -12 apprx -28
+        self.clip_max: int | None = options.get('clip_max', +0)
         self.clip_range         = self.clip_max - self.clip_min
         self.lower              = 10 ** self.clip_min
         self.upper              = 10 ** self.clip_max
@@ -67,7 +67,7 @@ class BaseModelSeq(mn.Model):
         self.kv_heads           = kv_heads
         self.use_swiglu: bool   = options.get('use_swiglu', False)
         self.attn_bias: bool    = options.get('attn_bias', bias)
-        self.fwd_exp: int       = options.get('fwd_exp', 2)
+        self.fwd_exp: int       = options.get('fwd_exp', 1)
         self.constant: int      = options.get('constant', 1000)
         self.differential: bool | int = options.get('differential', False)
         self.epsilon            = options.get('epsilon', 1e-9)
@@ -82,9 +82,9 @@ class BaseModelSeq(mn.Model):
         feed_fwd = None if self.use_swiglu else mn.Sequential(
             mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
             # mn.RMSNorm(dim_size, device=device, dtype=dtype),
-            mn.Linear(dim_size, dim_size, bias, device, dtype),
+            mn.Linear(dim_size, dim_size * self.fwd_exp, bias, device, dtype),
             activation, 
-            mn.Linear(dim_size, dim_size, self.attn_bias, device, dtype),
+            mn.Linear(dim_size * self.fwd_exp, dim_size, self.attn_bias, device, dtype),
         )
         transformer = mn.TransformerBase(
             max_seq_len, dim_size, layers, heads, kv_heads,
@@ -126,27 +126,31 @@ class BaseModelSeq(mn.Model):
         return self.get_policy(state, keys=keys, **kwargs)
 
     def _get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
-        mean_std   = self.pol_proj(latent, keys=keys)
-        # mean, log_std   = torch.chunk(mean_std, 2, -1)
+        self.transformer.layers[0].self_attention.forced_cache
+        mean_std      = self.pol_proj(latent, keys=keys)
+        mean, log_std = torch.chunk(mean_std, 2, -1)
         # if self.normalize:
         #     mean = torch.tanh(mean) * max(1, self.upper)
         #     std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
         # else:
         #     std = torch.exp(log_std)
-        mean, _std = torch.chunk(mean_std, 2, -1)
-        std = torch.abs(_std)
+        # mean, _std = torch.chunk(mean_std, 2, -1)
+        # std = torch.abs(_std)
+        std = torch.exp(log_std.clamp(self.clip_min, self.clip_max))
         return mean, std
 
     def _get_std(self, latent: Tensor, keys: Union[int, list[int]] = None, raw: bool = False):
-        mean_std = self.pol_proj(latent, keys=keys)
-        _, _std = torch.chunk(mean_std, 2, -1)
+        mean_std      = self.pol_proj(latent, keys=keys)
+        mean, log_std = torch.chunk(mean_std, 2, -1)
+        # _, _std = torch.chunk(mean_std, 2, -1)
         # if self.normalize:
         #     std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
         #     if raw: std = torch.log10(std)
         # else:
         #     if raw: std = log_std
         #     else: std = torch.exp(log_std)
-        std = torch.abs(_std)
+        # std = torch.abs(_std)
+        std = torch.exp(log_std.clamp(self.clip_min, self.clip_max))
         return std
 
     def get_action(self, state: Tensor, keys: int | list[int] = None, **options) -> tuple[Tensor, Tensor]:
@@ -240,26 +244,26 @@ DELAY               = 0
 DISCRETE            = False
 
 # Model properties
-GENOMES             = 100
-MAX_SEQ_LEN         = 8
+GENOMES             = 200
+MAX_SEQ_LEN         = 16
 SEQ_LEN             = MAX_SEQ_LEN // 1
 SEQ_LEN_TRAIN       = min(max(1, 1), SEQ_LEN)
 SEQ_LEN_EVAL        = min(max(SEQ_LEN, 1), SEQ_LEN)
 INPUTS              = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
 OUTPUTS             = 1 if not DISCRETE else 2
 EMBED_SIZE          = 64
-LAYERS              = 2
+LAYERS              = 1
 HEADS               = 1
 KV_HEADS            = None
-FWD_EXP             = 1
-DIFFERENTIAL        = False
+FWD_EXP             = 2
+DIFFERENTIAL        = True
 BIAS                = True
 PROBABILISTIC       = True
-PROJ_NORM           = False
+PROJ_NORM           = True
 CONSTANT            = 1000
 TEST_ACTIVATION     = nn.SiLU()
 SWIGLU              = False
-CLIP_MIN            = -4
+CLIP_MIN            = -13
 CLIP_MAX            = +0
 DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
 MODEL_NUM           = 2
@@ -270,13 +274,13 @@ GAMMA               = fix(np.exp(np.log(0.01) / 256), 0.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.01) / 128), 0.0)
 ALPHA               = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
 ALPHA_ORDER         = 0
-REW_NORM            = 3
+REW_NORM            = 1
 REW_REG             = 1.00
-LOSS_REG            = 0.33
-VAL_REG             = 0.0
-POL_REG             = 0.33
-ENT_REG             = 0.99
-DIV_REG             = 0.0
+LOSS_REG            = 0.99
+VAL_REG             = 0.00
+POL_REG             = 0.00
+ENT_REG             = 0.00
+DIV_REG             = 0.00
 CPY_REG             = 0 # 0.75
 
 # Training 
@@ -320,7 +324,7 @@ CONFIG.genome.weight_min_value              = -np.inf
 CONFIG.genome.weight_max_value              = +np.inf
 CONFIG.genome.weight_mutate_power           = 0.25 * MULTIPLIER
 CONFIG.genome.weight_mutate_rate            = 0.60
-CONFIG.genome.weight_replace_rate           = 0.0
+CONFIG.genome.weight_replace_rate           = 0.00
 CONFIG.genome.weight_add_prob               = 0.00
 CONFIG.genome.weight_del_prob               = 0.00
 CONFIG.genome.single_structural_mutation    = True
@@ -404,7 +408,7 @@ def evaluate(population: neat.Population, **options):
                     print(f"\nactions =>\n{actions}\n\tshape = {actions.shape}")
 
                 # Get rewards
-                _actions = torch.tanh(actions)
+                _actions = torch.tanh(actions) if not DISCRETE else actions
                 next_states, rewards, _, done, _ = ENV.step(_actions)
                 if DEBUG:
                     print(f"\nrewards =>\n{rewards}\n\tshape = {rewards.shape}")
@@ -542,8 +546,11 @@ def run():
             POPULATION,
             # ghosts={g: 0 for g in POPULATION.genera[1:]},
             schedulers=[
-                scheduler.CosineAnnealing(CONFIG, 20, 0.1, ['weight_mutate_power', 'weight_init_std'], True, True),
+                scheduler.CosineAnnealing(CONFIG, 20, 0.01, ['weight_mutate_power', 'weight_init_std'], True, True),
                 scheduler.BinaryAnnealing(CONFIG, 20, 0.10, 'cross_threshold'),
+                # scheduler.CosineAnnealing(CONFIG, 15, 0.67, 'loss_reg', True, True, phase=0),
+                # scheduler.CosineAnnealing(CONFIG, 15, 0.50, 'pol_reg', True, True, phase=0),
+                # scheduler.CosineAnnealing(CONFIG, 15, 0.75, 'ent_reg', True, True, phase=0),
             ],
             device=DEVICE, dtype=DTYPE,
             log_sub_dir='flappy_bird/',
@@ -635,7 +642,7 @@ def run():
             actions = torch.cat(split_actions, dim=0).squeeze(1)
 
             # Get rewards
-            _actions = torch.tanh(actions)
+            _actions = torch.tanh(actions) if not DISCRETE else actions
             next_states, rewards, _, done, _ = env.step(_actions)
             states = next_states
             

@@ -4,7 +4,10 @@ import pygame
 from gymnasium import Env, spaces
 from gymnasium.core import RenderFrame
 from numpy import ndarray as Array
-from torch import Tensor
+try:
+    from torch import Tensor
+except ImportError:
+    class Tensor: pass
 from typing import Any
 
 from .config import EnvironmentConfig, overwrite_config
@@ -13,6 +16,8 @@ from .player import Players
 from .car import Cars
 from .window import Window
 from .functional import Type
+from .race import Autopilot
+from contextlib import contextmanager
 
 
 class Game(Env):
@@ -47,11 +52,11 @@ class Game(Env):
         self.players = Players(config.lives, config.max_hiatus)
         
         # Create cars with CarConfig
-        self.cars = Cars(self.grid, self.players, config=config.car)
+        self.cars = Cars(self.grid, self.players, config=config.car, race=config.race)
         self.cars.reset(1)
         
         # Create window with WindowConfig
-        self.window = Window(self.grid, self.players, self.cars, config=config.window)
+        self.window = Window(self.grid, self.players, self.cars, config=config.window, race=config.race)
 
         self.previous_rewards: Array | None = None
         self.rewards: Array | None = None
@@ -65,6 +70,22 @@ class Game(Env):
         self.action_space = spaces.Box(low=-1, high=1, shape=(1, 2), dtype=np.float64) # spaces.Discrete(3)
 
         self.terminated = False
+
+    def set_race_mode(self, enabled: bool) -> bool:
+        """Enable/disable race mode (grid, slipstream, collisions, countdown). Takes effect on the
+        next reset(). Returns the previous setting."""
+        previous = self.config.race.enabled
+        self.config.race.enabled = bool(enabled)
+        return previous
+
+    @contextmanager
+    def race_mode(self, enabled: bool = True):
+        """`with env.race_mode(): ...` - race mode for the block, restored afterwards."""
+        previous = self.set_race_mode(enabled)
+        try:
+            yield self
+        finally:
+            self.set_race_mode(previous)
 
     def reset(self, **params) -> tuple[Array, dict[str, Any]]:
         """
@@ -81,6 +102,8 @@ class Game(Env):
         
         seed = params.get('seed', self.config.seed)
         keys: list[int] | int | None = params.get('keys')
+        if keys is None and self.config.race.enabled and self.config.race.racers:
+            keys = self.config.race.racers
         if keys is None:
             raise ValueError(f"Must inputs list of key or keys_total to reset environment")
         elif isinstance(keys, int):
@@ -99,6 +122,11 @@ class Game(Env):
         self.previous_rewards = self.rewards.copy()
 
         states = self.cars.get_state()
+
+        # Race mode: dramatic 3-2-1-GO! over the frozen grid (human rendering only)
+        race = self.config.race
+        if race.enabled and race.countdown.enabled and self.render_mode == 'human':
+            self.window.countdown()
 
         return states, {}
 
@@ -157,7 +185,7 @@ class Game(Env):
             if self.render_mode == 'human':
                 if self.window.screen is None:
                     self.window.initialize()
-                self.window.render()
+                self.window.render(options.get('verbose', False))
             else:
                 if self.window.screen is not None:
                     self.window.close()
@@ -165,6 +193,22 @@ class Game(Env):
                 pass
 
     def run(self):
+        """Manual test drive (WASD). Always a race: bots on a staggered grid, you at the back."""
+        with self.race_mode(True):
+            self._run()
+
+    def _run(self):
+        race = self.config.race
+        total = max(1, min(race.racers or 3, race.max_racers))
+        pilot: Autopilot | None = None
+
+        def new_race():
+            nonlocal pilot
+            self.cars.reset(total=total)
+            pilot = Autopilot(self.cars, seed=self.config.seed or 0) if total > 1 else None
+            if race.countdown.enabled:
+                self.window.countdown()
+
         self.min_laps = np.inf
         self.cars.usr_engaged = True
         self.render_mode = 'human'
@@ -177,7 +221,7 @@ class Game(Env):
             frame = 0
             enable_bots = False
             started = False
-            self.cars.reset(total=3)
+            new_race()
             print(self.players)
             while self.window.running:
                 done = False
@@ -198,14 +242,16 @@ class Game(Env):
                             done = True
                             break
 
-                self.cars.update_on_event(verbose=False)
+                self.cars.update_on_event(
+                    verbose=False, bot_inputs=pilot.act() if pilot is not None else None
+                )
 
                 state = np.round(self.cars.get_state(), decimals=4)
                 print(f"\rstate = {state[-1]}", end='')
 
                 if randomize or np.all(self.players.lives <= 0):
                     self.grid.random(self.config.max_attempts, self.config.min_tiles, self.config.seed)
-                    self.cars.reset(total=3)
+                    new_race()
 
                 self.window.render()
                 frame += 1

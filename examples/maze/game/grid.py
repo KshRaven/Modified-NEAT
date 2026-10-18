@@ -3,12 +3,19 @@ from collections import deque
 from typing import Any, Optional
 
 import numpy as np
+from numpy import ndarray as Array
 from pygame import Surface, draw
 
 from .config import GridConfig, TileConfig, overwrite_config
 from .functional import Position, Direction, CellType, ALL_DIRECTIONS, opposite, get_next_position
 from .tile import Cell
 from .constants import NP_INT, NP_FLOAT
+
+
+# ------------------------------------------------------------------
+# Numba Helper Functions
+# ------------------------------------------------------------------
+
 
 
 class Grid:
@@ -40,14 +47,23 @@ class Grid:
         self.width, self.height = self.cols * self.cell_size, self.rows * self.cell_size
         self.static = config.static
 
-        self.cells: np.ndarray = np.empty((self.rows, self.cols), dtype=object)
-        self.start_cell: Position = (0, 0)
-        self.goal_cell: Position = (0, 0)
-        self.trap_cells: set[Position] = set()
-        self.dist_to_goal: np.ndarray | None = None  # (rows, cols) int, BFS steps to goal
-        self.best_path: list[Position] = []          # shortest start->goal path (cells, in order)
-        self.checkpoint_cells: set[Position] = set()          # subset of best_path, for fast membership tests
-        self.checkpoint_order: list[Position] = []            # same cells, in path order (rewards/UI)
+        self.cells:  Array[tuple[int, int], Cell] = np.empty((self.rows, self.cols), dtype=object)
+        # Expanded topology: cell centers are at odd/odd coordinates.  Values
+        # are 0 for passages and 1 for walls/boundaries until cell types are
+        # written at the centers.
+        self._grid: Array = np.ones((self.rows * 2 + 1, self.cols * 2 + 1), dtype=NP_INT)
+        self.start_cell: Position               = (0, 0)
+        self.goal_cell: Position                = (0, 0)
+        self.trap_cells: set[Position]          = set()
+        self.dist_to_goal: Array | None         = None      # (rows, cols) int, BFS steps to goal
+        self.euclidean_to_goal: Array | None    = None      # (rows, cols) float
+        self.max_goal_distance: float           = 1.0
+        self.best_path: list[Position]          = []        # shortest start->goal path (cells, in order)
+        self.all_paths: list[list[Position]]    = []        # shortest path first
+        self.path_cells: set[Position]          = set()     # cells occurring in any mapped path
+        self.best_path_cells: set[Position]     = set()
+        self.checkpoint_cells: set[Position]    = set()     # bends, junctions, endpoints, traps
+        self.checkpoint_order: list[Position]   = []
 
         self.initialized = False
 
@@ -76,9 +92,11 @@ class Grid:
     # Generation
     # ------------------------------------------------------------------
 
-    def randomize(self, seed: Optional[int] = None, trap_ratio: float = 0.35,
-               goal_region_ratio: float = 0.34, braid_ratio: float = 0.08,
-               checkpoints: int = 10) -> None:
+    def randomize(
+            self, seed: Optional[int] = None, trap_ratio: float = 0.35,
+            goal_region_ratio: float = 0.34, braid_ratio: float = 0.08,
+            checkpoints: int = 10
+    ) -> None:
         """(Re-)generate a random maze: perfect maze via randomized DFS, optional
         braiding for loops, a goal placed in the center region, and traps at
         a subset of remaining dead ends."""
@@ -102,8 +120,9 @@ class Grid:
 
         self._place_traps(rng, trap_ratio)
         self._compute_distances()
-        self._compute_best_path()
+        self._compute_paths()
         self._place_checkpoints(checkpoints)
+        self._build_expanded_grid()
 
         self.initialized = True
 
@@ -206,68 +225,99 @@ class Grid:
         max_d = int(dist.max()) if dist.max() >= 0 else 1
         dist[dist == -1] = max_d + 1
         self.dist_to_goal = dist
+        goal_row, goal_col = self.goal_cell
+        rows, cols = np.indices((self.rows, self.cols), dtype=NP_FLOAT)
+        self.euclidean_to_goal = np.hypot(rows - goal_row, cols - goal_col).astype(NP_FLOAT)
+        self.max_goal_distance = float(self.dist_to_goal.max()) or 1.0
+
+    def goal_distance(self, pos: Position, use_euclidean: bool = False) -> float:
+        """Return maze-aware BFS distance or straight-line distance to goal."""
+        r, c = pos
+        return float(self.euclidean_to_goal[r, c] if use_euclidean else self.dist_to_goal[r, c])
+
+    def max_goal_distance_for(self, use_euclidean: bool = False) -> float:
+        """Return the maximum distance used to normalize the selected metric."""
+        if use_euclidean:
+            return float(self.euclidean_to_goal.max()) or 1.0
+        return self.max_goal_distance
+
+    def _compute_paths(self) -> None:
+        """Enumerate simple start->goal paths, with the shortest path first."""
+        paths: list[list[Position]] = []
+        limit = max(1, int(self.config.max_paths))
+
+        def visit(pos: Position, path: list[Position], visited: set[Position]) -> None:
+            if len(paths) >= limit:
+                return
+            if pos == self.goal_cell:
+                paths.append(path.copy())
+                return
+            for direction in ALL_DIRECTIONS:
+                if not self.can_move(pos, direction):
+                    continue
+                nxt = get_next_position(pos, direction)
+                if nxt not in visited:
+                    visited.add(nxt)
+                    path.append(nxt)
+                    visit(nxt, path, visited)
+                    path.pop()
+                    visited.remove(nxt)
+
+        visit(self.start_cell, [self.start_cell], {self.start_cell})
+        paths.sort(key=len)
+        self.all_paths = paths
+        self.best_path = paths[0] if paths else [self.start_cell]
+        self.best_path_cells = set(self.best_path)
+        self.path_cells = set().union(*(set(path) for path in paths)) if paths else set()
 
     def _compute_best_path(self) -> None:
-        """Reconstruct one shortest start->goal path by greedily following
-        `dist_to_goal` downhill from the start cell. Used as the reference
-        'best path' for checkpoint placement. If braiding created several
-        equally-short paths, this just picks whichever the greedy walk finds
-        first — good enough since checkpoints only need to sit somewhere
-        reasonable along a shortest path, not on a canonical one."""
-        path = [self.start_cell]
-        pos = self.start_cell
-        visited = {pos}
-        while pos != self.goal_cell:
-            cur_dist = int(self.dist_to_goal[pos])
-            nxt = None
-            for d in ALL_DIRECTIONS:
-                if not self.can_move(pos, d):
-                    continue
-                cand = get_next_position(pos, d)
-                if cand in visited:
-                    continue
-                if int(self.dist_to_goal[cand]) == cur_dist - 1:
-                    nxt = cand
-                    break
-            if nxt is None:
-                # Shouldn't happen in a connected maze, but guard against infinite loop.
-                break
-            path.append(nxt)
-            visited.add(nxt)
-            pos = nxt
-        self.best_path = path
+        """Compatibility wrapper for callers using the old private method."""
+        self._compute_paths()
 
     def _place_checkpoints(self, n: int) -> None:
-        """Pick up to `n` cells from the interior of `best_path` (excluding start
-        and goal), spread as evenly as possible along the path, and mark them
-        as checkpoints."""
+        """Mark every bend, junction, endpoint, and trap as a checkpoint.
+
+        The explicit count remains as a fallback for long straight corridors,
+        preserving the old reward-density control without hiding navigation
+        structure from the LiDAR state.
+        """
         self.checkpoint_cells = set()
         self.checkpoint_order = []
+        for r in range(self.rows):
+            for c in range(self.cols):
+                pos = (r, c)
+                degree = sum(self.can_move(pos, direction) for direction in ALL_DIRECTIONS)
+                open_dirs = [d for d in ALL_DIRECTIONS if self.can_move(pos, d)]
+                bend = degree == 2 and open_dirs[0] != opposite(open_dirs[1])
+                if degree != 2 or bend or self.cell(pos).type == CellType.TRAP:
+                    self.checkpoint_cells.add(pos)
 
-        interior = self.best_path[1:-1]  # drop start & goal
-        n = max(0, int(n))
-        if n <= 0 or not interior:
-            return
+        interior = [pos for pos in self.best_path[1:-1] if pos not in self.checkpoint_cells]
+        n = min(max(0, int(n)), len(interior))
+        if n:
+            idxs = np.linspace(0, len(interior) - 1, num=n)
+            self.checkpoint_cells.update(interior[int(round(i))] for i in idxs)
 
-        n = min(n, len(interior))
-        # Evenly spaced indices across the interior of the path.
-        idxs = np.linspace(0, len(interior) - 1, num=n)
-        seen_idx: set[int] = set()
-        for f in idxs:
-            i = int(round(f))
-            if i in seen_idx:
-                continue
-            seen_idx.add(i)
-            cell_pos = interior[i]
-            self.checkpoint_order.append(cell_pos)
-            self.checkpoint_cells.add(cell_pos)
+        self.checkpoint_order = [pos for pos in self.best_path if pos in self.checkpoint_cells]
+
+    def _build_expanded_grid(self) -> None:
+        """Build the wall/path topology around typed odd/odd cell centers."""
+        expanded = np.ones((self.rows * 2 + 1, self.cols * 2 + 1), dtype=NP_INT)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                expanded[2 * r + 1, 2 * c + 1] = self.cell((r, c)).type.value + 2
+                for direction in ALL_DIRECTIONS:
+                    if self.can_move((r, c), direction):
+                        nr, nc = get_next_position((r, c), direction)
+                        expanded[r + nr + 1, c + nc + 1] = 0
+        self._grid = expanded
 
     # ------------------------------------------------------------------
     # return_grid array builders
     # ------------------------------------------------------------------
 
-    def base_array_continuous(self) -> np.ndarray:
-        """(rows, cols, 7) float32 in [-1, 1]: wall_up, wall_right, wall_down, wall_left,
+    def base_array_continuous(self) -> Array:
+        """(rows, cols, 7) float in [-1, 1]: wall_up, wall_right, wall_down, wall_left,
         is_start, is_goal, is_trap. This is the STATIC base — no player position baked in
         (Agents.get_state() stamps that in per-genome)."""
         arr = np.full((self.rows, self.cols, 7), -1.0, dtype=NP_FLOAT)
@@ -302,7 +352,7 @@ class Grid:
         nn.Embedding over `Agents._get_compact_state()`'s discrete output."""
         return self.rows * self.cols * self.WALL_BITMASK_OPTIONS * 3 * 3
 
-    def base_array_discrete(self) -> np.ndarray:
+    def base_array_discrete(self) -> Array:
         """(rows, cols) int: a single combined code per cell —
         code = wall_bitmask * cell_type_options + cell_type_code, where
         wall_bitmask is in [0, 15] (bit0=UP,bit1=RIGHT,bit2=DOWN,bit3=LEFT) and
@@ -319,6 +369,20 @@ class Grid:
                         bitmask |= (1 << i)
                 arr[r, c] = bitmask * n_types + cell.type.value
         return arr
+
+    def expanded_array_discrete(self) -> Array:
+        """Return the expanded integer topology, including typed cell centers."""
+        return self._grid.copy()
+
+    def expanded_array_continuous(self) -> Array:
+        """Return the expanded topology normalized to [-1, 1]."""
+        out = np.full(self._grid.shape, -1.0, dtype=NP_FLOAT)
+        out[self._grid == 0] = -0.5  # passage
+        out[self._grid == 2] = 0.0   # normal cell
+        out[self._grid == 3] = -1.0  # start
+        out[self._grid == 4] = 1.0   # goal
+        out[self._grid == 5] = 0.5   # trap
+        return out
 
     # ------------------------------------------------------------------
     # Rendering

@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.nn.base import NeatModule, NeatParameter, check_for_illegal_zeros
 from ModifiedNEAT.nn.genome import Genome
 from ModifiedNEAT.config import Config
@@ -26,7 +25,7 @@ GENOME   = Genome.class_type.instance_type
 GENOME_LIST = types.ListType(GENOME)
 
 
-@njit(nogil=True)
+@njit(parallel=True) # , cache=True)
 def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_size: int, min_species_size: int,
                   purge: int, generation: int):
     """Compute the proper number of offspring per species (proportional to fitness)."""
@@ -34,7 +33,10 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
         raise ValueError(f"Mismatch in reproduction data")
 
     af_sum = sum(adjusted_fitness)
-    spawn_amounts = []
+    # NOTE: pre-sized and written by index (instead of .append()) so each prange
+    #       iteration only ever touches its own slot - .append() from a real
+    #       parallel loop would race and scramble the species <-> amount alignment.
+    spawn_amounts = [0 for _ in range(len(adjusted_fitness))]
 
     for idx in prange(len(adjusted_fitness)):
         af = adjusted_fitness[idx]
@@ -54,22 +56,34 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
         elif d < 0:
             spawn_amount -= 1
 
-        spawn_amounts.append(spawn_amount)
+        spawn_amounts[idx] = spawn_amount
 
     # Normalize the spawn amounts so that the next generation is roughly the population size requested by the user.
     total_spawn = sum(spawn_amounts)
     norm = pop_size / total_spawn
-    spawn_amounts = [max(min_species_size, int(round(n * norm))) for n in spawn_amounts]
+    for idx in prange(len(spawn_amounts)):
+        spawn_amounts[idx] = max(min_species_size, int(round(spawn_amounts[idx] * norm)))
 
     # Limit to min_species_size when enabled
     if purge > 0:
         if generation % purge == 0:
-            spawn_amounts = [min_species_size for _ in spawn_amounts]
+            for idx in prange(len(spawn_amounts)):
+                spawn_amounts[idx] = min_species_size
 
     return spawn_amounts
 
 
 @njit(nogil=True)
+# TODO: Left as nogil rather than parallel=True. The `for spawn_index in prange(spawn):`
+#       loop near the bottom looks like the array kernels above but writes each
+#       child into the shared typed dicts `genus_population`/`ancestors` (unsafe
+#       under real concurrent writes the same way update_dict() is), and it also
+#       reads/increments the single running counter `available_gid` for child ids.
+#       That id allocation could be made parallel-safe (e.g. gid = base_gid +
+#       spawn_index, computed once before the loop), but the shared-dict writes
+#       still need a redesign (e.g. collect into a pre-sized array of children and
+#       merge into the dict afterwards single-threaded) before this can safely
+#       move to parallel=True, so it's left untouched here.
 def create_children(genus: int, genus_population: dict[int, Genome], population: dict[int, Genome], species: dict[int, Species],
                     available_gid: int, spawn_amounts: list[int], remaining_species: list[Species], to_delete: list[int],
                     elitism: float, survival_threshold: float, clone_threshold: float, cross_threshold: float,
@@ -288,69 +302,74 @@ def _crossover(value1: float, value2: float, states: CPUArray, index: int):
         return value2
 
 
-@njit(nogil=True)
+@njit(parallel=True) # , cache=True) # nogil=True)
+# TODO: Caching seems to work for now since no custom Classes or prints are used
 def crossover(genus: int, source: CPUArray, updates: CPUArray, parents: CPUArray, genera: CPUArray, filled: CPUArray,
               probabilities: CPUArray, equal_sources: bool):
-    if updates.ndim != 3:
-        raise ValueError(f"Expected a 3D array, got {updates.ndim}")
+    # TODO: Ensure no breaks, raises or other multiple return points in order for parallel to work.
+    #       Avoid assertions too even though most uses have not raised NumbaPerformanceWarning.
+    ret_code: int = 0
+    if updates.ndim != 3: ret_code = 1
 
-    s_g, s_x, s_y = updates.shape # cuda.gridsize(3)
-    # Parameter shape (genomes, *spatial_dims)
-    g_lim = updates.shape[0]
-    x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
-    y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
+    if not ret_code:
+        s_g, s_x, s_y = updates.shape # cuda.gridsize(3)
+        # Parameter shape (genomes, *spatial_dims)
+        g_lim = updates.shape[0]
+        x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
+        y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
 
-    indices, total = get_enumeration(updates)
-    for i in prange(total):
-        genome_idx, x, y = indices[i]
+        indices, total = get_enumeration(updates)
+        for i in prange(total):
+            genome_idx, x, y = indices[i]
 
-        # Linearized thread index
-        rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+            # Linearized thread index
+            rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
-        if genome_idx < g_lim and x < x_lim and y < y_lim:
-            parent0, parent1, parent_   = parents[genome_idx]
-            genus0, genus1, genus_      = genera[genome_idx]
-            filled0, filled1, filled_   = filled[genome_idx, x, y]
-            if equal_sources or (genus0 == genus1 == genus):
-                # For elite genomes or clones
-                if (parent0 == parent1) and (genus == genus0 == genus1):
-                    value = source[parent0, x, y]
-                    filled[genome_idx, x, y, :2] = True
-                # For child crossover
+            if genome_idx < g_lim and x < x_lim and y < y_lim:
+                parent0, parent1, parent_   = parents[genome_idx]
+                genus0, genus1, genus_      = genera[genome_idx]
+                filled0, filled1, filled_   = filled[genome_idx, x, y]
+                if equal_sources or (genus0 == genus1 == genus):
+                    # For elite genomes or clones
+                    if (parent0 == parent1) and (genus == genus0 == genus1):
+                        value = source[parent0, x, y]
+                        filled[genome_idx, x, y, :2] = True
+                    # For child crossover
+                    else:
+                        already_filled = filled0 or filled1
+
+                        # If not filled, fill from current available source
+                        value = updates[genome_idx, x, y].item() # Get value in case param has been filled from another source
+                        if not already_filled:
+                            if genus == genus0:
+                                value = source[parent0, x, y]
+                                filled[genome_idx, x, y, 0] = filled0 = True
+                            elif genus == genus1:
+                                value = source[parent1, x, y]
+                                filled[genome_idx, x, y, 1] = filled1 = True
+
+                        # Crossover when both parents' values are available
+                        if genus == genus0 and not filled0 and filled1:
+                            value_c = source[parent0, x, y].item()
+                            value = _crossover(value, value_c, probabilities, rng_index)
+                            filled[genome_idx, x, y, 0] = True
+                        if genus == genus1 and not filled1 and filled0:
+                            value_c = source[parent1, x, y].item()
+                            value = _crossover(value, value_c, probabilities, rng_index)
+                            filled[genome_idx, x, y, 1] = True
                 else:
-                    already_filled = filled0 or filled1
+                    # Emergency fill on unmatched param groups
+                    if not filled_ and genus == genus_:
+                        # TODO: Should random emergency parents be used instead of random cloning?
+                        value = source[parent_, x, y]
+                        filled[genome_idx, x, y, 2] = True
+                    else:
+                        value = updates[genome_idx, x, y]
 
-                    # If not filled, fill from current available source
-                    value = updates[genome_idx, x, y].item() # Get value in case param has been filled from another source
-                    if not already_filled:
-                        if genus == genus0:
-                            value = source[parent0, x, y]
-                            filled[genome_idx, x, y, 0] = filled0 = True
-                        elif genus == genus1:
-                            value = source[parent1, x, y]
-                            filled[genome_idx, x, y, 1] = filled1 = True
+                updates[genome_idx, x, y] = value
+            else: ret_code = 2
 
-                    # Crossover when both parents' values are available
-                    if genus == genus0 and not filled0 and filled1:
-                        value_c = source[parent0, x, y].item()
-                        value = _crossover(value, value_c, probabilities, rng_index)
-                        filled[genome_idx, x, y, 0] = True
-                    if genus == genus1 and not filled1 and filled0:
-                        value_c = source[parent1, x, y].item()
-                        value = _crossover(value, value_c, probabilities, rng_index)
-                        filled[genome_idx, x, y, 1] = True
-            else:
-                # Emergency fill on unmatched param groups
-                if not filled_ and genus == genus_:
-                    # TODO: Should random emergency parents be used instead of random cloning?
-                    value = source[parent_, x, y]
-                    filled[genome_idx, x, y, 2] = True
-                else:
-                    value = updates[genome_idx, x, y]
-
-            updates[genome_idx, x, y] = value
-        else:
-            raise ValueError("Out of bounds")
+    return ret_code
 
 
 def update_children(
@@ -381,14 +400,22 @@ def update_children(
             emeg_key = np.random.choice(emergency_keys, p=emergency_prob)
             if genome.key in old_population:
                 sources[index] = (old_mapping[key], old_mapping[key], old_mapping[key])
-                genera[index]  = (genus_mapping[genome.genus], genus_mapping[genome.genus], genus_mapping[genus])
+                # NOTE: genera must store RAW genus IDs, not genus_mapping indices.
+                # crossover() only ever compares these against the raw genus ids it
+                # receives (see the `genus_` loop below), never uses them to index
+                # into an array. Mapping them here made the equality checks inside
+                # crossover() fail whenever a genus's id didn't coincide with its
+                # position in modules.keys() (e.g. after an earlier genus went
+                # extinct and the enumeration shifted) - silently leaving
+                # array_update at its 0.0 fill value for that genus.
+                genera[index]  = (genome.genus, genome.genus, genus)
             else:
                 parent1, parent2 = ancestors[key]
                 if parent1.fitness < parent2.fitness:
                     parent1, parent2 = parent2, parent1
                 mapping1, mapping2 = modules[parent1.genus].mapping, modules[parent2.genus].mapping
                 sources[index] = (mapping1[parent1.key], mapping2[parent2.key], old_mapping[emeg_key])
-                genera[index]  = (genus_mapping[parent1.genus], genus_mapping[parent2.genus], genus)
+                genera[index]  = (parent1.genus, parent2.genus, genus)
     except Exception as e:
         for m in modules.values():
             print(m.mapping)
@@ -450,7 +477,7 @@ def update_children(
             # ------------------------------ Sending data to GPU ------------------------------ #
             # TODO: Re-enable this if necessary after testing if it raises error in crossover
             # ctype = cp.float32 if genus_param.dtype == torch.float32 else cp.float64
-            array_update, original_shape = reshape(np.zeros((len(new_population), *genus_param.original_shape),)) # ctype))
+            array_update, original_shape = reshape(np.full((len(new_population), *genus_param.original_shape), 0.0)) # ctype))
             array_sources = tuple([np.asarray(reshape(p.data.clone().to(dtype))[0]) for p in param_group])
             # ------------------------------ Define crossover kernel and randomizer values ------------------------------ #
             genome_num = len(new_population)
@@ -470,9 +497,11 @@ def update_children(
                     if config.reproduction.cross_threshold == 0.0 and genus_ != genus:
                         continue
                     updates_total += 1
-                    crossover(
+                    ret_code = crossover(
                         genus_, source_, array_update, sources, genera, filled, probabilities, equal_params
                     )
+                    if ret_code == 1: raise ValueError(f"Expected a 3D array, got {array_update.ndim}")
+                    if ret_code == 2: raise ValueError("Out of bounds")
 
                 # There shouldn't be any zero values when epsilon or weight deletion is enabled for parameters
                 try:
@@ -501,7 +530,7 @@ def update_children(
             ], axis=0)
             normals = get_rng_states(kernel_shape, seed, get_normal=True)[0]
             # ------------------------------ Run mutation using configuration ------------------------------ #
-            mutate(
+            ret_code = mutate(
                 array_update, child_filter, config.genome.weight_mutate_rate, config.genome.weight_mutate_power,
                 config.genome.weight_replace_rate, init_type,
                 config.genome.weight_init_mean, config.genome.weight_init_std,
@@ -510,6 +539,8 @@ def update_children(
                 config.genome.weight_add_prob, config.genome.weight_del_prob, config.genome.param_epsilon,
                 probabilities, normals,
             )
+            if ret_code == 1: raise ValueError(f"Expected a 3D array, got {array_update.ndim}")
+            if ret_code == 2: raise ValueError("Out of bounds")
             epsilon = config.genome.param_epsilon
             zero_values = np.abs(array_update) < epsilon
             array_update[zero_values & (array_update >= 0)] = epsilon

@@ -1,4 +1,3 @@
-
 from .functional import clamp, prob, normal, get_enumeration
 from .initialization import initialize_genome
 
@@ -68,7 +67,7 @@ def mutate_genome(parameter: CPUArray, g: int, x: int, y: int, mutate_rate: floa
         )
 
 
-@njit(nogil=True)
+@njit(parallel=True) # , cache=True) # nogil=True)
 def mutate(
         updates: CPUArray, children: CPUArray,
         mutate_rate: float, mutate_power: float,
@@ -77,30 +76,33 @@ def mutate(
         probabilities: tuple[CPUArray, ...], normals: CPUArray,
         # debugging: CPUArray
 ):
-    if updates.ndim != 3:
-        raise ValueError(f"Expected a 3D array, got {updates.ndim}")
+    ret_code: int = 0
+    if updates.ndim != 3: ret_code = 1
 
-    s_g, s_x, s_y = updates.shape
-    # Parameter shape (genomes, *spatial_dims)
-    g_lim = updates.shape[0]
-    x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
-    y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
+    if not ret_code:
+        s_g, s_x, s_y = updates.shape
+        # Parameter shape (genomes, *spatial_dims)
+        g_lim = updates.shape[0]
+        x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
+        y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
 
-    indices, total = get_enumeration(updates)
-    for i in prange(total):
-        genome_idx, x, y = indices[i]
+        indices, total = get_enumeration(updates)
+        for i in prange(total):
+            genome_idx, x, y = indices[i]
 
-        # Linearized thread index
-        rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+            # Linearized thread index
+            rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
-        if genome_idx < g_lim and x < x_lim and y < y_lim:
-            if children[genome_idx] is True:
-                mutate_genome(
-                    updates, genome_idx, x, y,
-                    mutate_rate, mutate_power,
-                    replace_rate, init_type, mean, std, minimum, maximum,
-                    ssm, add_param, delete_param, epsilon,
-                    probabilities, normals, rng_index
-                )
-        else:
-            raise ValueError("Out of bounds")
+            if genome_idx < g_lim and x < x_lim and y < y_lim:
+                if children[genome_idx] is True:
+                    mutate_genome(
+                        updates, genome_idx, x, y,
+                        mutate_rate, mutate_power,
+                        replace_rate, init_type, mean, std, minimum, maximum,
+                        ssm, add_param, delete_param, epsilon,
+                        probabilities, normals, rng_index
+                    )
+            else:
+                ret_code = 2
+
+    return ret_code

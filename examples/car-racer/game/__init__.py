@@ -27,7 +27,8 @@ from .constants import (
 # Configuration
 from .config import (
     Configuration, CarConfig, GridConfig, TileConfig, WindowConfig, 
-    EnvironmentConfig, GenConfig, PlayerConfig
+    EnvironmentConfig, GenConfig, PlayerConfig,
+    RaceConfig, StartGridConfig, SlipstreamConfig, CollisionConfig, CountdownConfig,
 )
 
 # Utilities
@@ -54,6 +55,7 @@ __all__ = [
     # Configuration
     'Configuration', 'CarConfig', 'GridConfig', 'TileConfig', 'WindowConfig', 
     'EnvironmentConfig', 'GenConfig', 'PlayerConfig',
+    'RaceConfig', 'StartGridConfig', 'SlipstreamConfig', 'CollisionConfig', 'CountdownConfig',
     
     # Colors
     'COLOR_ROAD', 'COLOR_GRASS', 'COLOR_CURB_PRI', 'COLOR_CURB_SEC',

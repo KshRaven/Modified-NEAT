@@ -63,6 +63,8 @@ class GridConfig(Configuration):
         self.grid_size: tuple[int, int] = tuple(self.params.get("grid_size", (16, 16)))  # (cols, rows)
         self.cell_size: int = self.params.get("cell_size", 40)
         self.static: bool = self.params.get("static", False)
+        # Safety bound for enumerating simple start->goal paths in braided mazes.
+        self.max_paths: int = self.params.get("max_paths", 1024)
 
         self.tile: TileConfig = TileConfig(params=self.params.get("tile", {}))
 
@@ -150,6 +152,9 @@ class AgentConfig(Configuration):
         self.sensor_count: int     = self.params.get("sensor_count", 8)
         self.sensor_max_cells: int = self.params.get("sensor_max_cells", 6)
 
+        # False uses maze-aware BFS distance; True uses straight-line distance.
+        self.use_euclidean_distance: bool = self.params.get("use_euclidean_distance", False)
+
         # ---- Behavior flags ---------------------------------------------------
         self.wall_bump_ends_episode: bool = self.params.get("wall_bump_ends_episode", False)
 
@@ -166,6 +171,13 @@ class WindowConfig(Configuration):
         self.font_size: int     = self.params.get("font_size", 20)
         self.draw_path: bool    = self.params.get("draw_path", True)
         self.path_length: int   = self.params.get("path_length", 200)  # trail length, in cells
+        self.draw_best_path: bool = self.params.get("draw_best_path", True)
+        self.best_path_color: tuple[int, int, int] = tuple(
+            self.params.get("best_path_color", (40, 220, 220))
+        )
+        self.best_path_width: int = self.params.get("best_path_width", 4)
+        self.draw_lidar: bool = self.params.get("draw_lidar", True)
+        self.lidar_width: int = self.params.get("lidar_width", 2)
         self.blob_radius_ratio: float = self.params.get("blob_radius_ratio", 0.28)  # of cell_size
 
 
@@ -181,33 +193,42 @@ class RewardConfig(Configuration):
 
         # ── Potential-based progress reward ─────────────────────────────
         # Reward per cell of new-best distance improvement is scaled by (lives + 1).
-        self.progress_multiplier: float = self.params.get("progress_multiplier", 5.0)
+        self.progress_multiplier: float = self.params.get("progress_multiplier", 3.0)
 
         # ── Per-step penalty (encourages speed) ─────────────────────────
-        self.step_penalty: float = self.params.get("step_penalty", 0.2)
+        self.step_penalty: float = self.params.get("step_penalty", 0.1)
 
         # ── Wall-bump penalty ────────────────────────────────────────────
-        self.wall_bump_penalty: float = self.params.get("wall_bump_penalty", 1.0)
+        self.wall_bump_penalty: float = self.params.get("wall_bump_penalty", 0.5)
 
         # ── Stagnation (hiatus limit reached) ───────────────────────────
-        self.stagnation_penalty: float = self.params.get("stagnation_penalty", 50.0)
+        self.stagnation_penalty: float = self.params.get("stagnation_penalty", 40.0)
 
         # ── Trap penalty, scaled by (deaths + 1) ────────────────────────
-        self.trap_penalty: float = self.params.get("trap_penalty", 100.0)
+        self.trap_penalty: float = self.params.get("trap_penalty", 75.0)
 
         # ── Goal reward ──────────────────────────────────────────────────
         # Base + (time_bonus * weight), both multiplied by (lives + 1).
-        self.goal_base_reward: float = self.params.get("goal_base_reward", 1000.0)
-        self.goal_time_bonus_weight: float = self.params.get("goal_time_bonus_weight", 1000.0)
+        self.goal_base_reward: float = self.params.get("goal_base_reward", 600.0)
+        self.goal_time_bonus_weight: float = self.params.get("goal_time_bonus_weight", 900.0)
         # frames_done / goal_time_bonus_frame_norm sets how fast the time bonus decays
-        self.goal_time_bonus_frame_norm: float = self.params.get("goal_time_bonus_frame_norm", 1000.0)
+        self.goal_time_bonus_frame_norm: float = self.params.get("goal_time_bonus_frame_norm", 500.0)
         self.goal_time_bonus_min: float = self.params.get("goal_time_bonus_min", 0.1)
         self.goal_time_bonus_max: float = self.params.get("goal_time_bonus_max", 1.0)
 
         # ── Checkpoint reward ────────────────────────────────────────────
         # Given once per genome, the first time it touches each checkpoint cell
         # along the best path. Scaled by (lives + 1), like the progress reward.
-        self.checkpoint_reward: float = self.params.get("checkpoint_reward", 150.0)
+        self.checkpoint_reward: float = self.params.get("checkpoint_reward", 25.0)
+        self.best_path_checkpoint_reward: float = self.params.get(
+            "best_path_checkpoint_reward", self.checkpoint_reward
+        )
+        self.alternate_checkpoint_reward: float = self.params.get("alternate_checkpoint_reward", 5.0)
+        self.path_deviation_penalty: float = self.params.get("path_deviation_penalty", 3.0)
+        self.dead_end_penalty: float = self.params.get("dead_end_penalty", 20.0)
+        self.hiatus_death_penalty: float = self.params.get(
+            "hiatus_death_penalty", self.params.get("stagnation_penalty", 40.0)
+        )
 
         # ── Goal-hold reward ─────────────────────────────────────────────
         # A player that already reached the goal stops moving, but the episode
@@ -217,7 +238,13 @@ class RewardConfig(Configuration):
         # so genomes that finish EARLIER don't end up with a lower return than
         # ones that finish later just because they racked up more idle
         # step-penalty frames while waiting for the episode to end.
-        self.goal_hold_reward: float = self.params.get("goal_hold_reward", 5.0)
+        self.goal_hold_reward: float = self.params.get("goal_hold_reward", 2.0)
+
+        # Scale only rewards returned by the environment. Internal fitness keeps
+        # its original magnitude for population ranking and checkpoint saves.
+        self.reward_scale: float = float(self.params.get("reward_scale", 0.01))
+        if self.reward_scale < 0:
+            raise ValueError("reward_scale must be non-negative")
 
         # ── Score bookkeeping (separate from fitness; see Players.scores) ──
         self.score_goal: int = self.params.get("score_goal", 10)
@@ -231,7 +258,7 @@ class PlayerConfig(Configuration):
         super().__init__(params=params, file=file)
 
         self.lives: int = self.params.get("lives", 3)
-        self.max_hiatus: int = self.params.get("max_hiatus", 50)   # steps w/o progress toward goal
+        self.max_hiatus: int | None = self.params.get("max_hiatus", 20)   # steps without a new checkpoint
         self.max_frames: int = self.params.get("max_frames", 1000)  # steps == frames (1 step = 1 cell decision)
 
         self.reward: RewardConfig = RewardConfig(params=self.params.get("reward", {}))
@@ -251,13 +278,13 @@ class EnvironmentConfig(Configuration):
         self.seed: int | None   = self.params.get("seed", None)
         self.trap_ratio: float  = self.params.get("trap_ratio", 0.35)
         self.goal_region_ratio: float = self.params.get("goal_region_ratio", 0.34)
-        self.braid_ratio: float = self.params.get("braid_ratio", 0.15)
+        self.braid_ratio: float = self.params.get("braid_ratio", 0.25)
         self.checkpoints: int   = self.params.get("checkpoints", 10)
 
         # Gameplay
         self.lives: int         = self.params.get("lives", 5)
-        self.max_hiatus: int    = self.params.get("max_hiatus", 20)
-        self.max_frames: int    = self.params.get("max_frames", 500)
+        self.max_hiatus: int    = self.params.get("max_hiatus", 50)
+        self.max_frames: int    = self.params.get("max_frames", 1000)
         # Episode doesn't terminate the instant ONE player reaches the goal —
         # it keeps running until `first_winners` players have reached it (or
         # everyone is disqualified/timed out). A finished player stops moving

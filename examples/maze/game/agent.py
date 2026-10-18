@@ -6,11 +6,17 @@ from numpy import ndarray as Array
 
 from .config import AgentConfig, overwrite_config
 from .functional import (
-    Direction, CellType, ALL_DIRECTIONS, get_next_position, vector_to_direction,
+    Direction, CellType, ALL_DIRECTIONS, get_next_position,
 )
 from .constants import NP_INT, NP_FLOAT
 from .grid import Grid
 from .player import Players
+
+
+# ------------------------------------------------------------------
+# Numba Helper Functions
+# ------------------------------------------------------------------
+
 
 
 # 8 principal directions (row, col) deltas, used only for the continuous compact
@@ -20,6 +26,17 @@ from .player import Players
 _SENSOR_DELTAS: list[tuple[int, int]] = [
     (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1),
 ]
+
+LIDAR_WALL          = 0
+LIDAR_PATH          = 1
+LIDAR_ALTERNATE     = 2
+LIDAR_CHECKPOINT    = 3
+LIDAR_START         = 4
+LIDAR_GOAL          = 5
+LIDAR_TRAP          = 6
+LIDAR_DEAD_END      = 7
+LIDAR_TYPES         = 8
+LIDAR_DISTANCE_BINS = 10
 
 
 class Agents:
@@ -34,10 +51,9 @@ class Agents:
       config.return_grid      -> whole-grid array observation instead of compact features
       config.reset_on_death   -> respawn at start cell on trap death, vs continue in place
 
-    When `discrete_states` is True, `get_state()` returns a single combined integer
-    code per cell/genome (shape (N, *grid_dims) in grid mode, (N,) in compact mode) —
-    no extra trailing channel/feature dimension — so the output is directly usable as
-    an nn.Embedding index. `self.max_options` (int32) holds the corresponding
+    When `discrete_states` is True, `get_state()` returns integer features or grid
+    cell IDs (shape (N, *grid_dims) in grid mode, (N, 10) in compact mode), so the
+    output is directly usable as an nn.Embedding index. `self.max_options` holds the corresponding
     vocab_size once `reset()` has been called; it's None whenever `discrete_states`
     is False (continuous observations don't have a vocab size).
     """
@@ -59,6 +75,7 @@ class Agents:
         self.action_cutoff: float           = config.action_cutoff
         self.sensor_count: int              = max(1, min(8, config.sensor_count))
         self.sensor_max_cells: int          = config.sensor_max_cells
+        self.use_euclidean_distance: bool   = config.use_euclidean_distance
         self.wall_bump_ends_episode: bool   = config.wall_bump_ends_episode
 
         self.total              = 1
@@ -103,15 +120,17 @@ class Agents:
 
         if self.return_grid:
             self._base_grid_arr = (
-                self.grid.base_array_discrete() if self.discrete_states
-                else self.grid.base_array_continuous()
+                self.grid.expanded_array_discrete()
+                if self.discrete_states else
+                self.grid.expanded_array_continuous()
             )
 
         if self.discrete_states:
             # +1 factor of 2 in the grid case accounts for the stamped-in is_player bit.
             vocab_size = (
-                self.grid.discrete_cell_vocab_size * 2 if self.return_grid
-                else self.grid.compact_discrete_vocab_size
+                max(int(self._base_grid_arr.max()) + 2, 10)
+                if self.return_grid else
+                max(LIDAR_DISTANCE_BINS, LIDAR_TYPES)
             )
             self.max_options = np.int32(vocab_size)
         else:
@@ -131,21 +150,26 @@ class Agents:
                 v = max(0, min(3, v))
                 directions.append(Direction(v))
         else:
-            vecs = np.asarray(actions).reshape(self.total, -1)[:, :2]
+            # Continuous-action mode uses four unbounded direction scores
+            # (UP, RIGHT, DOWN, LEFT), not a bounded 2D movement vector.
+            logits = np.asarray(actions).reshape(self.total, -1)[:, :4]
             for i in range(self.total):
-                dx, dy = float(vecs[i, 0]), float(vecs[i, 1])  # dx=col axis, dy=row axis
-                directions.append(vector_to_direction(dx, dy, cutoff=self.action_cutoff))
+                directions.append(Direction(int(np.argmax(logits[i]))))
         return directions
 
     def update(self, actions: Array, verbose: bool = False):
-        active = self.players.active
-        directions = self._resolve_directions(actions)
+        # TODO: Numbafy
+        active      = self.players.active
+        directions  = self._resolve_directions(actions)
 
-        bumped = np.full((self.total,), False, dtype=bool)
-        moved = np.full((self.total,), False, dtype=bool)
-        reached_goal = np.full((self.total,), False, dtype=bool)
-        hit_trap = np.full((self.total,), False, dtype=bool)
-        reached_checkpoint = np.full((self.total,), False, dtype=bool)
+        bumped              = np.full((self.total,), False, dtype=bool)
+        moved               = np.full((self.total,), False, dtype=bool)
+        reached_goal        = np.full((self.total,), False, dtype=bool)
+        hit_trap            = np.full((self.total,), False, dtype=bool)
+        reached_checkpoint  = np.full((self.total,), False, dtype=bool)
+        best_path_checkpoint = np.full((self.total,), False, dtype=bool)
+        deviated_path       = np.full((self.total,), False, dtype=bool)
+        entered_dead_end    = np.full((self.total,), False, dtype=bool)
 
         for i in range(self.total):
             if not active[i]:
@@ -170,16 +194,24 @@ class Agents:
                 if (nr, nc) in self.grid.checkpoint_cells and (nr, nc) not in self.visited_checkpoints[i]:
                     self.visited_checkpoints[i].add((nr, nc))
                     reached_checkpoint[i] = True
+                    best_path_checkpoint[i] = (nr, nc) in self.grid.best_path_cells
+                if (nr, nc) not in self.grid.best_path_cells:
+                    deviated_path[i] = True
+                if (nr, nc) not in self.grid.path_cells:
+                    entered_dead_end[i] = True
             else:
                 bumped[i] = True
 
         self.last_bumped, self.last_moved = bumped, moved
 
         dist_to_goal = self.grid.dist_to_goal[self.row, self.col].astype(NP_FLOAT)
-        self.players.update(dist_to_goal, reached_goal, hit_trap, bumped, moved, reached_checkpoint)
-
-        if self.wall_bump_ends_episode:
-            self.players.disqualified[bumped & active] = True
+        self.players.update(
+            dist_to_goal, reached_goal, hit_trap, bumped, moved,
+            reached_checkpoint=reached_checkpoint,
+            best_path_checkpoint=best_path_checkpoint,
+            deviated_path=deviated_path,
+            entered_dead_end=entered_dead_end,
+        )
 
         # ── reset_on_death: respawn at start if the genome still has lives left ──
         respawn = hit_trap & (self.players.lives > 0) & self.reset_on_death
@@ -208,84 +240,99 @@ class Agents:
         else:                return self._get_compact_state()
 
     def _get_grid_state(self) -> Array:
-        """One full grid array PER genome, with that genome's own position stamped in."""
+        """One expanded topology array per genome, with its position stamped in."""
         base = self._base_grid_arr
-        rows, cols = self.grid.rows, self.grid.cols
-
         if self.discrete_states:
-            # (N, rows, cols) int: single combined code per cell —
-            # base cell code (wall_bitmask, cell_type) folded together with an
-            # is_player_here bit: code = base_code * 2 + is_player_here.
-            # Embedding-ready as-is; vocab_size = self.max_options.
-            out = np.repeat(base[None, :, :], self.total, axis=0).astype(NP_INT) * 2
+            # 0=passage, 1=wall/boundary, 2..5=cell types, 6=player.
+            out = np.repeat(base[None, :, :], self.total, axis=0).astype(NP_INT)
             for i in range(self.total):
-                out[i, self.row[i], self.col[i]] += 1
+                out[i, 2 * self.row[i] + 1, 2 * self.col[i] + 1] = len(CellType) + 2
             return out
         else:
-            # (N, rows, cols, 8) float32 in [-1, 1]: base 7 channels + player-occupancy channel
-            out = np.full((self.total, rows, cols, 8), -1.0, dtype=NP_FLOAT)
-            out[:, :, :, :7] = base[None, :, :, :]
+            out = np.repeat(base[None, :, :], self.total, axis=0).astype(NP_FLOAT)
             for i in range(self.total):
-                out[i, self.row[i], self.col[i], 7] = 1.0
-            return np.permute_dims(out, axes=(0, 3, 1, 2))
+                out[i, 2 * self.row[i] + 1, 2 * self.col[i] + 1] = 1.0
+            return out[:, None, :, :]
 
-    def _cast_sensors(self, row: int, col: int) -> list[float]:
-        """Wall-distance sensor readings (in whole cells) along up to 8 principal directions."""
-        readings = []
-        step = max(1, 8 // self.sensor_count)
-        deltas = _SENSOR_DELTAS[::step][: self.sensor_count]
-        for dr, dc in deltas:
-            r, c = row, col
-            dist = 0
-            for _ in range(self.sensor_max_cells):
-                cardinal_ok = True
-                if dr != 0:
-                    d_v = Direction.DOWN if dr > 0 else Direction.UP
-                    cardinal_ok &= self.grid.can_move((r, c), d_v)
-                if dc != 0:
-                    d_h = Direction.RIGHT if dc > 0 else Direction.LEFT
-                    cardinal_ok &= self.grid.can_move((r, c), d_h)
-                if not cardinal_ok:
-                    break
-                r, c = r + dr, c + dc
-                dist += 1
-            readings.append(dist / float(self.sensor_max_cells))
-        return readings
+    def _cell_lidar_type(self, pos: tuple[int, int]) -> int:
+        cell = self.grid.cell(pos)
+        if cell.type == CellType.START:
+            return LIDAR_START
+        if cell.type == CellType.GOAL:
+            return LIDAR_GOAL
+        if cell.type == CellType.TRAP:
+            return LIDAR_TRAP
+        if pos in self.grid.checkpoint_cells:
+            degree = sum(self.grid.can_move(pos, d) for d in ALL_DIRECTIONS)
+            return LIDAR_DEAD_END if degree <= 1 else LIDAR_CHECKPOINT
+        return LIDAR_PATH
+
+    def _cast_lidar(self, row: int, col: int, direction: Direction) -> tuple[int, int]:
+        """Return (cell distance, target type) for one cardinal beam."""
+        pos = (row, col)
+        if not self.grid.can_move(pos, direction):
+            return 0, LIDAR_WALL
+
+        saw_alternate = False
+        distance = 0
+        while self.grid.can_move(pos, direction):
+            pos = get_next_position(pos, direction)
+            distance += 1
+            target_type = self._cell_lidar_type(pos)
+            if target_type != LIDAR_PATH:
+                if target_type in (LIDAR_CHECKPOINT, LIDAR_DEAD_END) and pos not in self.grid.best_path_cells:
+                    target_type = LIDAR_ALTERNATE
+                return distance, target_type
+            if pos not in self.grid.best_path_cells:
+                saw_alternate = True
+
+        return distance, LIDAR_ALTERNATE if saw_alternate else LIDAR_DEAD_END
+
+    @staticmethod
+    def _distance_bin(distance: int, maximum: int) -> int:
+        if distance <= 0:
+            return 0
+        return min(9, max(1, int(np.ceil(distance / max(1, maximum) * 9))))
+
+    @staticmethod
+    def _type_value(type_code: int) -> float:
+        return {
+            LIDAR_WALL: -1.0, LIDAR_PATH: -0.5, LIDAR_ALTERNATE: -0.25,
+            LIDAR_CHECKPOINT: 0.0, LIDAR_START: -1.0, LIDAR_GOAL: 1.0,
+            LIDAR_TRAP: 0.5, LIDAR_DEAD_END: 0.25,
+        }[type_code]
+
+    @staticmethod
+    def _cell_type_value(cell_type: CellType) -> float:
+        return {
+            CellType.EMPTY: 0.0, CellType.START: -1.0,
+            CellType.GOAL: 1.0, CellType.TRAP: 0.5,
+        }[cell_type]
 
     def _get_compact_state(self) -> Array:
-        rows, cols = self.grid.rows, self.grid.cols
-        gr, gc = self.grid.goal_cell
-        max_dist = float(self.grid.dist_to_goal.max()) or 1.0
-
-        if self.discrete_states:
-            # (N,) int: single combined code per genome, folding together
-            # row, col, wall_up, wall_right, wall_down, wall_left,
-            # goal_row_sign(0/1/2), goal_col_sign(0/1/2) via mixed-radix encoding:
-            #   code = ((((((r*cols + c)*2+wall_up)*2+wall_right)*2+wall_down)*2+wall_left)
-            #            *3+goal_row_sign)*3+goal_col_sign
-            # Embedding-ready as-is; vocab_size = self.max_options.
-            out = np.zeros((self.total,), dtype=NP_INT)
-            for i in range(self.total):
-                r, c = int(self.row[i]), int(self.col[i])
-                cell = self.grid.cell((r, c))
-                code = r * cols + c
-                for d in ALL_DIRECTIONS:
-                    code = code * 2 + (1 if cell.walls[d] else 0)
-                code = code * 3 + (int(np.sign(gr - r)) + 1)
-                code = code * 3 + (int(np.sign(gc - c)) + 1)
-                out[i] = code
-            return out
-        else:
-            # (N, 5 + sensor_count) float32 in [-1, 1]
-            feat_n = 5 + self.sensor_count
-            out = np.zeros((self.total, feat_n), dtype=NP_FLOAT)
-            for i in range(self.total):
-                r, c = int(self.row[i]), int(self.col[i])
-                dist = float(self.grid.dist_to_goal[r, c])
-                out[i, 0] = (r / max(1, rows - 1)) * 2 - 1
-                out[i, 1] = (c / max(1, cols - 1)) * 2 - 1
-                out[i, 2] = (dist / max_dist) * 2 - 1
-                out[i, 3] = np.clip((gr - r) / max(1, rows - 1), -1.0, 1.0)
-                out[i, 4] = np.clip((gc - c) / max(1, cols - 1), -1.0, 1.0)
-                out[i, 5:] = np.array(self._cast_sensors(r, c), dtype=NP_FLOAT) * 2 - 1
-            return out
+        # Fixed layout: four LiDAR distances, four target types, current cell
+        # type, and distance-to-goal.
+        out = np.zeros((self.total, 10), dtype=NP_INT if self.discrete_states else NP_FLOAT)
+        lidar_maximum = max(self.grid.rows, self.grid.cols)
+        goal_maximum = self.grid.max_goal_distance_for(self.use_euclidean_distance)
+        for i in range(self.total):
+            row, col = int(self.row[i]), int(self.col[i])
+            for j, direction in enumerate(ALL_DIRECTIONS):
+                distance, target_type = self._cast_lidar(row, col, direction)
+                if self.discrete_states:
+                    out[i, j] = self._distance_bin(distance, lidar_maximum)
+                    out[i, 4 + j] = target_type
+                else:
+                    out[i, j] = (min(distance, lidar_maximum) / lidar_maximum) * 2.0 - 1.0
+                    out[i, 4 + j] = self._type_value(target_type)
+            cell_type = self.grid.cell((row, col)).type
+            out[i, 8] = self._cell_type_value(cell_type) if not self.discrete_states else cell_type.value
+            goal_distance = self.grid.goal_distance(
+                (row, col), use_euclidean=self.use_euclidean_distance,
+            )
+            out[i, 9] = (
+                self._distance_bin(goal_distance, goal_maximum)
+                if self.discrete_states else
+                (goal_distance / goal_maximum) * 2.0 - 1.0
+            )
+        return out

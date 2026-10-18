@@ -1,6 +1,11 @@
 import math
+import numpy as np
+import pygame
 
+from numba import njit, types
+from numba.extending import overload
 from pygame import Surface, transform, draw
+
 from .functional import Color, Position
 
 
@@ -144,3 +149,72 @@ def draw_arrow(
 
     # Draw arrowhead (triangle)
     draw.polygon(surface, color, [end, left_point, right_point])
+
+
+# ---------------------------------------------------------------------------
+# Numba-compatible index grid
+# ---------------------------------------------------------------------------
+
+def grid(dims: tuple[int, ...]) -> tuple[int, list[int | tuple[int, ...]]]:
+    """
+    Pure-Python fallback / reference implementation.
+
+    NOTE: ``dims`` must be a tuple (not a list) so the numba @overload below can
+    specialise on its length at compile time.
+    """
+    total = math.prod(dims)
+    if len(dims) <= 0 or len(dims) > 3: raise ValueError("Unsupported number of dims")
+    indices = list(np.ndindex(*dims))
+    return total, indices
+
+
+@overload(grid)
+def _grid_overload(dims: tuple[int, ...]):
+    if not isinstance(dims, (types.UniTuple, types.Tuple)):
+        return None
+
+    ndim = len(dims)
+    if ndim <= 0 or ndim > 3:
+        raise TypeError("Unsupported number of dims (grid supports 1, 2, or 3 dims)")
+
+    if ndim == 1:
+        def impl(dims: tuple[int, ...]):
+            n0 = dims[0]
+            indices = [i for i in range(n0)]
+            return n0, indices
+        return impl
+
+    if ndim == 2:
+        def impl(dims: tuple[int, ...]):
+            n0, n1 = dims[0], dims[1]
+            indices = [(i, j) for i in range(n0) for j in range(n1)]
+            return n0 * n1, indices
+        return impl
+
+    def impl(dims: tuple[int, ...]):
+        n0, n1, n2 = dims[0], dims[1], dims[2]
+        indices = [(i, j, k) for i in range(n0) for j in range(n1) for k in range(n2)]
+        return n0 * n1 * n2, indices
+    return impl
+
+
+_PANEL_CACHE: dict[tuple, Surface] = {}
+
+
+def draw_panel(
+    surface: Surface, rect: pygame.Rect, color: tuple[int, int, int] = (0, 0, 0),
+    alpha: int = 120, radius: int = 6,
+) -> None:
+    """Blit a translucent rounded backdrop. The SRCALPHA surface is cached per (size, colour,
+    alpha), so a steady overlay costs one blit per frame."""
+    if alpha <= 0 or rect.w <= 0 or rect.h <= 0:
+        return
+    key = (rect.w, rect.h, tuple(color), int(alpha), radius)
+    panel = _PANEL_CACHE.get(key)
+    if panel is None:
+        if len(_PANEL_CACHE) > 64:
+            _PANEL_CACHE.clear()
+        panel = Surface((rect.w, rect.h), pygame.SRCALPHA)
+        draw.rect(panel, (*color, int(alpha)), panel.get_rect(), border_radius=radius)
+        _PANEL_CACHE[key] = panel
+    surface.blit(panel, rect.topleft)

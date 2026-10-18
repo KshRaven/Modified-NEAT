@@ -1,7 +1,7 @@
-
 from ModifiedNEAT.nn.genome import Genome, INT
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.util.storage import save, load
+from ModifiedNEAT.nn.dist import SharpCategorical
 
 from torch import Tensor
 from itertools import count
@@ -1157,11 +1157,12 @@ class Model(NeatModule):
 
         extra = {}
         if self.distribution == 'discrete':
-            # if std is None:
-            logits = mean
-            # else:
-            #     logits = mean + (torch.randn_like(std) * std)
-            distribution = torch.distributions.Categorical(logits=torch.softmax(logits, -1))
+            # `std` is passed straight into SharpCategorical, which internally scales
+            # `mean` by it as a temperature and stores it as `.stddev_input`. This keeps
+            # the std<->entropy relationship exact and documented inside the class
+            # (pseudo_std == std / raw_margin) rather than baked into an external
+            # division dist() does before the class ever sees it.
+            distribution = SharpCategorical(logits=mean, std=std)
         elif self.distribution == 'normal':
             distribution = torch.distributions.Normal(mean, fill_std(std))
         elif self.distribution == 'mult_var_normal':
@@ -1258,7 +1259,8 @@ class Model(NeatModule):
 
 
 def check_for_illegal_zeros(config: Config, array: Union[CPUArray, GPUArray], param: NeatParameter, modules: Union[NeatModule, list[NeatModule], dict[Any, NeatModule]]):
-    array_has_zeros = (np.any(array == 0.0) if isinstance(array, CPUArray) else cp.any(array == 0.0).get()).item()
+    zero = 0.0 # config.genome.param_epsilon
+    array_has_zeros = (np.any(array == zero) if isinstance(array, CPUArray) else cp.any(array == zero).get()).item()
     if config.genome.weight_del_prob == 0.0 and array_has_zeros:
         # NOTE: By this point the module_index of parameters should be set.
         error = f"Illegal zero value has been encountered when parameter epsilon or deletion has been enabled!"

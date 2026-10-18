@@ -12,7 +12,7 @@ import subprocess as sp
 import pygame
 
 from ModifiedNEAT.rl import NEAT
-from ModifiedNEAT.optim.scheduler import BinaryAnnealing, CosineAnnealing
+from ModifiedNEAT.optim.scheduler import BinaryAnnealing, RandomAnnealing, CosineAnnealing
 from ModifiedNEAT.util.datetime import unix_to_datetime_file, clock
 from ModifiedNEAT.util.fancy_text import CM, Fore
 from torch import Tensor
@@ -20,16 +20,22 @@ from typing import Union
 from numba.core.errors import NumbaPerformanceWarning
 
 EXMP_DIR = os.path.dirname(os.path.abspath(__file__))
-if EXMP_DIR not in sys.path:
-    sys.path.insert(0, EXMP_DIR)
+PROJ_DIR = os.path.dirname(os.path.dirname(EXMP_DIR))
+print(f"Example path = {EXMP_DIR}")
+if EXMP_DIR not in sys.path: sys.path.insert(0, EXMP_DIR)
+if PROJ_DIR not in sys.path: sys.path.insert(0, PROJ_DIR)
 
 from game import Game, EnvironmentConfig
 
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
+torch.set_printoptions(threshold=10, edgeitems=3)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE  = torch.float32
-neat.util.storage.set_storage_location("../../storage/")
+neat.set_device(DEVICE)
+print(f"Using PyTorch device: '{DEVICE}'. NEAT device: '{neat.get_device()}'")
+neat.util.storage.set_storage_location(f"{PROJ_DIR}/storage/")
+print(f"Storage path = {neat.util.storage.STORAGE_DIR}")
 
 
 class BaseModelSeq(mn.Model):
@@ -48,8 +54,8 @@ class BaseModelSeq(mn.Model):
         self.distribution       = options.get('distribution', 'normal')
         self.probabilistic      = probabilistic
         self.normalize          = options.get('normalize', True)
-        self.clip_min           = options.get('clip_min', -2)
-        self.clip_max           = options.get('clip_max', -0)
+        self.clip_min: int | None = options.get('clip_min', -24) # -12 apprx -28
+        self.clip_max: int | None = options.get('clip_max', +0)
         self.clip_range         = self.clip_max - self.clip_min
         self.lower              = 10 ** self.clip_min
         self.upper              = 10 ** self.clip_max
@@ -58,20 +64,30 @@ class BaseModelSeq(mn.Model):
         self.kv_heads           = kv_heads
         self.use_swiglu: bool   = options.get('use_swiglu', False)
         self.attn_bias: bool    = options.get('attn_bias', bias)
+        self.fwd_exp: int       = options.get('fwd_exp', 1)
+        self.constant: int      = options.get('constant', 1000)
         self.differential: bool | int = options.get('differential', False)
+        self.epsilon            = options.get('epsilon', 1e-9)
+        
+        if activation is None:
+            activation = nn.SiLU()
+        if dtype is None:
+            dtype = torch.float32
         
         # Build
         feed_fwd = None if self.use_swiglu else mn.Sequential(
-            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
-            mn.RMSNorm(dim_size, device=device, dtype=dtype),
+            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+            # mn.RMSNorm(dim_size, device=device, dtype=dtype),
+            mn.Linear(dim_size, dim_size * self.fwd_exp, bias, device, dtype),
             activation, 
-            mn.Linear(dim_size, dim_size, self.attn_bias, device, dtype),
+            mn.Linear(dim_size * self.fwd_exp, dim_size, self.attn_bias, device, dtype),
         )
         transformer = mn.TransformerBase(
             max_seq_len, dim_size, layers, heads, kv_heads,
             differential=self.differential, causal_mask=True, 
-            bias=self.attn_bias, ff=feed_fwd, auto_single=True, fwd_exp=1,
-            residual=True, normalize=True, constant=100,
+            bias=self.attn_bias, ff=feed_fwd, 
+            auto_single=True, fwd_exp=self.fwd_exp,
+            residual=True, normalize=True, constant=self.constant,
             device=device, dtype=dtype
         )
         self.lat_proj = mn.Sequential(
@@ -79,9 +95,10 @@ class BaseModelSeq(mn.Model):
             transformer,
         )
         self.pol_proj = mn.Sequential(*[
-            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
-            mn.RMSNorm(dim_size, device=device, dtype=dtype),
-            activation,
+            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+            # mn.RMSNorm(dim_size, device=device, dtype=dtype),
+            mn.Linear(dim_size, dim_size, bias, device, dtype),
+            nn.SiLU(),
             mn.Linear(dim_size, 2*outputs, True, device, dtype),
         ])
        
@@ -95,19 +112,15 @@ class BaseModelSeq(mn.Model):
     def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
         return self.get_policy(state, keys=keys, **kwargs)
 
-    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
-        mean_std        = self.pol_proj(latent, keys=keys)
-        mean, log_std   = torch.chunk(mean_std, 2, -1)
-        if self.normalize:
-            mean = torch.tanh(mean) * max(1, self.upper)
-            std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
-        else:
-            std = torch.exp(log_std)
+    def _get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
+        mean_std      = self.pol_proj(latent, keys=keys)
+        mean, log_std = torch.chunk(mean_std, 2, -1)
+        std           = torch.exp(log_std.clamp(self.clip_min, self.clip_max))
         return mean, std
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        latent      = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False))
-        mean, std   = self.get_mean_std(latent, keys=keys)
+        latent    = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False)).squeeze(-2)
+        mean, std = self._get_mean_std(latent, keys=keys)
         action = mean
         if options.get('normal', self.probabilistic):
             action = action + (std * torch.randn_like(std))
@@ -117,20 +130,36 @@ class BaseModelSeq(mn.Model):
             action = torch.tanh(action) # Ensure values are between (-1, +1) for acceleration and braking limits
         return action
     
-    def enable_cache(self):
-        """Enable KV caching in attention modules"""
-        self.transformer.force_cache(True)
-        pass
-    
-    def disable_cache(self):
-        """Disable KV caching in attention modules"""
-        self.transformer.force_cache(False)
-        pass
-    
-    def reset_cache(self):
-        """Reset attention cache to initial state"""
-        self.transformer.empty_cache()
-        pass
+    def enable_cache(self):  self.transformer.force_cache(True)
+    def disable_cache(self): self.transformer.force_cache(False)
+    def reset_cache(self):   self.transformer.empty_cache()
+
+
+class SequenceBuilder(nn.Module):
+    def __init__(self, max_seq_len: int | None, dim: int):
+        super().__init__()
+        assert max_seq_len is None or max_seq_len > 0
+        self.max_seq_len = max_seq_len
+        self.dim         = dim
+        self.sequence: Tensor | None = None
+        self.indices: Tensor | None = None
+        
+    def reset(self):
+        self.sequence = None
+        
+    def forward(self, tensor: Tensor):
+        if self.max_seq_len is None: return tensor
+        tensor = tensor.unsqueeze(self.dim)
+        # Initialize
+        if self.sequence is None:
+            self.sequence = tensor.repeat_interleave(self.max_seq_len, self.dim) # (genomes, *dims, seq_len, features)
+            self.indices  = torch.arange(self.max_seq_len)
+            self.sequence = torch.index_fill(self.sequence, self.dim, self.indices[:-1], 0.)
+        # Shift
+        else:
+            torch.index_select(self.sequence, self.dim, self.indices[:-1])[:] = torch.index_select(self.sequence, self.dim, self.indices[1:])
+            torch.index_select(self.sequence, self.dim, self.indices[-1])[:]  = tensor
+        return self.sequence
 
 
 ENV: Game | None = None
@@ -155,23 +184,25 @@ def evaluate(population: neat.Population, **options):
     print(f"started generation {population.generation}")
     stack = []
     with torch.no_grad():
+        sequencer = SequenceBuilder(max_seq_len=MODEL.max_seq_len, dim=-2)
         MODEL.enable_cache()
-        if population.generation % 10 == 0:
-            ENV.render_mode = 'human'
-        else:
-            ENV.render_mode = None
+        if population.generation % 10 == 0: ENV.render_mode = 'human'
+        else:                               ENV.render_mode = None
         states = ENV.reset(keys=keys)[0]
         MODEL.reset_cache()
         done = False
         step = 0
-        DEBUG_STEP = 32-1
+        DEBUG_STEP = MODEL.max_seq_len - 1
         ENV.render()
         while not done:
             DEBUG = step == DEBUG_STEP and population.generation == INIT_GEN
-            states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+            states: Tensor = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+            states = sequencer(states)
             if DEBUG:
                 print(f"\nstates => \n{states} \n\tshape = {states.shape}")
-            actions = MODEL.get_policy(states.unsqueeze(1), keys=keys, verbose=1 if DEBUG else 0).squeeze(1) # shape(genomes)
+            actions = MODEL.get_policy(
+                states.select(-2, -1).unsqueeze(-2).unsqueeze(1), keys=keys, verbose=1 if DEBUG else 0
+            ).squeeze(1) # shape(genomes)
             if DEBUG:
                 print(f"actions => \n{actions} \n\tshape = {actions.shape}")
             next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
@@ -212,18 +243,28 @@ def evaluate(population: neat.Population, **options):
     )
 
 
-def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bool = False):
+def test_best_network(**options):
+    """Test run in race mode: staggered grid, slipstream, collisions and a start countdown."""
+    with ENV.race_mode(True):
+        return _test_best_network(**options)
+
+
+def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bool = False):
     count = max(1, count)
 
     print("\n\n---------- RUNNING TEST ON CAR-RACER ----------")
     print(f"best_genome = {POPULATION.best_genome}")
     ENV.players.lives_total     = 20
     ENV.render_mode             = 'human'
-    ENV.window.fps              = 20
+    ENV.window.fps              = 60
     ENV.cars.usr_enganged       = False
     ENV.cars.restrict_movement  = False
     ENV.min_laps                = 5
     ENV.max_frames              = 3000
+    ENV.cars.race.enabled       = True
+
+    keys = list(POPULATION.genomes.keys())[:20]
+    POPULATION.crop(keys)
 
     WIDTH, HEIGHT = ENV.window.width, ENV.window.height  # or screen.get_size()
     FPS = 30
@@ -232,8 +273,10 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
         if not os.path.exists(RECORD_DIR):
             os.mkdir(RECORD_DIR)
         print(f"Recording @ {RECORD_DIR}")
+
+    sequencer = SequenceBuilder(max_seq_len=MODEL.max_seq_len, dim=-2)
     
-    MODEL.enable_cache()
+    MODEL.disable_cache()
     for i in range(25):
         ffmpeg_cmd = [
             "ffmpeg",
@@ -279,20 +322,29 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
         best_genome = POPULATION.best_genome
         if best_genome is not None and best_genome.key not in keys:
             keys.insert(0, best_genome.key)
+        if ENV.config.race.enabled:
+            keys = keys[:ENV.config.race.max_racers]   # the grid holds at most max_racers cars
         mapping = {k: idx for idx, k in enumerate(keys)}
         reverse = {idx: k for k, idx in mapping.items()}
         print(f"\nStarting test no {i}")
-        print(f"Running on Genomes {keys[:10]}")
+        print(f"Running on {len(keys)} Genomes {keys[:10]}")
         if record:
             process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
+
         with torch.no_grad():
             states = ENV.reset(keys=keys)[0]
-            MODEL.reset_cache()
+            # MODEL.reset_cache()
             done = False
             ENV.render()
+            step = 0
             while not done:
+                debug = i == 0 and step == 0
+
                 states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
-                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
+                states = sequencer(states)
+                if debug: print(f"\nstates => \n{states} \n\tshape = {states.shape}")
+                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes, *outputs)
+                if debug: print(f"\nactions => \n{actions} \n\tshape = {actions.shape}")
                 try:
                     next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
                 except ValueError as e:
@@ -327,6 +379,9 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
 
                 if done:
                     print(f"\ninfo: {info}")
+
+                step += 1
+
             scores = dict(
                 sorted(
                     ((k, ENV.players.scores[idx].item()) for k, idx in mapping.items()),
@@ -342,7 +397,6 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
             process.stdin.close()
             process.wait()
             process.terminate()
-    MODEL.disable_cache()
 
 
 def fix(value: float, default: float = 1):
@@ -368,7 +422,7 @@ def run():
     
     # Create environment configuration from file
     config_file = os.path.join(EXMP_DIR, '.config', 'main.json')
-    env_config = EnvironmentConfig(file=config_file)
+    env_config = EnvironmentConfig(file=None) # config_file)
     
     # Create environment with configuration
     ENV = Game(render_mode=args.render_mode, config=env_config)
@@ -378,30 +432,31 @@ def run():
     # print(ENV.action_space.sample().shape)
     # sys.exit()
 
+    MULTIPLIER = 0.33
     CONFIG = neat.Config('racer', '../../storage/configs')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 0.75e-0
+    CONFIG.genome.weight_init_std           = 1.00 * MULTIPLIER
     CONFIG.genome.weight_min_value          = -math.inf
     CONFIG.genome.weight_max_value          = +math.inf
-    CONFIG.genome.weight_mutate_power       = 5.0e-1
+    CONFIG.genome.weight_mutate_power       = 0.25 * MULTIPLIER
     CONFIG.genome.weight_mutate_rate        = 0.65
     CONFIG.genome.weight_replace_rate       = 0.00
-    CONFIG.genome.weight_add_prob           = 0.99
-    CONFIG.genome.weight_del_prob           = 1e-12 # 0.05
+    CONFIG.genome.weight_add_prob           = 0.00
+    CONFIG.genome.weight_del_prob           = 0.00
     CONFIG.genome.single_structural_mutation = True
-    CONFIG.genome.param_epsilon             = 1e-9
+    CONFIG.genome.param_epsilon             = 0e-9
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
-    CONFIG.reproduction.clone_threshold     = 0.05
-    CONFIG.reproduction.survival_threshold  = 0.10
+    CONFIG.reproduction.clone_threshold     = 0.50
+    CONFIG.reproduction.survival_threshold  = 0.20
     CONFIG.reproduction.cross_threshold     = 0.00
     CONFIG.reproduction.elitism             = 0.33
     CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.50
-    CONFIG.reproduction.cross_multiplier    = 0.00
+    CONFIG.reproduction.darwin_multiplier   = 0.33
+    CONFIG.reproduction.cross_multiplier    = 0.75
     CONFIG.reproduction.preserve_elite      = False
 
     CONFIG.save()
@@ -409,21 +464,24 @@ def run():
     print(CONFIG)
 
     DISCRETE        = False
-    MAX_SEQ_LEN     = 1
+    MAX_SEQ_LEN     = 3
     INPUTS          = ENV.observation_space.shape[-1]
     OUTPUTS         = 2
     EMBED_SIZE      = 32
     LAYERS          = 1
     HEADS           = 1
     KV_HEADS        = None
+    FWD_EXP         = 1
     BIAS            = True
     ATTN_BIAS       = BIAS
     DIFFERENTIAL    = False
     SWIGLU          = False
+    CONSTANT        = 1000
     ACTIVATION      = nn.SiLU()
     PROBABILISTIC   = False
-    CLIP_MIN        = -2
-    CLIP_MAX        = -0
+    CLIP_MIN        = -13
+    CLIP_MAX        = +0
+    DISTRIBUTION    = 'normal' if not DISCRETE else 'discrete'
     FILE_NAME       = (
         f"RacerModelSequential-E{EMBED_SIZE}_L{LAYERS}_M{MAX_SEQ_LEN}_"
         f"H{HEADS}_KVH{KV_HEADS}_D{int(DIFFERENTIAL)}_"
@@ -431,22 +489,24 @@ def run():
         f"A-{ACTIVATION.__class__.__name__}_"
         f"R{int(CLIP_MIN)}~{int(CLIP_MAX)}"
     )
-    
+
     MEMORY_SIZE     = 8
-    GAMMA           = np.exp(np.log(0.01) / 128)
+    GAMMA           = np.exp(np.log(0.01) / 256)
     KAPPA           = np.exp(np.log(0.01) / 128)
-    ALPHA           = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA           = fix(np.exp(np.log(5.0) / (MEMORY_SIZE - 1)), 1.0)
     ALPHA_ORDER     = 0
-    REW_NORM        = 4
+    REW_NORM        = 1
     POL_REG         = 0.00
-    STD_REG         = 0.25
+    STD_REG         = 0.00
     print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
 
     MODEL = BaseModelSeq(
         INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, MAX_SEQ_LEN,
         HEADS, KV_HEADS, ACTIVATION, PROBABILISTIC,
         BIAS, DEVICE, DTYPE,
-        differential=DIFFERENTIAL, attn_bias=ATTN_BIAS, use_swiglu=SWIGLU
+        clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
+        constant=CONSTANT, differential=DIFFERENTIAL, attn_bias=ATTN_BIAS,
+        use_swiglu=SWIGLU, fwd_exp=FWD_EXP,
     )
     print(MODEL)
 
@@ -501,8 +561,8 @@ def run():
             # TODO: Try PPO trainer instead for pathfinding
             POPULATION,
             schedulers=[
-                RandomAnnealing(CONFIG, 1e-1, 1e+1, 3, ['weight_init_std', 'weight_mutate_power'], True),
-                CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
+                # RandomAnnealing(CONFIG, 1e-2, 1e+1, 3, ['weight_init_std', 'weight_mutate_power'], True),
+                CosineAnnealing(CONFIG, 30, 0.5, ['weight_mutate_power', 'weight_init_std'], True, True),
                 # CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_rate', True, True),
                 # CosineAnnealing(CONFIG, 10, 0.1, 'weight_replace_rate', True, True),
                 # CosineAnnealing(CONFIG, 15, 0.05, 'weight_add_prob', True, True),
@@ -513,18 +573,19 @@ def run():
             log_name=f"{unix_to_datetime_file(clock.time())}_"
                      f"e{EMBED_SIZE}-m{MAX_SEQ_LEN}-l{LAYERS}-b{int(BIAS)}-h{HEADS}-"
                      f"prob{int(PROBABILISTIC)}-"
-                     f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
+                     f"g{round(GAMMA, 4)}-k{round(KAPPA, 4)}-"
+                     f"a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
                      f"rn{REW_NORM}-p{round(POL_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
                      f"type{int(DISCRETE)}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=10,
+            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=None,
             max_episodes=MEMORY_SIZE,
         )
 
         try:
             trainer.learn(
                 evaluate, env_config.max_frames, EPOCHS, 128, 0.1,
-                'binary' if not DISCRETE else 'discrete', verbose=True,
+                'continuous' if not DISCRETE else 'discrete', verbose=True,
             )
         except KeyboardInterrupt:
             pass
