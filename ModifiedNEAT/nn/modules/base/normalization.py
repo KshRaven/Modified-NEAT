@@ -130,8 +130,8 @@ class BatchNorm(NeatModule):
     """Batch normalization."""
     
     def __init__(self, groups: int, channels: int, eps=1e-8, affine=True,
-                 device=torch.device('cpu'), dtype=torch.float32):
-        super(BatchNorm, self).__init__(num_groups=groups, num_channels=channels, eps=eps, affine=affine)
+                 bias: bool = True, device=torch.device('cpu'), dtype=torch.float32):
+        super(BatchNorm, self).__init__(num_groups=groups, num_channels=channels, eps=eps, affine=affine, bias=bias)
         if channels % groups != 0:
             raise ValueError("num_channels must be divisible by num_groups.")
         self.num_groups = groups
@@ -139,12 +139,14 @@ class BatchNorm(NeatModule):
         self.dim = [1, 2]
         self.eps = eps
         self.affine = affine
+        self.bias = bias
 
         self.weights: NeatParameter = None
-        self.biases: NeatParameter = None
+        self.biases: NeatParameter | None = None
         if affine:
             self.weights = NeatParameter(channels, False, device, dtype)
-            self.biases = NeatParameter(channels, False, device, dtype)
+            if self.bias:
+                self.biases = NeatParameter(channels, False, device, dtype)
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None):
         # assuming shape (genomes, groups, channels, *extra)
@@ -154,7 +156,8 @@ class BatchNorm(NeatModule):
 
         if self.affine:
             tensor = tensor * self.expand(self.weights[keys], tensor, 1, keys=keys)
-            tensor = tensor + self.expand(self.biases[keys], tensor, 1, keys=keys)
+            if self.bias:
+                tensor = tensor + self.expand(self.biases[keys], tensor, 1, keys=keys)
         return tensor
 
 
@@ -167,9 +170,9 @@ class _BatchNormND(BatchNorm):
     """
 
     def __init__(self, channels: int, eps=1e-8, affine=True, ndim=1,
-                 device=torch.device('cpu'), dtype=torch.float32):
+                 bias: bool = True, device=torch.device('cpu'), dtype=torch.float32):
         super(_BatchNormND, self).__init__(groups=1, channels=channels, eps=eps, affine=affine,
-                                           device=device, dtype=dtype)
+                                           bias=bias, device=device, dtype=dtype)
         self.ndim = ndim
         self.dim = [1] + list(range(3, 3 + ndim))
 
@@ -178,23 +181,23 @@ class BatchNorm1d(_BatchNormND):
     """Batch normalization over (genomes, batch_size, channels, length) inputs."""
 
     def __init__(self, channels: int, eps=1e-8, affine=True,
-                 device=torch.device('cpu'), dtype=torch.float32):
-        super(BatchNorm1d, self).__init__(channels, eps, affine, ndim=1, device=device, dtype=dtype)
+                 bias: bool = True, device=torch.device('cpu'), dtype=torch.float32):
+        super(BatchNorm1d, self).__init__(channels, eps, affine, ndim=1, bias=bias, device=device, dtype=dtype)
 
 
 class BatchNorm2d(_BatchNormND):
     """Batch normalization over (genomes, batch_size, channels, height, width) inputs."""
 
     def __init__(self, channels: int, eps=1e-8, affine=True,
-                 device=torch.device('cpu'), dtype=torch.float32):
-        super(BatchNorm2d, self).__init__(channels, eps, affine, ndim=2, device=device, dtype=dtype)
+                 bias: bool = True, device=torch.device('cpu'), dtype=torch.float32):
+        super(BatchNorm2d, self).__init__(channels, eps, affine, ndim=2, bias=bias, device=device, dtype=dtype)
 
 
 class BatchNorm3d(_BatchNormND):
     """Batch normalization over (genomes, batch_size, channels, depth, height, width) inputs."""
 
     def __init__(self, channels: int, eps=1e-8, affine=True,
-                 device=torch.device('cpu'), dtype=torch.float32):
-        super(BatchNorm3d, self).__init__(channels, eps, affine, ndim=3, device=device, dtype=dtype)
+                 bias: bool = True, device=torch.device('cpu'), dtype=torch.float32):
+        super(BatchNorm3d, self).__init__(channels, eps, affine, ndim=3, bias=bias, device=device, dtype=dtype)
 
 # TODO: AdaptiveBatchNorm / running statistics (current BatchNorm variants are training-stats-only)

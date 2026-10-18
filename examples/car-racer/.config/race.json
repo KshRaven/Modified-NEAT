@@ -1,0 +1,91 @@
+{
+  "grid_size": [6, 6],
+  "cell_size": 120,
+  "layout": null,
+  "max_attempts": 1000,
+  "min_tiles": 14,
+  "seed": 7,
+  "lives": 5,
+  "max_hiatus": 120,
+  "max_frames": 20000,
+  "min_laps": 3,
+  "tile": {
+    "gravel": 0.05,
+    "grass": 0.10,
+    "curb": 0.10,
+    "curb_pattern_splits": 16,
+    "start_checker_size": null,
+    "finish_line_back_offset_ratio": 0.2
+  },
+  "grid": { "granularity": "pixels" },
+  "car": {
+    "max_linear_velocity": 5.0,
+    "max_angular_velocity": 8.0,
+    "linear_acceleration": 0.15,
+    "angular_acceleration": 1.5,
+    "car_scale": 0.20,
+    "use_lidar": false,
+    "toggle_reverse": false,
+    "restrict_movement": 1,
+    "friction_curb": 0.985,
+    "friction_grass": 0.95,
+    "friction_gravel": 0.92,
+    "slip_road": 0.10,
+    "endless": true
+  },
+  "window": {
+    "title": "Car Racer - Race Mode",
+    "fps": 60,
+    "font_size": 24
+  },
+  "race": {
+    "enabled": true,
+    "racers": 11,
+    "max_racers": 12,
+
+    "start_grid": {
+      "cars_per_tile": [4, 7],
+      "lanes": 2,
+      "row_gap": 1.35,
+      "lane_spread": 0.5,
+      "stagger": 0.35,
+      "edge_margin": 0.08,
+      "max_grid_tiles": 3
+    },
+
+    "slipstream": {
+      "enabled": true,
+      "range_cars": 7.0,
+      "cone_deg": 25.0,
+      "max_heading_diff_deg": 35.0,
+      "min_leader_speed": 0.35,
+      "distance_falloff": 1.0,
+      "angle_falloff": 1.5,
+      "push": 0.15,
+      "top_speed_bonus": 0.05,
+      "ramp": 0.06,
+      "decay": 0.05
+    },
+
+    "collision": {
+      "enabled": true,
+      "radius_scale": 0.55,
+      "restitution": 0.15,
+      "separation": 0.8,
+      "max_shove": 0.6,
+      "lateral_transfer": 0.6,
+      "spin": 0.8,
+      "max_spin": 2.0,
+      "min_speed": 0.08
+    },
+
+    "countdown": {
+      "enabled": true,
+      "steps": 3,
+      "step_seconds": 0.9,
+      "go_seconds": 0.7,
+      "text_go": "GO!",
+      "dim": 110
+    }
+  }
+}

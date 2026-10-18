@@ -12,7 +12,7 @@ import subprocess as sp
 import pygame
 
 from ModifiedNEAT.rl import NEAT
-from ModifiedNEAT.optim.scheduler import BinaryAnnealing, CosineAnnealing
+from ModifiedNEAT.optim.scheduler import BinaryAnnealing, RandomAnnealing, CosineAnnealing
 from ModifiedNEAT.util.datetime import unix_to_datetime_file, clock
 from ModifiedNEAT.util.fancy_text import CM, Fore
 from torch import Tensor
@@ -20,55 +20,71 @@ from typing import Union
 from numba.core.errors import NumbaPerformanceWarning
 
 EXMP_DIR = os.path.dirname(os.path.abspath(__file__))
-if EXMP_DIR not in sys.path:
-    sys.path.insert(0, EXMP_DIR)
+PROJ_DIR = os.path.dirname(os.path.dirname(EXMP_DIR))
+print(f"Example path = {EXMP_DIR}")
+if EXMP_DIR not in sys.path: sys.path.insert(0, EXMP_DIR)
+if PROJ_DIR not in sys.path: sys.path.insert(0, PROJ_DIR)
 
 from game import Game, EnvironmentConfig
 
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
+torch.set_printoptions(threshold=10, edgeitems=3)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE  = torch.float32
-neat.util.storage.set_storage_location("../../storage/")
+neat.set_device(DEVICE)
+print(f"Using PyTorch device: '{DEVICE}'. NEAT device: '{neat.get_device()}'")
+neat.util.storage.set_storage_location(f"{PROJ_DIR}/storage/")
+print(f"Storage path = {neat.util.storage.STORAGE_DIR}")
 
 
 class BaseModel(mn.Model):
+    """
+    Plain feed-forward policy network.
+    """
     def __init__(
-        self, inputs: int, outputs: int, dim_size: int, layers: int, coefficients=1, activation: nn.Module = nn.SiLU(),
-        probabilistic=False, bias=True, device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options
+        self, inputs: int, outputs: int, dim_size: int, layers: int,
+        activation: nn.Module = nn.SiLU(), probabilistic=False, bias=True,
+        device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, **options
     ):
         super().__init__()
         # Attributes
-        self.inputs         = inputs
-        self.outputs        = outputs
-        self.dim_size       = dim_size
-        self.layers         = layers
-        self.distribution   = options.get('distribution', 'normal')
-        self.stride         = 1
-        self.coefficients   = coefficients
-        self.probabilistic  = probabilistic
-        self.normalize      = options.get('normalize', True)
-        self.clip_min       = options.get('clip_min', -2)
-        self.clip_max       = options.get('clip_max', -0)
-        self.clip_range     = self.clip_max - self.clip_min
-        self.lower          = 10 ** self.clip_min
-        self.upper          = 10 ** self.clip_max
+        self.inputs             = inputs
+        self.outputs            = outputs
+        self.dim_size           = dim_size
+        self.layers             = layers
+        self.distribution       = options.get('distribution', 'normal')
+        self.probabilistic      = probabilistic
+        self.clip_min: int | None = options.get('clip_min', -24)
+        self.clip_max: int | None = options.get('clip_max', +0)
+        self.clip_range         = self.clip_max - self.clip_min
+        self.lower              = 10 ** self.clip_min
+        self.upper              = 10 ** self.clip_max
+        self.fwd_exp: int       = options.get('fwd_exp', 1)
+        self.epsilon            = options.get('epsilon', 1e-9)
+
+        if activation is None:
+            activation = nn.SiLU()
+        if dtype is None:
+            dtype = torch.float32
 
         # Build
         self.lat_proj = mn.Sequential(*[
             mn.Linear(inputs, dim_size, True, device, dtype),
             *sum([
                 [
-                    mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
+                    mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+                    mn.Linear(dim_size, dim_size * self.fwd_exp, bias, device, dtype),
                     activation,
-                    mn.Linear(dim_size, dim_size, bias, device, dtype),
+                    mn.Linear(dim_size * self.fwd_exp, dim_size, bias, device, dtype),
                 ]
                 for _ in range(layers)
             ], []),
         ])
         self.pol_proj = mn.Sequential(*[
-            mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
-            activation,
+            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+            mn.Linear(dim_size, dim_size, bias, device, dtype),
+            nn.SiLU(),
             mn.Linear(dim_size, 2*outputs, True, device, dtype),
         ])
 
@@ -78,37 +94,16 @@ class BaseModel(mn.Model):
     def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
         return self.get_policy(state, keys=keys, **kwargs)
 
-    def get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
-        mean_std        = self.pol_proj(latent, keys=keys)
-        mean, log_std   = torch.chunk(mean_std, 2, -1)
-        if self.normalize:
-            mean = torch.tanh(mean) * self.upper
-            std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
-        else:
-            std = torch.exp(log_std)
+    def _get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
+        mean_std      = self.pol_proj(latent, keys=keys)
+        mean, log_std = torch.chunk(mean_std, 2, -1)
+        std           = torch.exp(log_std.clamp(self.clip_min, self.clip_max))
         return mean, std
 
-    # def get_action(self, state: Tensor, keys: Union[int, list[int]] = None) -> tuple[Tensor, Tensor]:
-    #     latent      = self.projection(state, keys=keys)
-    #     mean, std   = self.get_mean_std(latent, keys=keys)
-    #     dist        = torch.distributions.Normal(mean, std)
-    #     action      = torch.sigmoid((dist.sample() if self.probabilistic else mean) * torch.pi)
-    #     log_prob    = dist.log_prob(action)
-    #     return action, log_prob
-
-    # def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, list[int]] = None):
-    #     latent      = self.projection(state, keys=keys)
-    #     mean, std   = self.get_mean_std(latent, keys=keys)
-    #     dist        = torch.distributions.Normal(mean, std)
-    #     log_prob    = dist.log_prob(action)
-    #     entropy     = dist.entropy()
-    #     return log_prob, entropy
-
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        latent      = self.lat_proj(state, keys=keys)
-        mean, std   = self.get_mean_std(latent, keys=keys)
-        # dist        = torch.distributions.Normal(mean, std)
-        # action      = torch.sigmoid((dist.sample() if options.get('normal', self.probabilistic) else mean) * torch.pi)
+        # state: (genomes, batch, features)
+        latent    = self.lat_proj(state, keys=keys)
+        mean, std = self._get_mean_std(latent, keys=keys)
         action = mean
         if options.get('normal', self.probabilistic):
             action = action + (std * torch.randn_like(std))
@@ -117,11 +112,6 @@ class BaseModel(mn.Model):
         else:
             action = torch.tanh(action) # Ensure values are between (-1, +1) for acceleration and braking limits
         return action
-
-    # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None) -> Tensor:
-    #     latent      = self.projection(state, keys=keys)
-    #     value       = self.val_proj(latent, keys=keys)
-    #     return value
 
 
 ENV: Game | None = None
@@ -146,10 +136,8 @@ def evaluate(population: neat.Population, **options):
     print(f"started generation {population.generation}")
     stack = []
     with torch.no_grad():
-        if population.generation % 10 == 0:
-            ENV.render_mode = 'human'
-        else:
-            ENV.render_mode = None
+        if population.generation % 10 == 0: ENV.render_mode = 'human'
+        else:                               ENV.render_mode = None
         states = ENV.reset(keys=keys)[0]
         done = False
         step = 0
@@ -157,10 +145,10 @@ def evaluate(population: neat.Population, **options):
         ENV.render()
         while not done:
             DEBUG = step == DEBUG_STEP and population.generation == INIT_GEN
-            states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+            states: Tensor = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
             if DEBUG:
                 print(f"\nstates => \n{states} \n\tshape = {states.shape}")
-            actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
+            actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes, *outputs)
             if DEBUG:
                 print(f"actions => \n{actions} \n\tshape = {actions.shape}")
             next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
@@ -172,13 +160,14 @@ def evaluate(population: neat.Population, **options):
             states = next_states
             ENV.render()
 
-            print(f"\rLives = {ENV.players.lives.mean().item()}, "
-                  f"Scores={ENV.players.scores.max().item()}, "
-                  f"Alive={ENV.players.active_total}, "
-                  f"Fitness={ENV.players.fitness.mean().item():.1f}, "
-                  f"MaxSize={trainer.primary.max_size()} "
-                  f"{' ' * 15}"
-                  , end='')
+            print(
+                f"\rLives = {ENV.players.lives.mean().item()}, "
+                f"Scores={ENV.players.scores.max().item()}, "
+                f"Alive={ENV.players.active_total}, "
+                f"Fitness={ENV.players.fitness.mean().item():.1f}, "
+                f"MaxSize={trainer.primary.max_size()} "
+                f"{' ' * 5}"
+            , end='')
             step += 1
     print("\ndone with env")
 
@@ -197,18 +186,28 @@ def evaluate(population: neat.Population, **options):
     )
 
 
-def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bool = False):
+def test_best_network(**options):
+    """Test run in race mode: staggered grid, slipstream, collisions and a start countdown."""
+    with ENV.race_mode(True):
+        return _test_best_network(**options)
+
+
+def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bool = False):
     count = max(1, count)
 
     print("\n\n---------- RUNNING TEST ON CAR-RACER ----------")
     print(f"best_genome = {POPULATION.best_genome}")
     ENV.players.lives_total     = 20
     ENV.render_mode             = 'human'
-    ENV.window.fps              = 20
+    ENV.window.fps              = 60
     ENV.cars.usr_enganged       = False
     ENV.cars.restrict_movement  = False
     ENV.min_laps                = 5
     ENV.max_frames              = 3000
+    ENV.cars.race.enabled       = True
+
+    keys = list(POPULATION.genomes.keys())[:20]
+    POPULATION.crop(keys)
 
     WIDTH, HEIGHT = ENV.window.width, ENV.window.height  # or screen.get_size()
     FPS = 30
@@ -264,19 +263,26 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
         best_genome = POPULATION.best_genome
         if best_genome is not None and best_genome.key not in keys:
             keys.insert(0, best_genome.key)
+        if ENV.config.race.enabled:
+            keys = keys[:ENV.config.race.max_racers]   # the grid holds at most max_racers cars
         mapping = {k: idx for idx, k in enumerate(keys)}
         reverse = {idx: k for k, idx in mapping.items()}
         print(f"\nStarting test no {i}")
-        print(f"Running on Genomes {keys[:10]}")
+        print(f"Running on {len(keys)} Genomes {keys[:10]}")
         if record:
             process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
         with torch.no_grad():
             states = ENV.reset(keys=keys)[0]
             done = False
             ENV.render()
+            step = 0
             while not done:
+                debug = i == 0 and step == 0
+
                 states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
-                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes)
+                if debug: print(f"\nstates => \n{states} \n\tshape = {states.shape}")
+                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes, *outputs)
+                if debug: print(f"\nactions => \n{actions} \n\tshape = {actions.shape}")
                 try:
                     next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
                 except ValueError as e:
@@ -311,6 +317,9 @@ def test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bo
 
                 if done:
                     print(f"\ninfo: {info}")
+
+                step += 1
+
             scores = dict(
                 sorted(
                     ((k, ENV.players.scores[idx].item()) for k, idx in mapping.items()),
@@ -351,7 +360,7 @@ def run():
     
     # Create environment configuration from file
     config_file = os.path.join(EXMP_DIR, '.config', 'main.json')
-    env_config = EnvironmentConfig(file=config_file)
+    env_config = EnvironmentConfig(file=None) # config_file)
     
     # Create environment with configuration
     ENV = Game(render_mode=args.render_mode, config=env_config)
@@ -361,67 +370,70 @@ def run():
     # print(ENV.action_space.sample().shape)
     # sys.exit()
 
+    MULTIPLIER = 0.33
     CONFIG = neat.Config('racer', '../../storage/configs')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 0.75e-0
+    CONFIG.genome.weight_init_std           = 1.00 * MULTIPLIER
     CONFIG.genome.weight_min_value          = -math.inf
     CONFIG.genome.weight_max_value          = +math.inf
-    CONFIG.genome.weight_mutate_power       = 5.0e-1
+    CONFIG.genome.weight_mutate_power       = 0.25 * MULTIPLIER
     CONFIG.genome.weight_mutate_rate        = 0.65
-    CONFIG.genome.weight_replace_rate       = 0.15
-    CONFIG.genome.weight_add_prob           = 0.75
-    CONFIG.genome.weight_del_prob           = 1e-12 # 0.05
+    CONFIG.genome.weight_replace_rate       = 0.00
+    CONFIG.genome.weight_add_prob           = 0.00
+    CONFIG.genome.weight_del_prob           = 0.00
     CONFIG.genome.single_structural_mutation = True
-    CONFIG.genome.param_epsilon             = 1e-9
+    CONFIG.genome.param_epsilon             = 0e-9
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
-    CONFIG.reproduction.clone_threshold     = 0.05
-    CONFIG.reproduction.survival_threshold  = 0.10
+    CONFIG.reproduction.clone_threshold     = 0.50
+    CONFIG.reproduction.survival_threshold  = 0.20
     CONFIG.reproduction.cross_threshold     = 0.00
     CONFIG.reproduction.elitism             = 0.33
     CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.50
-    CONFIG.reproduction.cross_multiplier    = 0.00
+    CONFIG.reproduction.darwin_multiplier   = 0.33
+    CONFIG.reproduction.cross_multiplier    = 0.75
     CONFIG.reproduction.preserve_elite      = False
 
     CONFIG.save()
     CONFIG.load(verbose=2)
     print(CONFIG)
 
+    DISCRETE        = False
     INPUTS          = ENV.observation_space.shape[-1]
     OUTPUTS         = 2
     EMBED_SIZE      = 64
-    LAYERS          = 2
-    COEFFICIENTS    = 1
-    ACTIVATION      = nn.SiLU()
+    LAYERS          = 1
+    FWD_EXP         = 1
     BIAS            = True
-    PROBABILISTIC   = True
-    DISCRETE        = False
-    CLIP_MIN        = -2
-    CLIP_MAX        = -0
+    ACTIVATION      = nn.SiLU()
+    PROBABILISTIC   = False
+    CLIP_MIN        = -13
+    CLIP_MAX        = +0
+    DISTRIBUTION    = 'normal' if not DISCRETE else 'discrete'
     FILE_NAME       = (
-        f"RacerModel-E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_"
-        f"A-{ACTIVATION.__class__.__name__}_"
-        f"B{int(BIAS)}_P{int(PROBABILISTIC)}_"
+        f"RacerModel-E{EMBED_SIZE}_L{LAYERS}_FX{FWD_EXP}_"
+        f"B{int(BIAS)}_A-{ACTIVATION.__class__.__name__}_"
         f"R{int(CLIP_MIN)}~{int(CLIP_MAX)}"
     )
-    
+
     MEMORY_SIZE     = 8
-    GAMMA           = np.exp(np.log(0.01) / 64)
-    KAPPA           = np.exp(np.log(0.01) / 64)
-    ALPHA           = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
+    GAMMA           = np.exp(np.log(0.01) / 256)
+    KAPPA           = np.exp(np.log(0.01) / 256)
+    ALPHA           = fix(np.exp(np.log(5.0) / (MEMORY_SIZE - 1)), 1.0)
     ALPHA_ORDER     = 0
     REW_NORM        = 4
-    POL_REG         = 0.99
-    STD_REG         = 0.75
+    POL_REG         = 0.00
+    STD_REG         = 0.00
     print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
 
     MODEL = BaseModel(
-        INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, COEFFICIENTS,
+        INPUTS, OUTPUTS, EMBED_SIZE, LAYERS,
         ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE,
+        clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
+        fwd_exp=FWD_EXP,
     )
     print(MODEL)
 
@@ -473,10 +485,11 @@ def run():
         print(f"{'='*50}\n")
         
         trainer = NEAT(
+            # TODO: Try PPO trainer instead for pathfinding
             POPULATION,
             schedulers=[
-                # RandomAnnealing(CONFIG, 1e-1, 1e+1, 3, ['weight_init_std', 'weight_mutate_power'], True),
-                # CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_power', True, True),
+                # RandomAnnealing(CONFIG, 1e-2, 1e+1, 3, ['weight_init_std', 'weight_mutate_power'], True),
+                CosineAnnealing(CONFIG, 30, 0.5, ['weight_mutate_power', 'weight_init_std'], True, True),
                 # CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_rate', True, True),
                 # CosineAnnealing(CONFIG, 10, 0.1, 'weight_replace_rate', True, True),
                 # CosineAnnealing(CONFIG, 15, 0.05, 'weight_add_prob', True, True),
@@ -485,20 +498,21 @@ def run():
             device=DEVICE, dtype=DTYPE,
             log_sub_dir='car_racer/',
             log_name=f"{unix_to_datetime_file(clock.time())}_"
-                     f"e{EMBED_SIZE}-c{COEFFICIENTS}-m{0}-l{LAYERS}-b{int(BIAS)}-h{0}-"
+                     f"e{EMBED_SIZE}-l{LAYERS}-fx{FWD_EXP}-b{int(BIAS)}-"
                      f"prob{int(PROBABILISTIC)}-"
-                     f"g{round(GAMMA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
+                     f"g{round(GAMMA, 4)}-k{round(KAPPA, 4)}-"
+                     f"a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
                      f"rn{REW_NORM}-p{round(POL_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
                      f"type{int(DISCRETE)}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=10,
+            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=None,
             max_episodes=MEMORY_SIZE,
         )
 
         try:
             trainer.learn(
                 evaluate, env_config.max_frames, EPOCHS, 128, 0.1,
-                'binary' if not DISCRETE else 'discrete', verbose=True
+                'continuous' if not DISCRETE else 'discrete', verbose=True,
             )
         except KeyboardInterrupt:
             pass

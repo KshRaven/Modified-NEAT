@@ -53,7 +53,11 @@ class Game(Env):
             checkpoints=config.checkpoints,
         )
 
-        self.players = Players(config.lives, config.max_hiatus)
+        self.players = Players(
+            config.lives,
+            config.max_hiatus,
+            reward_config=config.player.reward,
+        )
         self.agents = Agents(self.grid, self.players, config=config.agent)
         self.agents.reset(1)
 
@@ -74,8 +78,8 @@ class Game(Env):
 
         discrete channels (categorical, embedding-index data) get a MultiDiscrete sized to the *real* vocab —
         agents.max_options for observations, 4 (directions) for actions —
-        rather than an arbitrary Box range. Continuous channels keep using
-        Box over their true value range ([-1, 1] everywhere here).
+        rather than an arbitrary Box range. Continuous observations use Box
+        over [-1, 1]; continuous actions use four unbounded direction scores.
         """
         total = self.agents.total
         state = self.agents.get_state()
@@ -91,7 +95,9 @@ class Game(Env):
         if self.agents.discrete_actions:
             self.action_space = spaces.MultiDiscrete(np.full((total,), 4, dtype=NP_INT))
         else:
-            self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(total, 2), dtype=NP_FLOAT)
+            self.action_space = spaces.Box(
+                low=-np.inf, high=np.inf, shape=(total, 4), dtype=NP_FLOAT,
+            )
 
     # ------------------------------------------------------------------
     def reset(self, **params) -> tuple[Array, dict[str, Any]]:

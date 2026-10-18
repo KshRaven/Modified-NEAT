@@ -5,43 +5,49 @@ from .config import RewardConfig
 from .constants import NP_INT, NP_FLOAT
 
 
+# ------------------------------------------------------------------
+# Numba Helper Functions
+# ------------------------------------------------------------------
+
+
+
 class Players:
     """Vectorized lives/score/fitness bookkeeping for every genome/player."""
 
     def __init__(self, lives: int = 3, max_hiatus: int = 150, reward_config: RewardConfig | None = None):
         self.total = 1
         self.lives_total = lives
-        self.max_hiatus = max_hiatus
+        self.max_hiatus = None if max_hiatus is None or max_hiatus <= 0 else int(max_hiatus)
 
         if reward_config is None:
             reward_config = RewardConfig()
         self.reward_config = reward_config
 
-        self.lives: Array = np.full((self.total,), self.lives_total, dtype=NP_INT)
-        self.deaths: Array = np.full((self.total,), 0, dtype=NP_INT)
-        self.scores: Array = np.full((self.total,), 0, dtype=NP_INT)
+        self.lives: Array       = np.full((self.total,), self.lives_total, dtype=NP_INT)
+        self.deaths: Array      = np.full((self.total,), 0, dtype=NP_INT)
+        self.scores: Array      = np.full((self.total,), 0, dtype=NP_INT)
         self.true_scores: Array = np.full((self.total,), 0, dtype=NP_INT)
         self.disqualified: Array = np.full((self.total,), False, dtype=bool)
-        self.completed: Array = np.full((self.total,), False, dtype=bool)
+        self.completed: Array   = np.full((self.total,), False, dtype=bool)
         self.frames_done: Array = np.full((self.total,), 0, dtype=NP_INT)
-        self.fitness: Array = np.full((self.total,), 0.0, dtype=NP_FLOAT)
+        self.fitness: Array     = np.full((self.total,), 0.0, dtype=NP_FLOAT)
         self.prev_fitness: Array = np.full((self.total,), 0.0, dtype=NP_FLOAT)
-        self.hiatus: Array = np.full((self.total,), 0, dtype=NP_INT)
-        self.best_dist: Array = np.full((self.total,), np.inf, dtype=NP_FLOAT)
+        self.hiatus: Array      = np.full((self.total,), 0, dtype=NP_INT)
+        self.best_dist: Array   = np.full((self.total,), np.inf, dtype=NP_FLOAT)
 
     def reset(self, total: int, start_dist: float):
         self.total = total
-        self.lives = np.full((self.total,), self.lives_total, dtype=NP_INT)
-        self.deaths = np.full((self.total,), 0, dtype=NP_INT)
-        self.scores = np.full((self.total,), 0, dtype=NP_INT)
-        self.true_scores = np.full((self.total,), 0, dtype=NP_INT)
-        self.disqualified = np.full((self.total,), False, dtype=bool)
-        self.completed = np.full((self.total,), False, dtype=bool)
-        self.frames_done = np.full((self.total,), 0, dtype=NP_INT)
-        self.fitness = np.full((self.total,), 0.0, dtype=NP_FLOAT)
-        self.prev_fitness = np.full((self.total,), 0.0, dtype=NP_FLOAT)
-        self.hiatus = np.full((self.total,), 0, dtype=NP_INT)
-        self.best_dist = np.full((self.total,), float(start_dist), dtype=NP_FLOAT)
+        self.lives          = np.full((self.total,), self.lives_total, dtype=NP_INT)
+        self.deaths         = np.full((self.total,), 0, dtype=NP_INT)
+        self.scores         = np.full((self.total,), 0, dtype=NP_INT)
+        self.true_scores    = np.full((self.total,), 0, dtype=NP_INT)
+        self.disqualified   = np.full((self.total,), False, dtype=bool)
+        self.completed      = np.full((self.total,), False, dtype=bool)
+        self.frames_done    = np.full((self.total,), 0, dtype=NP_INT)
+        self.fitness        = np.full((self.total,), 0.0, dtype=NP_FLOAT)
+        self.prev_fitness   = np.full((self.total,), 0.0, dtype=NP_FLOAT)
+        self.hiatus         = np.full((self.total,), 0, dtype=NP_INT)
+        self.best_dist      = np.full((self.total,), float(start_dist), dtype=NP_FLOAT)
 
     def restart(self):
         """Clear the per-life disqualified flag for genomes that still have lives left
@@ -55,7 +61,7 @@ class Players:
         """A player can act iff it still has lives left AND hasn't been
         disqualified (this includes genomes that already reached the goal —
         they stop moving but keep receiving bookkeeping/reward updates)."""
-        return (self.lives > 0) & (~self.disqualified)
+        return (self.lives > 0) & (~self.disqualified) & (~self.completed)
 
     @property
     def active_total(self) -> int:
@@ -69,6 +75,9 @@ class Players:
         bumped_wall: Array,        # bool  (N,) attempted a move blocked by a wall
         moved: Array,              # bool  (N,) actually changed cell this step
         reached_checkpoint: Array | None = None,  # bool (N,) touched a NEW checkpoint cell this step
+        best_path_checkpoint: Array | None = None,
+        deviated_path: Array | None = None,
+        entered_dead_end: Array | None = None,
     ):
         """Orchestrates one step of bookkeeping: lives/deaths/disqualification/stagnation
         first (fitness math depends on the *pre-update* lives/deaths counts), then the
@@ -77,6 +86,12 @@ class Players:
 
         if reached_checkpoint is None:
             reached_checkpoint = np.full((self.total,), False, dtype=bool)
+        if best_path_checkpoint is None:
+            best_path_checkpoint = reached_checkpoint.copy()
+        if deviated_path is None:
+            deviated_path = np.full((self.total,), False, dtype=bool)
+        if entered_dead_end is None:
+            entered_dead_end = np.full((self.total,), False, dtype=bool)
 
         # Genomes that reached the goal on a PREVIOUS step are just "holding":
         # they no longer move, and get a flat reward instead of the usual
@@ -84,10 +99,10 @@ class Players:
         holding = self.completed & ~reached_goal
 
         improved = dist_to_goal < self.best_dist
-        stagnated = self._update_lives_and_status(dist_to_goal, improved, reached_goal, hit_trap)
+        stagnated = self._update_lives_and_status(reached_goal, hit_trap, reached_checkpoint)
         self._update_fitness(
             dist_to_goal, improved, stagnated, reached_goal, hit_trap, bumped_wall,
-            reached_checkpoint, holding,
+            reached_checkpoint, best_path_checkpoint, deviated_path, entered_dead_end, holding,
         )
         self._update_scores(reached_goal, hit_trap)
 
@@ -99,23 +114,29 @@ class Players:
     # ------------------------------------------------------------------
 
     def _update_lives_and_status(
-        self, dist_to_goal: Array, improved: Array, reached_goal: Array, hit_trap: Array,
+        self, reached_goal: Array, hit_trap: Array,
+        reached_checkpoint: Array,
     ) -> Array:
         """Updates hiatus/lives/deaths/disqualified/completed. Returns the `stagnated`
         mask so _update_fitness can penalize it without recomputing it."""
-        self.hiatus[improved] = 0
-        self.hiatus[~improved] += 1
-        stagnated = self.hiatus >= self.max_hiatus
-        self.disqualified[stagnated] = True
-        self.hiatus[stagnated] = 0
+        self.hiatus[reached_checkpoint] = 0
+        if self.max_hiatus is None:
+            stagnated = np.full((self.total,), False, dtype=bool)
+        else:
+            self.hiatus[~reached_checkpoint] += 1
+            stagnated = self.hiatus >= self.max_hiatus
+            self.lives[stagnated] -= 1
+            self.lives = np.clip(self.lives, 0, self.lives_total)
+            self.deaths[stagnated] += 1
+            self.hiatus[stagnated] = 0
 
         self.lives[hit_trap] -= 1
         self.lives = np.clip(self.lives, 0, self.lives_total)
         self.deaths[hit_trap] += 1
         self.disqualified[hit_trap & (self.lives <= 0)] = True
+        self.disqualified[self.lives <= 0] = True
 
         self.completed[reached_goal] = True
-        self.disqualified[reached_goal] = True
 
         return stagnated
 
@@ -127,7 +148,8 @@ class Players:
         self,
         dist_to_goal: Array, improved: Array, stagnated: Array,
         reached_goal: Array, hit_trap: Array, bumped_wall: Array,
-        reached_checkpoint: Array, holding: Array,
+        reached_checkpoint: Array, best_path_checkpoint: Array,
+        deviated_path: Array, entered_dead_end: Array, holding: Array,
     ) -> None:
         rc = self.reward_config
         _lives = self.lives + 1     # >=1, scales rewards
@@ -156,7 +178,7 @@ class Players:
         self.fitness[bumped_wall & active_calc] -= rc.wall_bump_penalty
 
         # ── 4. Stagnation penalty ───────────────────────────────────────
-        self.fitness[stagnated & active_calc] -= rc.stagnation_penalty
+        self.fitness[stagnated & active_calc] -= rc.hiatus_death_penalty
 
         # ── 5. Trap penalty ──────────────────────────────────────────────
         trap_mask = hit_trap & active_calc
@@ -164,8 +186,13 @@ class Players:
 
         # ── 6. Checkpoint reward — given once per genome, the first time it
         #        touches each checkpoint cell along the best path. ──────────
-        chk_mask = reached_checkpoint & active_calc
-        self.fitness[chk_mask] += rc.checkpoint_reward * _lives[chk_mask]
+        best_chk_mask = best_path_checkpoint & active_calc
+        alternate_chk_mask = reached_checkpoint & ~best_path_checkpoint & active_calc
+        self.fitness[best_chk_mask] += rc.best_path_checkpoint_reward * _lives[best_chk_mask]
+        self.fitness[alternate_chk_mask] += rc.alternate_checkpoint_reward * _lives[alternate_chk_mask]
+
+        self.fitness[deviated_path & active_calc] -= rc.path_deviation_penalty
+        self.fitness[entered_dead_end & active_calc] -= rc.dead_end_penalty
 
         # ── 7. Goal reward — scaled by lives remaining and speed (fewer
         #        frames used = more reward). Given exactly once, on the step
@@ -203,7 +230,7 @@ class Players:
         return np.argsort(-self.fitness)
 
     def get_reward(self) -> Array:
-        return self.fitness - self.prev_fitness
+        return (self.fitness - self.prev_fitness) * self.reward_config.reward_scale
 
     def __str__(self):
         return (

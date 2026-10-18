@@ -17,6 +17,7 @@ from itertools import count
 
 import torch
 import random
+import warnings
 import numpy as np
 import math
 
@@ -126,8 +127,12 @@ class Algorithm(object):
         models = list(population.modules.values())
         if isinstance(models, NeatModule):
             models = [models]
-        if isinstance(schedulers, Scheduler):
+        if schedulers is None:
+            schedulers = []
+        elif isinstance(schedulers, Scheduler):
             schedulers = [schedulers]
+        else:
+            schedulers = list(schedulers)
         # ------------------------------ Build ------------------------------ #
         self.models                     = models
         self.population: Population     = population
@@ -161,6 +166,27 @@ class Algorithm(object):
         self.tb: TensorboardLogger = TensorboardLogger(self.log_path)
         self.reporter: TerminalReporter = TerminalReporter()
         self._report_hook: Callable = None
+        # ------------------------------ Scheduling ------------------------------ #
+        # Last step on purpose: subclasses define their tunable attributes BEFORE calling super().__init__,
+        # so every attribute a scheduler targets already exists when it is bound.
+        self._bind_schedulers()
+
+    def _bind_schedulers(self):
+        """
+        Binds every scheduler to this algorithm: variables missing from the config take their starting value
+        from the attribute of the same name here, and each scheduler ``step`` / ``reset`` pushes the scheduled
+        value back onto that attribute. Safe to call again (eg. by a subclass that defines attributes after
+        ``super().__init__``).
+        """
+        config = getattr(self.population, 'config', None)
+        for scheduler in self.schedulers:
+            if config is not None and scheduler.config is not config:
+                warnings.warn(
+                    category=NEATAlgoWarning,
+                    message=f"Scheduler for {scheduler.params} was built from a different Config than the "
+                            f"population's; NEAT sections will not follow it. Build schedulers from population.config."
+                )
+            scheduler.bind(self)
 
     def _init_writer(self):
         """Lazily creates the Tensorboard writer. Kept for backwards compatibility; prefer ``self.tb``."""

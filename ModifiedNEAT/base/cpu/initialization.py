@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.nn import NeatModule
 from ModifiedNEAT.config import Config
 from .functional import calc_grid, get_rng_states, clamp, normal, uniform, get_enumeration
@@ -28,31 +27,33 @@ def initialize_genome(parameter: CPUArray, g: int, x: int, y: int, init_type: in
         parameter[g, x, y] = uniform(rng_states, rng_index, uni_min, uni_max)
 
 
-@njit(nogil=True)
+@njit(parallel=True) # , cache=True)
 def _execute(parameter: CPUArray, init_type: int, mean: float, std: float, minimum: float, maximum: float, rng_states):
-    if parameter.ndim != 3:
-        raise ValueError(f"Expected a 3D array, got {parameter.ndim}")
+    ret_code: int = 0
+    if parameter.ndim != 3: ret_code = 1
 
-    s_g, s_x, s_y = parameter.shape
-    # Parameter shape (genomes, *spatial_dims)
-    g_lim = parameter.shape[0]
-    x_lim = 1 if parameter.ndim <= 1 else parameter.shape[1]
-    y_lim = 1 if parameter.ndim <= 2 else parameter.shape[2]
+    if not ret_code:
+        s_g, s_x, s_y = parameter.shape
+        # Parameter shape (genomes, *spatial_dims)
+        g_lim = parameter.shape[0]
+        x_lim = 1 if parameter.ndim <= 1 else parameter.shape[1]
+        y_lim = 1 if parameter.ndim <= 2 else parameter.shape[2]
 
-    indices, total = get_enumeration(parameter)
-    for i in prange(total):
-        genome_idx, x, y = indices[i]
+        indices, total = get_enumeration(parameter)
+        for i in prange(total):
+            genome_idx, x, y = indices[i]
 
-        # Linearized thread index
-        rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
+            # Linearized thread index
+            rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
-        if genome_idx < g_lim and x < x_lim and y < y_lim:
-            initialize_genome(
-                parameter, genome_idx, x, y, init_type, mean, std, minimum, maximum, rng_states, rng_index
-            )
-            pass
-        else:
-            raise ValueError("Out of bounds")
+            if genome_idx < g_lim and x < x_lim and y < y_lim:
+                initialize_genome(
+                    parameter, genome_idx, x, y, init_type, mean, std, minimum, maximum, rng_states, rng_index
+                )
+            else:
+                ret_code = 2
+
+    return ret_code
 
 
 def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
@@ -84,10 +85,12 @@ def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
 
         try:
             # Run kernel
-            _execute(
+            ret_code = _execute(
                 array, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,
                 config.genome.weight_min_value, config.genome.weight_max_value, rng_states
             )
+            if ret_code == 1: raise ValueError(f"Expected a 3D array, got {array.ndim}")
+            if ret_code == 2: raise ValueError("Out of bounds")
         except Exception as e:
             print(param.dtype, param.device, kernel_shape, threads_total, array.shape, original_shape)
             raise e

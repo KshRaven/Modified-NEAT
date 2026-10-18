@@ -180,7 +180,7 @@ class DevelopWithDashboard(_develop):
 
 setup(
     name="ModifiedNEAT",
-    version="0.7.1",
+    version="0.7.2",
     description="Modified version of python NEAT algorithm that uses PyTorch modules",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",

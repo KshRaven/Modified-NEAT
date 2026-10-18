@@ -9,7 +9,7 @@ matplotlib
 tensorboard
 torch
 gymnasium
-pygame
+pygame-ce>=2.5.8
 colorama
 
 # GPU/CUDA dependencies (optional, install via: pip install -e .[gpu] or python install.py)

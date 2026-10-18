@@ -16,7 +16,7 @@ torch
 
 # Environment dependencies
 gymnasium
-pygame
+pygame-ce>=2.5.8
 
 # # Miscellaneous
 # git+https://github.com/KshRaven/PyTorch-Models.git

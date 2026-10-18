@@ -1,5 +1,4 @@
 from typing import Any
-
 from pygame import Surface, draw
 
 from .config import TileConfig, overwrite_config

@@ -13,8 +13,9 @@ Two model variants are provided, selected off `config.agent.return_grid`
     - BaseModelSeq  : discrete_states / vector observations -> small causal
                       transformer latent + policy head. Same shape/contract
                       as the Car-Racer / Flappy-Bird sequential models.
-    - ConvModelSeq  : return_grid=True -> the observation is a stack of
-                      per-cell grid planes (genomes, C, H, W). Rather than a
+    - ConvModelSeq  : return_grid=True -> the observation is an expanded
+                      scalar grid (continuous: genomes, 1, H, W; discrete:
+                      genomes, H, W). Rather than a
                       fixed torch CNN, this mirrors `ConvNetwork` from
                       `binary_refactored.ipynb`: the grid is spatially
                       flattened to a (C, H*W) sequence and pushed through the
@@ -31,16 +32,10 @@ Two model variants are provided, selected off `config.agent.return_grid`
                       the ticket calls it a later addition; flip it on with
                       `--use_transformer true`.
 
-NOTE ON ASSUMPTIONS: `agent.py` / `grid.py` (which define the exact grid-plane
-layout for `return_grid` observations and `Direction`'s int encoding) were not
-available at the time of writing. `ConvModelSeq` assumes the grid observation
-has shape (channels, rows, cols); adjust `GRID_CHANNELS` below if `agent.py`
-stacks a different number of planes (e.g. walls/traps/goal/self/others). Conv1d
-is used (rather than Conv2d) specifically to match `ConvNetwork`'s evolvable
-building blocks as they exist in `binary_refactored.ipynb` -- this trades away
-2D spatial locality for consistency with that reference architecture.
-Everything else (buffers, PPO update signature, evaluate-loop shape handling)
-mirrors the two reference files exactly.
+The expanded grid uses scalar topology/type values, so the convolutional path
+receives one channel in continuous mode and embeds scalar values in discrete
+mode. Everything else (buffers, PPO update signature, evaluate-loop shape
+handling) mirrors the two reference files exactly.
 """
 
 import ModifiedNEAT as neat
@@ -85,6 +80,20 @@ def fix(value: float, default: float = 1):
     return value
 
 
+def conv_output_dim(size: int, kernel_size: int, stride: int = 1, padding: int = 0) -> int:
+    pad = kernel_size // 2 if padding == -1 else padding
+    return max(1, (size + 2 * pad - kernel_size) // stride + 1)
+
+
+def conv_flatten_dim(dim_size: int, seq_len: int, kernel_size: int, layers: int) -> int:
+    side = int(math.sqrt(seq_len))
+    side = conv_output_dim(side, kernel_size, stride=2, padding=-1)
+    side = conv_output_dim(side, kernel_size, stride=2, padding=-1)
+    for _ in range(layers):
+        side = conv_output_dim(side, kernel_size, stride=1, padding=-1)
+    return dim_size * side * side
+
+
 # ----------------------------------------------------------------------------
 # Shared policy-head / distribution / cache mixin used by both model variants
 # ----------------------------------------------------------------------------
@@ -100,10 +109,8 @@ class _PolicyMixin:
     def extra_repr(self) -> str:
         return f"probabilistic={self.probabilistic}, distro='{self.distribution}'"
 
-    # def dist(self, mean: Tensor, std: Tensor) -> torch.distributions.Distribution:
-    #     if self.distribution == 'discrete':
-    #         return torch.distributions.Categorical(logits=mean)
-    #     return torch.distributions.Normal(mean, std.clamp_min(1e-6))
+    # Continuous action mode emits four unbounded scores in direction order:
+    # UP, RIGHT, DOWN, LEFT. Agents resolves them with argmax.
 
     def _get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
         mean_std = self.pol_proj(latent, keys=keys)
@@ -183,6 +190,7 @@ class BaseModelSeq(_PolicyMixin, mn.Model):
         self.constant      = options.get('constant', 1000)
         self.differential  = options.get('differential', False)
         self.epsilon: float = options.get('epsilon', 1e-9)
+        self.vocab_size: int | None = options.get('vocab_size', None)
 
         if activation is None:
             activation = nn.SiLU()
@@ -190,6 +198,7 @@ class BaseModelSeq(_PolicyMixin, mn.Model):
             dtype = torch.float32
 
         feed_fwd = None if self.use_swiglu else mn.Sequential(
+            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
             mn.Linear(dim_size, dim_size, bias, device, dtype),
             activation,
             mn.Linear(dim_size, dim_size, self.attn_bias, device, dtype),
@@ -202,13 +211,22 @@ class BaseModelSeq(_PolicyMixin, mn.Model):
             residual=True, normalize=True, constant=self.constant,
             device=device, dtype=dtype
         ) if max_seq_len is not None else mn.Identity()
+        input_projection = (
+            mn.Sequential(
+                mn.Embedding(self.vocab_size, dim_size, None, device, dtype),
+                nn.Flatten(start_dim=-2),
+                mn.Linear(inputs * dim_size, dim_size, True, device, dtype),
+            ) if self.vocab_size is not None else
+            mn.Linear(inputs, dim_size, True, device, dtype)
+        )
         self.lat_proj = mn.Sequential(
-            mn.Linear(inputs, dim_size, True, device, dtype),
+            input_projection,
             transformer,
         )
         self.pol_proj = mn.Sequential(*[
+            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
             mn.Linear(dim_size, dim_size, bias, device, dtype),
-            nn.Tanh(),
+            nn.SiLU(),
             mn.Linear(dim_size, 2 * outputs, True, device, dtype),
         ])
 
@@ -272,6 +290,7 @@ class ConvModelSeq(_PolicyMixin, mn.Model):
         self.probabilistic   = probabilistic
         self.epsilon: float  = options.get('epsilon', 1e-9)
         self.vocab_size: int | None = options.get('vocab_size', None)
+        self.flat_features   = conv_flatten_dim(dim_size, seq_len, kernel_size, layers)
 
         if dtype is None: dtype = torch.float32
 
@@ -313,7 +332,7 @@ class ConvModelSeq(_PolicyMixin, mn.Model):
         self.out_proj = mn.Sequential(
             mn.Transpose(-3, -1), # Take embedding dim to last dim
             nn.Flatten(start_dim=-3),
-            mn.Linear(dim_size * int(math.sqrt(seq_len) // (2 ** 2)) ** 2, dim_size, bias=bias, device=device, dtype=dtype),
+            mn.Linear(self.flat_features, dim_size, bias=bias, device=device, dtype=dtype),
             nn.SiLU(),
         )
         self.pol_proj = mn.Sequential(*[
@@ -342,8 +361,8 @@ class ConvModelSeq(_PolicyMixin, mn.Model):
 
     def reset_cache(self): pass
             
-            
-class SequenceBuilder(Module):
+
+class SequenceBuilder(nn.Module):
     def __init__(self, max_seq_len: int | None, dim: int):
         super().__init__()
         assert max_seq_len is None or max_seq_len > 0
@@ -356,56 +375,109 @@ class SequenceBuilder(Module):
         self.sequence = None
         
     def forward(self, tensor: Tensor):
-        if self.max_seq_len is None: 
-            return tensor
+        if self.max_seq_len is None: return tensor
         tensor = tensor.unsqueeze(self.dim)
         # Initialize
         if self.sequence is None:
             self.sequence = tensor.repeat_interleave(self.max_seq_len, self.dim) # (genomes, *dims, seq_len, features)
-            self.indices = torch.arange(self.max_seq_len)
-            torch.index_fill(self.sequence, self.dim, self.indices[:-1], 0.)
+            self.indices  = torch.arange(self.max_seq_len)
+            self.sequence = torch.index_fill(self.sequence, self.dim, self.indices[:-1], 0.)
         # Shift
         else:
             torch.index_select(self.sequence, self.dim, self.indices[:-1])[:] = torch.index_select(self.sequence, self.dim, self.indices[1:])
-            torch.index_select(self.sequence, self.dim, self.indices[-1])[:] = tensor
+            torch.index_select(self.sequence, self.dim, self.indices[-1])[:]  = tensor
         return self.sequence
 
 
 # ----------------------------------------------------------------------------
-# Small 8x8 maze config for starters
+# Experiment parameters
 # ----------------------------------------------------------------------------
-def build_env_config(return_grid: bool, discrete_states: bool = False, discrete_actions: bool = True) -> EnvironmentConfig:
+RETURN_GRID      = True
+USE_TRANSFORMER  = False
+RENDER_MODE      = "human"
+GRID_SIZE        = (10, 10)
+CELL_SIZE        = 40
+PLAYER_LIVES     = 5
+RESET_ON_DEATH   = False
+USE_EUCLIDEAN_DISTANCE = True
+
+DISCRETE_STATES  = True
+DISCRETE_ACTIONS = True
+GENOMES          = 200
+MAX_SEQ_LEN      = 4
+OUTPUTS          = 4
+EMBED_SIZE       = 32
+LAYERS           = 1
+HEADS            = 1
+KV_HEADS         = None
+BIAS             = True
+DIFFERENTIAL     = False
+SWIGLU           = False
+ACTIVATION       = nn.SiLU()
+PROBABILISTIC    = True
+DISTRIBUTION     = 'discrete' if DISCRETE_ACTIONS else 'normal'
+SDTYPE           = torch.long if DISCRETE_STATES else DTYPE
+
+WEIGHT_INIT_STD         = 0.10
+WEIGHT_MUTATE_POWER     = 0.04
+WEIGHT_MUTATE_RATE      = 0.60
+WEIGHT_REPLACE_RATE     = 0.0
+WEIGHT_ADD_PROB         = 0.00
+WEIGHT_DEL_PROB         = 0.00
+PARAM_EPSILON           = 0.0
+MIN_SPECIES_SIZE        = GENOMES
+PURGE                   = 1
+ELITISM                 = 0.33
+CLONE_THRESHOLD         = 0.50
+SURVIVAL_THRESHOLD      = 0.10
+CROSS_THRESHOLD         = 0.00
+COMPATIBILITY_THRESHOLD = np.inf
+MAX_STAGNATION          = 1
+SPECIES_ELITISM         = 2
+DARWIN_MULTIPLIER       = 0.33
+CROSS_MULTIPLIER        = 0.75
+PRESERVE_ELITE          = False
+
+MEMORY_SIZE = 5
+GAMMA       = fix(np.exp(np.log(0.01) / 128), 0.0)
+KAPPA       = 0.0
+ALPHA       = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
+BETA        = 1.0
+ALPHA_ORDER = 0
+BETA_ORDER  = 0
+REW_NORM    = 4
+REW_REG     = 1.0
+PPO_REG     = 0.67
+POL_REG     = 0.33
+ENT_REG     = 0.50
+CPY_REG     = 0.0
+DIV_REG     = 0.01
+SEGR_SIZE   = None
+STEPS       = 2000
+EPOCHS      = 1_000
+
+FILE_NAME = "MazeModelSeq"
+FILE_DIR  = "maze-runner/sequential"
+FILE_NO   = None
+INIT_GEN  = None
+ENV: Game | None = None
+MODEL: mn.Model | None = None
+CONFIG: neat.Config | None = None
+
+
+def build_env_config(return_grid: bool = RETURN_GRID,
+                     discrete_states: bool = DISCRETE_STATES,
+                     discrete_actions: bool = DISCRETE_ACTIONS) -> EnvironmentConfig:
     config = EnvironmentConfig()
-    # Small grid to start with -- 8x8.
-    config.grid.grid_size           = (16, 16)
-    config.grid.cell_size           = 40
-    config.player.lives             = 5
+    config.grid.grid_size           = GRID_SIZE
+    config.grid.cell_size           = CELL_SIZE
+    config.player.lives             = PLAYER_LIVES
     config.agent.return_grid        = return_grid
     config.agent.discrete_states    = discrete_states
-    config.agent.discrete_actions   = discrete_actions   # 4-way movement (Direction enum)
-    config.agent.reset_on_death     = False
+    config.agent.discrete_actions   = discrete_actions
+    config.agent.reset_on_death     = RESET_ON_DEATH
+    config.agent.use_euclidean_distance = USE_EUCLIDEAN_DISTANCE
     return config
-
-
-ENV: Game | None = None
-
-# ---- Model properties ----
-DISCRETE_STATES = False
-DISCRETE_ACTIONS = False
-GENOMES         = 200
-MAX_SEQ_LEN     = 6          # one grid-cell decision per step; no lookback needed
-OUTPUTS         = 4          # 4-way discrete movement (Direction enum)
-EMBED_SIZE      = 32
-LAYERS          = 1
-HEADS           = 1
-KV_HEADS        = None
-BIAS            = True
-DIFFERENTIAL    = False
-SWIGLU          = False
-ACTIVATION      = nn.SiLU()
-PROBABILISTIC   = True
-DISTRIBUTION    = 'discrete' if DISCRETE_ACTIONS else 'normal'
-SDTYPE = torch.long if DISCRETE_STATES else DTYPE
 
 
 def evaluate(population: 'neat.Population', **options):
@@ -491,9 +563,9 @@ def evaluate(population: 'neat.Population', **options):
 
     fitnesses = ENV.players.fitness
     mf, sf = fitnesses.mean(), fitnesses.std()
-    cutoff = mf - (1.0 * sf)
+    cutoff = mf - (1.5 * sf)
     for idx, (fitness, genome) in enumerate(zip(fitnesses, population.genomes.values())):
-        # if fitness < cutoff: population.to_delete.append(genome.key)
+        if fitness < cutoff: population.to_delete.append(genome.key)
         genome.fitness = fitness.item()
 
     MODEL.disable_cache()
@@ -505,7 +577,7 @@ def evaluate(population: 'neat.Population', **options):
 
 
 def run():
-    global ENV, MODEL, GENOMES, FILE_NAME, FILE_DIR, FILE_NO, INIT_GEN
+    global ENV, MODEL, FILE_NO, INIT_GEN, CONFIG, FILE_NAME
 
     parser = argparse.ArgumentParser(description='Run PPO/NEAT on the Maze-Runner env (Sequential)')
     parser.add_argument('--rm', type=str, default="human",
@@ -514,11 +586,6 @@ def run():
                         help='Load a previously trained model (True for latest, or a file number)')
     parser.add_argument('--train', type=str, default='true',
                         help='Train the model (True/False or 1/0, default: True)')
-    parser.add_argument('--return_grid', type=str, default='false',
-                        help='Use grid observations + the convolutional model instead of the vector model')
-    parser.add_argument('--use_transformer', type=str, default='false',
-                        help='(return_grid only) insert a small transformer after the conv body, '
-                             'before the final fc layers')
     args = parser.parse_args()
 
     def str_to_bool(value: str) -> bool:
@@ -530,33 +597,29 @@ def run():
             return False
         raise ValueError(f"Cannot convert '{value}' to boolean")
 
-    RETURN_GRID = False # str_to_bool(args.return_grid)
-
-    # ---- Game settings: 8x8 starter maze ----
-    env_config = build_env_config(RETURN_GRID, DISCRETE_STATES, DISCRETE_ACTIONS)
+    env_config = build_env_config()
     ENV = Game(render_mode=args.rm, config=env_config)
 
     if RETURN_GRID:
         # state_shape   = ENV.observation_space.shape  # (C, H, W)
         test_state    = ENV.agents.get_state()
         state_shape   = test_state.shape
-        GRID_CHANNELS = state_shape[-3] # state_shape[0]
+        GRID_CHANNELS = 1 if DISCRETE_STATES else state_shape[-3]
         SEQ_LEN_GRID  = math.prod(state_shape[-2:]) # state_shape[1] * state_shape[2]   # H * W, flattened grid length
         vocab_size    = int(ENV.agents.max_options or 1)
         print(f"Channels = {GRID_CHANNELS}, Seq Len = {SEQ_LEN_GRID}")
         KERNEL_SIZE   = 3
-        CONV_LAYERS   = 3
+        CONV_LAYERS   = 2
         GROUPS        = 1
-        USE_TX        = str_to_bool(args.use_transformer)
         MODEL = ConvModelSeq(
             GRID_CHANNELS, EMBED_SIZE, KERNEL_SIZE, SEQ_LEN_GRID, CONV_LAYERS,
-            OUTPUTS, GROUPS, USE_TX, tx_layers=1, heads=HEADS, kv_heads=KV_HEADS,
+            OUTPUTS, GROUPS, USE_TRANSFORMER, tx_layers=1, heads=HEADS, kv_heads=KV_HEADS,
             bias=BIAS, probabilistic=PROBABILISTIC, device=DEVICE, dtype=DTYPE,
             distribution=DISTRIBUTION, vocab_size=vocab_size if DISCRETE_STATES else None,
         )
         BASE_NAME = (
             f"MazeModelConv-C{GRID_CHANNELS}_E{EMBED_SIZE}_K{KERNEL_SIZE}_L{CONV_LAYERS}_"
-            f"TX{int(USE_TX)}_B{int(BIAS)}"
+            f"TX{int(USE_TRANSFORMER)}_B{int(BIAS)}"
         )
     else:
         test_state    = ENV.agents.get_state()
@@ -575,8 +638,7 @@ def run():
         )
     print(MODEL)
 
-    FILE_NAME = f"{BASE_NAME}"
-    FILE_DIR  = "maze-runner/sequential"
+    FILE_NAME = BASE_NAME
     FILE_NO   = None
     INIT_GEN  = None
 
@@ -584,28 +646,28 @@ def run():
     CONFIG = neat.Config('sequential', '.config')
     CONFIG.genome.init_type                  = 'normal'
     CONFIG.genome.weight_init_mean           = 0.0
-    CONFIG.genome.weight_init_std            = 0.15
+    CONFIG.genome.weight_init_std            = WEIGHT_INIT_STD
     CONFIG.genome.weight_min_value           = -np.inf
     CONFIG.genome.weight_max_value           = +np.inf
-    CONFIG.genome.weight_mutate_power        = 0.008 
-    CONFIG.genome.weight_mutate_rate         = 0.65
-    CONFIG.genome.weight_replace_rate        = 0.0
-    CONFIG.genome.weight_add_prob            = 0.00
-    CONFIG.genome.weight_del_prob            = 0.00
-    CONFIG.genome.param_epsilon              = 1e-12
+    CONFIG.genome.weight_mutate_power        = WEIGHT_MUTATE_POWER
+    CONFIG.genome.weight_mutate_rate         = WEIGHT_MUTATE_RATE
+    CONFIG.genome.weight_replace_rate        = WEIGHT_REPLACE_RATE
+    CONFIG.genome.weight_add_prob            = WEIGHT_ADD_PROB
+    CONFIG.genome.weight_del_prob            = WEIGHT_DEL_PROB
+    CONFIG.genome.param_epsilon              = PARAM_EPSILON
     CONFIG.genome.single_structural_mutation = True
-    CONFIG.reproduction.min_species_size     = GENOMES
-    CONFIG.reproduction.purge                = 1
-    CONFIG.reproduction.elitism              = 0.33
-    CONFIG.reproduction.clone_threshold      = 0.50
-    CONFIG.reproduction.survival_threshold   = 0.10
-    CONFIG.reproduction.cross_threshold      = 0.00
-    CONFIG.species.compatibility_threshold   = np.inf
-    CONFIG.stagnation.max_stagnation         = 1
-    CONFIG.stagnation.species_elitism        = 2
-    CONFIG.reproduction.darwin_multiplier    = 0.40
-    CONFIG.reproduction.cross_multiplier     = 0.75
-    CONFIG.reproduction.preserve_elite       = False
+    CONFIG.reproduction.min_species_size     = MIN_SPECIES_SIZE
+    CONFIG.reproduction.purge                = PURGE
+    CONFIG.reproduction.elitism              = ELITISM
+    CONFIG.reproduction.clone_threshold      = CLONE_THRESHOLD
+    CONFIG.reproduction.survival_threshold   = SURVIVAL_THRESHOLD
+    CONFIG.reproduction.cross_threshold      = CROSS_THRESHOLD
+    CONFIG.species.compatibility_threshold   = COMPATIBILITY_THRESHOLD
+    CONFIG.stagnation.max_stagnation         = MAX_STAGNATION
+    CONFIG.stagnation.species_elitism        = SPECIES_ELITISM
+    CONFIG.reproduction.darwin_multiplier    = DARWIN_MULTIPLIER
+    CONFIG.reproduction.cross_multiplier     = CROSS_MULTIPLIER
+    CONFIG.reproduction.preserve_elite       = PRESERVE_ELITE
     CONFIG.save()
     CONFIG.load(2)
 
@@ -626,21 +688,6 @@ def run():
                     exit(1)
 
     # ---- Trainer (PPO) properties ----
-    MEMORY_SIZE  = 5
-    GAMMA        = fix(np.exp(np.log(0.01) / 128), 0.0)
-    KAPPA        = 0.0
-    ALPHA        = fix(np.exp(np.log(10.0) / (MEMORY_SIZE - 1)), 1.0)
-    BETA         = 1.0 # float(np.exp(np.log(10.0) / max(1, MEMORY_SIZE - 1)))
-    ALPHA_ORDER  = 0
-    BETA_ORDER   = 0
-    REW_NORM     = 3
-    REW_REG      = 1.0
-    PPO_REG      = 0.33
-    POL_REG      = 0.33
-    ENT_REG      = 0.99
-    CPY_REG      = 0.0
-    DIV_REG      = 0.0
-    SEGR_SIZE    = None
     print(f"Gamma={GAMMA:.4f}, Kappa={KAPPA:.4f}, Alpha={ALPHA:.4f}, Beta={BETA:.4f}, ")
 
     STEPS  = 2000 # 8 * 8 * 10   # rollout steps per epoch, scaled to the 8x8 grid
@@ -650,7 +697,7 @@ def run():
         trainer = neat.rl.PPO(
             POPULATION,
             schedulers=[
-                scheduler.CosineAnnealing(CONFIG, 20, 0.1, 'weight_mutate_power', False, True),
+                scheduler.CosineAnnealing(CONFIG, 20, 0.01, ['weight_init_std', 'weight_mutate_power'], True, True),
                 # scheduler.BinaryAnnealing(CONFIG, 20, 0.10, 'cross_threshold'),
             ],
             device=DEVICE, dtype=DTYPE,

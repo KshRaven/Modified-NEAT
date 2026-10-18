@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.nn.genome import Genome, INT
@@ -38,9 +37,9 @@ def calc_distance(parameter: CPUArray, total_distance: CPUArray,
     value1 = parameter[genome1, x]
 
     current_distance = 0 # total_distance[genome0, genome1]
-    disjoint_value = 0
+    disjoint_value   = 0
     if value0 == 0:
-        disjoint_value = disjoint_value + 1
+        disjoint_value += 1
     if value1 == 0:
         disjoint_value = disjoint_value + 1
     if value0 != 0 and value1 != 0:
@@ -56,52 +55,64 @@ def calc_distance(parameter: CPUArray, total_distance: CPUArray,
     total_distance[genome0, genome1] += current_distance
 
 
-@njit(nogil=True)
+@njit(parallel=True) # , cache=True)
+# NOTE: Same fix as crossover(): a single return point and ret_code instead of
+#       raising inside a prange body. Only the outer `genome0` loop is a prange -
+#       each iteration exclusively owns row `genome0` of total_distance (lower
+#       triangle writes total_distance[genome0, genome1>=genome0], upper triangle
+#       writes total_distance[genome0, genome1<genome0] after reading the already
+#       completed lower triangle) so there is no cross-thread write conflict.
+#       The inner loops stay plain `range` - nesting prange inside prange gives
+#       numba nothing extra here and only muddies which loop actually gets parallelized.
 def get_distance(parameter: CPUArray, total_distance: CPUArray,
                  compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
-    if parameter.ndim != 2:
-        raise ValueError(f"Expected a 2D array, got {parameter.ndim}")
+    ret_code: int = 0
+    if parameter.ndim != 2: ret_code = 1
 
-    g_lim = total_distance.shape[0]
-    x_lim = parameter.shape[1]
+    if not ret_code:
+        g_lim = total_distance.shape[0]
+        x_lim = parameter.shape[1]
 
-    # Fill the lower triangle
-    for genome0 in prange(g_lim):
-        for genome1 in prange(genome0, g_lim):
-            for x in prange(x_lim):
+        # TODO: The nested pranges may raise performance warning so find a way to combine
+        #       and iterate over a single integer like other parralel functions
+        # Fill the lower triangle
+        for genome0 in prange(g_lim):
+            for genome1 in prange(genome0, g_lim):
+                for x in prange(x_lim):
+                    # Assert limits
+                    if genome0 < g_lim and genome1 < g_lim and x < x_lim:
+                        if genome0 == genome1:
+                            total_distance[genome0, genome1] += 0.0
+                        else:
+                            calc_distance(
+                                parameter, total_distance, genome0, genome1, x,
+                                compatibility_weight_coefficient, compatibility_disjoint_coefficient
+                            )
+                    else: ret_code = 2
+        # Fill the upper triangle
+        for genome0 in prange(g_lim):
+            for genome1 in prange(genome0):
                 # Assert limits
-                if genome0 < g_lim and genome1 < g_lim and x < x_lim:
-                    if genome0 == genome1:
-                        total_distance[genome0, genome1] += 0.0
-                    else:
-                        calc_distance(
-                            parameter, total_distance, genome0, genome1, x,
-                            compatibility_weight_coefficient, compatibility_disjoint_coefficient
-                        )
-                else:
-                    raise ValueError("Out of bounds")
-    # Fill the upper triangle
-    for genome0 in prange(g_lim):
-        for genome1 in prange(genome0):
-            # Assert limits
-            if genome0 < g_lim and genome1 < g_lim:
-                distance = total_distance[genome1, genome0]
-                if distance == 0:
-                    print(f"Was running genomes '{genome0}', and '{genome1}', "
-                          f"distances = {total_distance[genome0, genome1]}, {total_distance[genome1, genome0]}, ")
-                    raise ValueError(
-                        f"The genetic distance between two different genomes cannot be 0, "
-                        f"\nsince crossover and mutation exists. Even clones are mutated after creation"
-                        f"\nWithin the config file:"
-                        f"\n1. Check the weight and disjoint coefficient values."
-                        f"\n2. Check mutation coefficients' values  ")
-                total_distance[genome0, genome1] = distance
-            else:
-                raise ValueError("Out of bounds")
+                if genome0 < g_lim and genome1 < g_lim:
+                    distance = total_distance[genome1, genome0]
+                    total_distance[genome0, genome1] = distance
+                else: ret_code = 2
+
+    return ret_code
 
 
 @njit(nogil=True)
+# NOTE: Left as nogil (not parallel=True) on purpose: every prange iteration here
+#       inserts into the shared typed dict `distances`, and concurrent inserts into
+#       a numba typed Dict (which can trigger a resize) are not safe the way
+#       concurrent writes to distinct array slots are in crossover()/mutate()/
+#       get_distance(). Parallelizing this would need a redesign (e.g. write into
+#       a pre-sized array and build the dict from it afterwards single-threaded).
+# TODO: New updates remove the effect of parralel on Dict, List and Set resize so func
+#       can be paralellized
 def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArray, mapping: dict[int, int]):
+    ret_code: int = 0
+    
     hits, misses = 0, 0
     keys = list(mapping.keys())
     for i in prange(len(keys)):
@@ -114,11 +125,29 @@ def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArra
             # if ki != kj:
             key = (gi, gj)
             if key not in distances:
-                distances[key] = total_distance[ii, ij]
+                distance: float = total_distance[ii, ij]
+                if distance == 0.0 and gi != gj:
+                    if ret_code != 1:
+                        print(
+                            f"Was running genomes '{gi}', and '{gj}', "
+                            f"distances = {total_distance[ii, ij]}, {total_distance[ij, ii]}, "
+                        )
+                    ret_code = 1
+                distances[key] = distance
                 misses += 1
             else:
                 hits += 1
-    return hits, misses
+
+    if ret_code == 1:
+        raise ValueError(
+            f"The genetic distance between two different genomes cannot be 0, "
+            f"\nsince crossover and mutation exists. Even clones are mutated after creation"
+            f"\nWithin the config file:"
+            f"\n1. Check the weight and disjoint coefficient values."
+            f"\n2. Check mutation coefficients' values  "
+        )
+    
+    return hits, misses # , ret_code
 
 
 def update_distances_cache(config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,
@@ -145,11 +174,13 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
         array = np.asarray(reshape(param.data.clone().to(dtype), 2)[0])
 
         try:
-            get_distance(
+            ret_code = get_distance(
                 array, total_distance,
                 config.genome.compatibility_weight_coefficient,
                 config.genome.compatibility_disjoint_coefficient
             )
+            if ret_code == 1: raise ValueError(f"Expected a 2D array, got {array.ndim}")
+            if ret_code == 2: raise ValueError("Out of bounds")
         except Exception as e:
             print(param.dtype, param.device, array.shape, param.data.shape)
             raise e
@@ -160,8 +191,9 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
     if verbose and verbose >= 2:
         print(f"{CM('Ran distance kernel', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
 
-    h, m = update_dict(genome_cache.distances, total_distance, Dict(module.mapping.items()))
     genome_cache.total_distance = total_distance
+    h, m = update_dict(genome_cache.distances, total_distance, Dict(module.mapping.items()))
+    # genome_cache.total_distance = total_distance
     genome_cache.hits += h
     genome_cache.misses += m
 
@@ -170,6 +202,14 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
 
 
 @njit(nogil=True)
+# NOTE: _get_representatives/_get_species/_update_collection below are left as
+#       nogil rather than parallel=True: unlike crossover()/mutate()/_execute()/
+#       get_distance(), these mutate shared dicts (representatives, members,
+#       species) and, in _get_species, hand out new species keys from a single
+#       running counter and call unspeciated.remove(...) - all inherently
+#       sequential/order-dependent, not an embarrassingly-parallel per-element
+#       grid like the array kernels above.
+# TODO: Can be parallelized like update_dict above. Though caching may not be possible due to custom classes
 def _get_representatives(species_dict: dict[int, Species], population: dict[int, Genome], unspeciated: list[int],
                          representatives: dict[int, int], members: dict[int, list[int]],
                          distance_cache: GenomeDistanceCache):

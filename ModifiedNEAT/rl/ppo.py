@@ -65,18 +65,9 @@ class PPO(Algorithm):
         for var in ['schedulers', 'device', 'dtype']:
             if var in options:
                 del options[var]
-        super().__init__(population, schedulers, device, dtype, **options)
+        base_options = dict(options)  # what the base class received before; parsing below may consume `options`
 
-        # Base
-
-        # Buffers
-        self.primary.add_buffers('state', 'action', 'reward', 'log_prob', 'ep_map',)
-        # Map each episode's return and policy/value metrics to use as scores.
-        self.secondary.add_buffers('ec_return', 'ep_loss', 'ep_val', 'ep_map', 'ep_len', 'ep_mean', 'ep_std')
-        # TODO: Fix deque and other buffer clearing methods to not raise Index or Value errors when clearing/dequeing shorter, unfilled or non-existent buffers
-        self.score_idx = 0
-
-        # Options
+        # Options -- defined BEFORE super().__init__ so the base class can bind schedulers to these attributes
         self.gamma: float       = manage_params(options, 'gamma', 0.99)
         self.kappa: float       = manage_params(options, 'kappa', 0.00)
         self.alpha: float       = manage_params(options, 'alpha', 1.00)
@@ -101,6 +92,17 @@ class PPO(Algorithm):
                 category=NEATAlgoWarning,
                 message=f"Not recommended to apply both max_steps and max_episodes!"
             )
+
+        super().__init__(population, schedulers, device, dtype, **base_options)
+
+        # Base
+
+        # Buffers
+        self.primary.add_buffers('state', 'action', 'reward', 'log_prob', 'ep_map',)
+        # Map each episode's return and policy/value metrics to use as scores.
+        self.secondary.add_buffers('ec_return', 'ep_loss', 'ep_val', 'ep_map', 'ep_len', 'ep_mean', 'ep_std')
+        # TODO: Fix deque and other buffer clearing methods to not raise Index or Value errors when clearing/dequeing shorter, unfilled or non-existent buffers
+        self.score_idx = 0
 
         self.logging.add_buffers(
             'ep_len_mean', 'ep_len_std', 'ep_rew_mean', 'ep_rew_std', 'policy_loss',
