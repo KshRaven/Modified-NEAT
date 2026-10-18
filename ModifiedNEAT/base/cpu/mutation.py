@@ -94,7 +94,7 @@ def mutate(
             rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
             if genome_idx < g_lim and x < x_lim and y < y_lim:
-                if children[genome_idx] is True:
+                if children[genome_idx]:
                     mutate_genome(
                         updates, genome_idx, x, y,
                         mutate_rate, mutate_power,

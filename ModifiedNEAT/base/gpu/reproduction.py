@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.nn.base import NeatModule, NeatParameter, check_for_illegal_zeros
 from ModifiedNEAT.nn.genome import Genome
 from ModifiedNEAT.config import Config
@@ -313,7 +312,8 @@ def crossover(genus: int, source: GPUArray, updates: GPUArray, parents: GPUArray
             # For elite genomes or clones
             if (parent0 == parent1) and (genus == genus0 == genus1):
                 value = get_value(source, parent0, x, y)
-                filled[genome_idx, x, y, :2] = True
+                filled[genome_idx, x, y, 0] = True
+                filled[genome_idx, x, y, 1] = True
             # For child crossover
             else:
                 already_filled = filled0 or filled1
@@ -377,14 +377,16 @@ def update_children(
             emeg_key = np.random.choice(emergency_keys, p=emergency_prob)
             if genome.key in old_population:
                 sources[index] = (old_mapping[key], old_mapping[key], old_mapping[key])
-                genera[index]  = (genus_mapping[genome.genus], genus_mapping[genome.genus], genus_mapping[genus])
+                # NOTE: genera must store RAW genus IDs (not genus_mapping indices): the kernel only compares them
+                # against the raw genus ids passed in, so mapped indices leave array_update at its 0.0 fill value.
+                genera[index]  = (genome.genus, genome.genus, genus)
             else:
                 parent1, parent2 = ancestors[key]
                 if parent1.fitness < parent2.fitness:
                     parent1, parent2 = parent2, parent1
                 mapping1, mapping2 = modules[parent1.genus].mapping, modules[parent2.genus].mapping
                 sources[index] = (mapping1[parent1.key], mapping2[parent2.key], old_mapping[emeg_key])
-                genera[index]  = (genus_mapping[parent1.genus], genus_mapping[parent2.genus], genus)
+                genera[index]  = (parent1.genus, parent2.genus, genus)
     except Exception as e:
         for m in modules.values():
             print(m.mapping)
@@ -451,7 +453,7 @@ def update_children(
             array_sources = tuple([cp.asarray(reshape(p.data.clone().to(dtype))[0]) for p in param_group])
             # ------------------------------ Define crossover kernel and randomizer values ------------------------------ #
             genome_num = len(new_population)
-            kernel_shape = calc_grid(genome_num + 5, *array_update.shape[1:3], tpb=tpb)
+            kernel_shape = calc_grid(genome_num, *array_update.shape[1:3], tpb=tpb)
             # if verbose and verbose >= 3:
             #     print(param.dtype, param.device, kernel_shape, as_shape, au_shape, array_source.shape, array_update.shape)
             probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False, use_cuda=True)

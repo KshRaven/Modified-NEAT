@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.base.gpu.functional import clamp, prob, get_value, set_value, normal
 from ModifiedNEAT.base.gpu.initialization import initialize_genome
 
@@ -33,7 +32,7 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
             if zero_param:
                 initialize_genome(
                     parameter, g, x, y,
-                    init_type, mean, std + mutate_power, minimum, maximum,
+                    init_type, mean, std, minimum, maximum,
                     normals, rng_index
                 )
             # else:
@@ -48,7 +47,7 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
             if zero_param:
                 initialize_genome(
                     parameter, g, x, y,
-                    init_type, mean, std + mutate_power, minimum, maximum,
+                    init_type, mean, std, minimum, maximum,
                     normals, rng_index
                 )
             # else:
@@ -80,7 +79,7 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
 def mutate(
         updates: GPUArray, children: GPUArray,
         mutate_rate: float, mutate_power: float,
-        replace_rate: float, init_type: str, mean: float, std: float, minimum: float, maximum: float,
+        replace_rate: float, init_type: int, mean: float, std: float, minimum: float, maximum: float,
         ssm: bool, add_param: float, delete_param: float, epsilon: float,
         probabilities: tuple[GPUArray, ...], normals: GPUArray,
         # debugging: GPUArray
@@ -96,7 +95,7 @@ def mutate(
     rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
 
     if genome_idx < g_lim and x < x_lim and y < y_lim:
-        if children[genome_idx] is True:
+        if children[genome_idx]:
             mutate_genome(
                 updates, genome_idx, x, y,
                 mutate_rate, mutate_power,
