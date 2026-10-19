@@ -73,6 +73,52 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
     return spawn_amounts
 
 
+@njit(parallel=True)
+def select_parents(pool_fitness, pool_foreign, pool_keys, spawn, clone_cutoff, coeff_cross, coeff_fitness,
+                   first_parents, second_parents):
+    """
+    Array based parent selection (same scoring as the former per-child `choice`): the fitness/genus factors are
+    computed once per pool and every child only draws its random numbers, so children are independent and can be
+    chosen in parallel. Genome objects are only touched afterwards, serially.
+    """
+    size = len(pool_fitness)
+    coeff_cross = max(-1.0, min(1.0, coeff_cross))
+    coeff_fitness = max(-1.0, min(1.0, coeff_fitness))
+    global_max = np.max(pool_fitness)
+    global_min = np.min(pool_fitness)
+    diff = global_max - global_min
+
+    base = np.zeros(size, np.float64)
+    for i in range(size):
+        if coeff_fitness != 0 and global_max != global_min:
+            factor = (pool_fitness[i] - global_min) / diff * coeff_fitness
+            if coeff_cross > 0 and pool_foreign[i]:
+                factor *= coeff_cross
+            if coeff_cross < 0 and not pool_foreign[i]:
+                factor *= 1 - coeff_cross
+        else:
+            factor = 0.0
+        base[i] = factor
+
+    for s in prange(spawn):
+        probabilities = np.random.rand(size)
+        best = np.argmax(probabilities + base)
+        first_parents[s] = best
+        if s < clone_cutoff:
+            second_parents[s] = best
+        else:
+            probabilities = np.random.rand(size)
+            full = np.empty(size, np.float64)
+            for i in range(size):
+                p = probabilities[i]
+                f = base[i]
+                if pool_keys[i] == pool_keys[best]:
+                    p *= 0.1
+                    f *= 0.0
+                full[i] = p + f
+            second_parents[s] = np.argmax(full)
+
+
 @njit(nogil=True)
 # TODO: Left as nogil rather than parallel=True. The `for spawn_index in prange(spawn):`
 #       loop near the bottom looks like the array kernels above but writes each
@@ -146,53 +192,27 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         genomes = List(members.values())
         genomes_total = len(genomes)
 
-        # Bubble sort
+        # Stable O(n log n) argsort (same ordering as the previous stable bubble sort)
+        keys = np.zeros(genomes_total, np.float64)
+        if crit == 'min':
+            for i in range(genomes_total):
+                keys[i] = genomes[i].fitness
+        elif crit == 'max':
+            for i in range(genomes_total):
+                keys[i] = -genomes[i].fitness
+        elif crit == 'mean':
+            # Sort by distance to mean fitness (mean is constant for the whole sort)
+            mean_fitness = 0.0
+            for i in range(genomes_total):
+                mean_fitness += genomes[i].fitness
+            mean_fitness = mean_fitness / max(genomes_total, 1)
+            for i in range(genomes_total):
+                keys[i] = abs(genomes[i].fitness - mean_fitness)
+        order = np.argsort(keys, kind='mergesort')
+        result = List.empty_list(GENOME)
         for i in range(genomes_total):
-            for j in range(0, genomes_total - i - 1):
-                if crit == 'min':
-                    if genomes[j].fitness > genomes[j + 1].fitness:
-                        genomes[j], genomes[j + 1] = genomes[j + 1], genomes[j]
-                elif crit == 'max':
-                    if genomes[j].fitness < genomes[j + 1].fitness:
-                        genomes[j], genomes[j + 1] = genomes[j + 1], genomes[j]
-                elif crit == 'mean':
-                    # Sort by distance to mean fitness
-                    mean_fitness = sum([g.fitness for g in genomes]) / len(genomes)
-                    dist_j = abs(genomes[j].fitness - mean_fitness)
-                    dist_j1 = abs(genomes[j + 1].fitness - mean_fitness)
-                    if dist_j > dist_j1:
-                        genomes[j], genomes[j + 1] = genomes[j + 1], genomes[j]
-        return genomes
-
-    def choice(main_genus: int, genomes: list[Genome], coeff_cross: float, coeff_fitness: float,
-               last_choice: Genome = None, global_min: float | None = None, global_max: float | None = None):
-        probabilities = np.random.rand(len(genomes))
-        fitnesses     = np.zeros_like(probabilities)
-        for i, g in enumerate(genomes): fitnesses[i] = g.fitness if g.fitness is not None else -np.inf
-        if coeff_cross is None: coeff_cross = 0.
-        coeff_cross   = max(-1, min(+1, coeff_cross))
-        if coeff_fitness is None: coeff_fitness = 0.
-        coeff_fitness = max(-1, min(+1, coeff_fitness))
-        if global_max is None: global_max = np.max(fitnesses)
-        if global_min is None: global_min = np.min(fitnesses)
-        assert global_max >= global_min, f"Invalid fitness limits"
-        diff = global_max - global_min
-        
-        for i, g in enumerate(genomes):
-            if coeff_fitness != 0 and global_max != global_min:
-                factor = (g.fitness - global_min) / diff * coeff_fitness
-                if coeff_cross > 0 and g.genus != main_genus:
-                    factor *= coeff_cross
-                if coeff_cross < 0 and g.genus == main_genus:
-                    factor *= 1 - coeff_cross
-            else:
-                factor = 0
-            fitnesses[i] = factor
-            if last_choice is not None and g.key == last_choice.key:
-                probabilities[i] *= 0.1
-                fitnesses[i]     *= 0.0 # 0.1
-        full_factors = probabilities + fitnesses # NOTE: Values separated for debugging purposes
-        return genomes[np.argmax(full_factors)]
+            result.append(genomes[order[i]])
+        return result
 
     # Populate global genera members
     genera: dict[int, list[Genome]] = Dict.empty(INT, GENOME_LIST)
@@ -200,6 +220,21 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         if genome.genus not in genera:
             genera[genome.genus] = List.empty_list(GENOME)
         genera[genome.genus].append(genome)
+
+    # Foreign-genus members are identical for every species, so they are sorted once outside the species loop.
+    extra_members: list[Genome] = List.empty_list(GENOME)
+    extra_min, extra_max = 0.0, 0.0
+    if cross_threshold > 0:
+        for gn, genus_members in genera.items():
+            if gn != genus and len(genus_members) > 0:
+                # Sort genus members in descending order and keep the best n members
+                genus_members = sort({g.key: g for g in genus_members}, criteria)
+                cross_cutoff = math.ceil(cross_threshold * len(genus_members))
+                extra_members.extend(genus_members[:cross_cutoff])
+    if len(extra_members) > 1:
+        extra_members = sort({g.key: g for g in extra_members}, criteria)
+        if len(remaining_species) > 0:
+            extra_min, extra_max = get_limits(extra_members)
 
     for idx in range(len(remaining_species)):
         spawn  = spawn_amounts[idx]
@@ -250,18 +285,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
         # Use at least two parents no matter what the threshold fraction result is.
         old_members = old_members[:repro_cutoff]
 
-        extra_members: list[Genome] = List.empty_list(GENOME)
-        if cross_threshold > 0:
-            for gn, genus_members in genera.items():
-                if gn != genus and len(genus_members) > 0:
-                    # Sort genus members in descending order and keep the best n members
-                    genus_members = sort({g.key: g for g in genus_members}, criteria)
-                    cross_cutoff = math.ceil(cross_threshold * len(genus_members))
-                    extra_members.extend(genus_members[:cross_cutoff])
         if len(extra_members) > 1:
-            extra_members = sort({g.key: g for g in extra_members}, criteria)
-            # Get new global minimum and maximum from all members
-            extra_min, extra_max = get_limits(extra_members)
             minimum, maximum = min(minimum, extra_min), max(maximum, extra_max)
             
         # NOTE:
@@ -272,16 +296,27 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
 
         # Randomly choose parents and produce the number of offspring allotted to the species.
         pool = List(list(old_members) + list(extra_members)) # TODO: Numba currently cannot add typed lists
-        for spawn_index in prange(spawn):
-            # NOTE: Previously, at least one genome has to be from the same genus in order to preserve genus integrity. 
-            # Now you can fill current genus with foreign ones with hopes that they get filtered out by fitness if they do not perform
-            parent1: Genome = choice(genus, pool, cross_multiplier, darwin_multiplier, None) # minimum, maximum) # pool -> old_members
-            # Cloning
-            if spawn_index < clone_cutoff:
-                parent2 = parent1
-            # Interbreeding or crossbreeding
-            else:
-                parent2: Genome = choice(genus, pool, cross_multiplier, darwin_multiplier, parent1) # minimum, maximum)
+        pool_size = len(pool)
+        pool_fitness = np.empty(pool_size, np.float64)
+        pool_foreign = np.zeros(pool_size, np.bool_)
+        pool_keys    = np.empty(pool_size, np.int64)
+        for pi in range(pool_size):
+            pg = pool[pi]
+            pool_fitness[pi] = pg.fitness if pg.fitness is not None else -np.inf
+            pool_foreign[pi] = pg.genus != genus
+            pool_keys[pi]    = pg.key
+        first_parents  = np.zeros(spawn, np.int64)
+        second_parents = np.zeros(spawn, np.int64)
+        # NOTE: Previously, at least one genome has to be from the same genus in order to preserve genus integrity.
+        # Now you can fill current genus with foreign ones with hopes that they get filtered out by fitness if they do not perform
+        select_parents(
+            pool_fitness, pool_foreign, pool_keys, spawn, clone_cutoff, cross_multiplier, darwin_multiplier,
+            first_parents, second_parents
+        )
+        for spawn_index in range(spawn):
+            # Cloning when parent2 == parent1, interbreeding or crossbreeding otherwise
+            parent1: Genome = pool[first_parents[spawn_index]]
+            parent2: Genome = pool[second_parents[spawn_index]]
 
             # Note that if the parents are not distinct, crossover will produce a genetically identical clone of the parent (but with a different ID).
             gid = available_gid
@@ -290,7 +325,6 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
             # child.update_from_build()
             genus_population[gid] = child
             ancestors[gid] = (parent1, parent2)
-            spawn -= 1
     return available_gid
 
 
@@ -318,9 +352,17 @@ def crossover(genus: int, source: CPUArray, updates: CPUArray, parents: CPUArray
         x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
         y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
 
-        indices, total = get_enumeration(updates)
+        # indices, total = get_enumeration(updates)
+        # Flat index -> (genome, x, y) without materializing a list of index tuples
+        total = s_g * s_x * s_y
+        yz = s_x * s_y
         for i in prange(total):
-            genome_idx, x, y = indices[i]
+            # genome_idx, x, y = indices[i]
+            # prange indices are unsigned: cast to int64 so // and % stay integers (uint64 with int64 -> float64)
+            flat = np.int64(i)
+            genome_idx = flat // yz
+            x = (flat % yz) // s_y
+            y = flat % s_y
 
             # Linearized thread index
             rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
@@ -372,6 +414,37 @@ def crossover(genus: int, source: CPUArray, updates: CPUArray, parents: CPUArray
     return ret_code
 
 
+def effective_epsilon(config: Config, dtype) -> float:
+    """
+    Smallest magnitude a parameter may have. When weight deletion is disabled an exact 0.0 is illegal, so even with
+    param_epsilon = 0.0 (or an epsilon that underflows in the parameter dtype, e.g. 1e-12 in float16) the floor becomes
+    the smallest positive normal number of that dtype. With deletion enabled, zeros are legitimate and epsilon is kept.
+    """
+    epsilon = float(config.genome.param_epsilon)
+    if config.genome.weight_del_prob == 0.0:
+        try:
+            epsilon = max(epsilon, float(torch.finfo(dtype).tiny))
+        except TypeError:
+            pass
+    return epsilon
+
+
+def _repair_zero_sources(sources, epsilon: float) -> int:
+    """
+    Parents can carry exact 0.0 values (e.g. from the very first initialization, or a float cast underflow).
+    Crossover copies them verbatim, which the illegal-zero check then flags. The post-mutation epsilon clamp would
+    turn them into +epsilon anyway (mutation also treats |v| <= epsilon as "zero"), so repair them at the source.
+    """
+    repaired = 0
+    for source in sources:
+        mask = (source == 0)
+        total = int(mask.sum())
+        if total:
+            source[mask] = epsilon
+            repaired += total
+    return repaired
+
+
 def update_children(
         config: Config, genus: int, modules: dict[int, NeatModule],
         old_population: dict[int, Genome], new_population: dict[int, Genome],
@@ -395,9 +468,10 @@ def update_children(
     if len(emergency_keys) == 0:
         emergency_keys = [key for key, genome in old_population.items() if genome.genus == genus]
     emergency_prob = torch.softmax(torch.tensor([old_population[key].fitness for key in emergency_keys]), -1).numpy()
+    emergency_choices = np.random.choice(emergency_keys, size=len(new_population), p=emergency_prob)
     try:
         for index, (key, genome) in enumerate(new_population.items()):
-            emeg_key = np.random.choice(emergency_keys, p=emergency_prob)
+            emeg_key = emergency_choices[index]
             if genome.key in old_population:
                 sources[index] = (old_mapping[key], old_mapping[key], old_mapping[key])
                 # NOTE: genera must store RAW genus IDs, not genus_mapping indices.
@@ -473,24 +547,30 @@ def update_children(
         for genus_param, param_group in zip(modules[genus].neat_parameters(), pgs):
             dtype = genus_param.data.dtype if genus_param.data.dtype != torch.bfloat16 else torch.float32
             step += 1
+            eps_eff = effective_epsilon(config, dtype)
             # with cuda.defer_cleanup():
             # ------------------------------ Sending data to GPU ------------------------------ #
             # TODO: Re-enable this if necessary after testing if it raises error in crossover
             # ctype = cp.float32 if genus_param.dtype == torch.float32 else cp.float64
             array_update, original_shape = reshape(np.full((len(new_population), *genus_param.original_shape), 0.0)) # ctype))
-            array_sources = tuple([np.asarray(reshape(p.data.clone().to(dtype))[0]) for p in param_group])
+            array_sources = tuple([np.asarray(reshape(p.data.to(dtype))[0]) for p in param_group])
             # ------------------------------ Define crossover kernel and randomizer values ------------------------------ #
             genome_num = len(new_population)
             kernel_shape = calc_grid(genome_num, *array_update.shape[1:3], tpb=tpb)
             # if verbose and verbose >= 3:
             #     print(param.dtype, param.device, kernel_shape, as_shape, au_shape, array_source.shape, array_update.shape)
-            probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False)
+            # probabilities, threads_total = get_rng_states(kernel_shape, seed, get_normal=False)
+            # One RNG call for the crossover plane and all mutation planes (row 0 = crossover, rows 1.. = mutation)
+            mutation_planes = 2 if config.genome.single_structural_mutation else 3
+            rng_planes = np.random.uniform(size=(1 + mutation_planes, int(np.prod([np.prod(v) for v in kernel_shape]))))
+            probabilities = rng_planes[0]
             # ------------------------------ Run crossover using sources ------------------------------ #
             equal_params = check_param_compatibility(param_group)
 
-            attempts = 3
+            attempts = 2
             while attempts > 0:
                 attempts -= 1
+                array_update[...] = 0  # clean slate for every attempt
                 filled = np.zeros(array_update.shape + (sources.shape[-1],), bool)
                 updates_total = 0
                 for genus_, source_ in zip(genus_mapping.keys(), array_sources):
@@ -507,7 +587,11 @@ def update_children(
                 try:
                     check_for_illegal_zeros(config, array_update, genus_param, modules)
                 except Exception as e:
-                    if attempts > 0:
+                    repaired = _repair_zero_sources(array_sources, eps_eff)
+                    if repaired:
+                        if verbose and verbose >= 1:
+                            print(f"Repaired {repaired} exact-zero parent value(s) for param_index = {genus_param.param_index}")
+                        attempts = max(attempts, 1)  # always allow one clean re-run after a repair
                         continue
                     print(f"updates total = {updates_total} for param_index = {genus_param.param_index}")
                     print(f"indices = {np.where(np.any(array_update == 0, axis=(1, 2)))[0].tolist()[:20]}")
@@ -524,10 +608,11 @@ def update_children(
             # ------------------------------ Remove data from GPU ------------------------------ #
             del array_sources
             # ------------------------------ Define mutation kernel and randomizer values ------------------------------ #
-            probabilities = np.stack([
-                get_rng_states(kernel_shape, seed, get_normal=False)[0]
-                for _ in range(2 if config.genome.single_structural_mutation else 3)
-            ], axis=0)
+            # probabilities = np.stack([
+            #     get_rng_states(kernel_shape, seed, get_normal=False)[0]
+            #     for _ in range(2 if config.genome.single_structural_mutation else 3)
+            # ], axis=0)
+            probabilities = rng_planes[1:]
             normals = get_rng_states(kernel_shape, seed, get_normal=True)[0]
             # ------------------------------ Run mutation using configuration ------------------------------ #
             ret_code = mutate(
@@ -536,15 +621,15 @@ def update_children(
                 config.genome.weight_init_mean, config.genome.weight_init_std,
                 config.genome.weight_min_value, config.genome.weight_max_value,
                 config.genome.single_structural_mutation,
-                config.genome.weight_add_prob, config.genome.weight_del_prob, config.genome.param_epsilon,
+                config.genome.weight_add_prob, config.genome.weight_del_prob, eps_eff,
                 probabilities, normals,
             )
             if ret_code == 1: raise ValueError(f"Expected a 3D array, got {array_update.ndim}")
             if ret_code == 2: raise ValueError("Out of bounds")
-            epsilon = config.genome.param_epsilon
+            epsilon = eps_eff
             zero_values = np.abs(array_update) < epsilon
-            array_update[zero_values & (array_update >= 0)] = epsilon
-            array_update[zero_values & (array_update < 0)] = -epsilon
+            np.copyto(array_update, epsilon, where=zero_values & (array_update >= 0))
+            np.copyto(array_update, -epsilon, where=zero_values & (array_update < 0))
             if verbose and verbose >= 4:
                 genus_param.md = array_update.copy() - genus_param.cd
             # ------------------------------ Update parameters ------------------------------ #

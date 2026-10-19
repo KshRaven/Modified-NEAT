@@ -39,9 +39,17 @@ def _execute(parameter: CPUArray, init_type: int, mean: float, std: float, minim
         x_lim = 1 if parameter.ndim <= 1 else parameter.shape[1]
         y_lim = 1 if parameter.ndim <= 2 else parameter.shape[2]
 
-        indices, total = get_enumeration(parameter)
+        # indices, total = get_enumeration(parameter)
+        # Flat index -> (genome, x, y) without materializing a list of index tuples
+        total = s_g * s_x * s_y
+        yz = s_x * s_y
         for i in prange(total):
-            genome_idx, x, y = indices[i]
+            # genome_idx, x, y = indices[i]
+            # prange indices are unsigned: cast to int64 so // and % stay integers (uint64 with int64 -> float64)
+            flat = np.int64(i)
+            genome_idx = flat // yz
+            x = (flat % yz) // s_y
+            y = flat % s_y
 
             # Linearized thread index
             rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx
@@ -54,6 +62,21 @@ def _execute(parameter: CPUArray, init_type: int, mean: float, std: float, minim
                 ret_code = 2
 
     return ret_code
+
+
+def effective_epsilon(config: Config, dtype) -> float:
+    """
+    Smallest magnitude a parameter may have. When weight deletion is disabled an exact 0.0 is illegal, so even with
+    param_epsilon = 0.0 (or an epsilon that underflows in the parameter dtype, e.g. 1e-12 in float16) the floor becomes
+    the smallest positive normal number of that dtype. With deletion enabled, zeros are legitimate and epsilon is kept.
+    """
+    epsilon = float(config.genome.param_epsilon)
+    if config.genome.weight_del_prob == 0.0:
+        try:
+            epsilon = max(epsilon, float(torch.finfo(dtype).tiny))
+        except TypeError:
+            pass
+    return epsilon
 
 
 def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
@@ -94,6 +117,12 @@ def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
         except Exception as e:
             print(param.dtype, param.device, kernel_shape, threads_total, array.shape, original_shape)
             raise e
+
+        # Never hand out exact zeros (reproduction's post-mutation clamp does the same for children)
+        eps = effective_epsilon(config, dtype)
+        small = np.abs(array) < eps
+        np.copyto(array, eps, where=small & (array >= 0))
+        np.copyto(array, -eps, where=small & (array < 0))
 
         # Copy data back to parameter
         param.data = torch.from_dlpack(array.reshape(original_shape))

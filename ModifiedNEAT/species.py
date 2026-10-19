@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.genome import Genome, INT # , FLOAT
 from ModifiedNEAT.reporter.base import ReporterSet
@@ -54,26 +53,29 @@ DISTANCE_TUPLE = types.Tuple([INT, INT])
 
 
 @jitclass([
-    ('distances', types.DictType(DISTANCE_TUPLE, FLOAT)),
-    ('total_distance', optional(types.Array(FLOAT, 2, 'C'))),
+    ('distances', types.DictType(DISTANCE_TUPLE, FLOAT)),  # legacy, no longer filled (kept for compatibility)
+    ('mapping', types.DictType(INT, INT)),                 # genome key -> row/column in total_distance
+    ('total_distance', types.Array(FLOAT, 2, 'C')),
     ('hits', INT),
     ('misses', INT),
 ])
 class GenomeDistanceCache(object):
     def __init__(self):
         self.distances: dict[tuple[int, int], float] = Dict.empty(DISTANCE_TUPLE, FLOAT)
+        self.mapping: dict[int, int] = Dict.empty(INT, INT)
         self.total_distance: CPUArray = np.zeros((1, 1), dtype=NP_FLOAT)
         self.hits = 0
         self.misses = 0
 
     def get(self, genome1: Genome, genome2: Genome):
-        distance = self.distances.get((genome1.key, genome2.key))
-        if distance is None:
+        # Read straight from the distance matrix instead of an n^2 tuple-keyed dict
+        if genome1.key not in self.mapping or genome2.key not in self.mapping:
             raise ValueError(f"distances between Genomes {genome1.key} and {genome2.key} have not been computed")
-        return distance
+        self.hits += 1
+        return self.total_distance[self.mapping[genome1.key], self.mapping[genome2.key]]
 
     def list(self):
-        return list(self.distances.values())
+        return self.total_distance.ravel()
 
 
 SPECIES = Species.class_type.instance_type

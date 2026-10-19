@@ -1,6 +1,7 @@
 from .functional import clamp, prob, normal, get_enumeration
 from .initialization import initialize_genome
 
+import numpy as np
 from numba import njit, prange
 from numpy import ndarray as CPUArray
 
@@ -86,9 +87,17 @@ def mutate(
         x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
         y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
 
-        indices, total = get_enumeration(updates)
+        # indices, total = get_enumeration(updates)
+        # Flat index -> (genome, x, y) without materializing a list of index tuples
+        total = s_g * s_x * s_y
+        yz = s_x * s_y
         for i in prange(total):
-            genome_idx, x, y = indices[i]
+            # genome_idx, x, y = indices[i]
+            # prange indices are unsigned: cast to int64 so // and % stay integers (uint64 with int64 -> float64)
+            flat = np.int64(i)
+            genome_idx = flat // yz
+            x = (flat % yz) // s_y
+            y = flat % s_y
 
             # Linearized thread index
             rng_index = (y * s_x * s_g) + (x * s_g) + genome_idx

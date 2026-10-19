@@ -132,7 +132,7 @@ class CarConfig(Configuration):
         self.slip_gravel: float = self.params.get("slip_gravel", 0.50)
         
         # LiDAR configuration
-        self.lidar_angles: int = self.params.get("lidar_angles", 4)
+        self.lidar_angles: int = self.params.get("lidar_angles", 12)
         self.lidar_max_dist: float | None = self.params.get("lidar_max_dist", None)  # If None, uses grid.cell_size * 2.5
         self.lidar_step: int = self.params.get("lidar_step", 4)
         
@@ -264,6 +264,9 @@ class RaceConfig(Configuration):
         self.racers: int | None = self.params.get("racers", None)
         # Realistic cap so the grid is never wall-to-wall cars
         self.max_racers: int = self.params.get("max_racers", 12)
+        # When True (and race mode is on) LiDAR beams also detect other active cars, treated
+        # like the curb / boundaries: a beam stops at the first car it hits.
+        self.lidar_detect_cars: bool = self.params.get("lidar_detect_cars", True)
 
         self.start_grid: StartGridConfig = StartGridConfig(params=self.params.get("start_grid", {}))
         self.slipstream: SlipstreamConfig = SlipstreamConfig(params=self.params.get("slipstream", {}))

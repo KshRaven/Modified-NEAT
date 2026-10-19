@@ -25,6 +25,7 @@ SURFACE_CURB   = np.int8(1)
 SURFACE_GRASS  = np.int8(2)
 SURFACE_GRAVEL = np.int8(3)
 SURFACE_VOID   = np.int8(4)  # out-of-bounds / off-track
+SURFACE_CAR    = np.int8(5)  # LiDAR hit on another car (race.lidar_detect_cars)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +157,54 @@ def _update_lidar(
                 elif v & L_CURB:   hit = 1
                 elif v & L_ROAD:   hit = 0
             surface_hits[c, b] = hit
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _lidar_cars(
+    x: Array, y: Array, angle: Array, active: Array, beam_offsets: Array,
+    max_dist: float, car_w: float, car_h: float, radius_scale: float,
+    distances: Array, surface_hits: Array,
+):
+    """
+    Shorten LiDAR beams where they hit another active car.  Each car is the same two
+    circles used by the collision model; a beam is intersected analytically with them and
+    keeps the nearer of (wall hit, car hit).  Car hits are tagged SURFACE_CAR (5).
+    """
+    total, indices = grid((x.shape[0], beam_offsets.shape[0]))
+    r   = car_w * radius_scale
+    off = max(car_h / 2.0 - r, 0.0)
+    for i in prange(total):
+        c, b = indices[i]
+        if not active[c]:
+            continue
+        a  = (angle[c] + beam_offsets[b]) * math.pi / 180.0
+        dx = -math.sin(a)
+        dy = -math.cos(a)
+        best = distances[c, b] * max_dist
+        found = False
+        for j in range(x.shape[0]):
+            if j == c or not active[j]:
+                continue
+            rj = angle[j] * math.pi / 180.0
+            fx = -math.sin(rj); fy = -math.cos(rj)
+            for s in range(2):
+                sg = 1.0 - 2.0 * s
+                ox = x[j] + sg * fx * off - x[c]
+                oy = y[j] + sg * fy * off - y[c]
+                proj = ox * dx + oy * dy               # distance along the beam to closest approach
+                if proj <= 0.0:
+                    continue
+                perp2 = ox * ox + oy * oy - proj * proj
+                if perp2 >= r * r:
+                    continue
+                t = proj - math.sqrt(r * r - perp2)    # entry point of the circle
+                if t < 0.0: t = 0.0
+                if t < best:
+                    best = t
+                    found = True
+        if found:
+            distances[c, b]    = best / max_dist
+            surface_hits[c, b] = 5
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -918,6 +967,13 @@ class Cars:
             self._lidar_beam_offsets, self._lidar_D, float(self.lidar_step), float(self.lidar_max_dist),
             self.lidar_distances, self.lidar_surface_hits,
         )
+        if self.race_on and self.race.lidar_detect_cars and N > 1:
+            _lidar_cars(
+                self.x, self.y, self.angle, self.race_active, self._lidar_beam_offsets,
+                float(self.lidar_max_dist), float(self.width), float(self.height),
+                float(self.race.collision.radius_scale),
+                self.lidar_distances, self.lidar_surface_hits,
+            )
 
     # ======================================================================
     # Location / collision tracking
@@ -1449,6 +1505,7 @@ class Cars:
             SURFACE_GRASS:  COLOR_GRASS,
             SURFACE_GRAVEL: COLOR_GRAVEL,
             SURFACE_VOID:   COLOR_LIDAR,
+            SURFACE_CAR:    (255, 80, 220),  # other car (race.lidar_detect_cars)
         }
         
         car_angle = self.angle[car_idx]

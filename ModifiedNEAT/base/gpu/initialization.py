@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.base.gpu.functional import calc_grid, get_rng_states, clamp, normal, uniform
@@ -58,6 +57,21 @@ def _execute(parameter: GPUArray, init_type: int, mean: float, std: float, minim
         initialize_genome(parameter, genome_idx, x, y, init_type, mean, std, minimum, maximum, rng_states, rng_index)
 
 
+def effective_epsilon(config: Config, dtype) -> float:
+    """
+    Smallest magnitude a parameter may have. When weight deletion is disabled an exact 0.0 is illegal, so even with
+    param_epsilon = 0.0 (or an epsilon that underflows in the parameter dtype, e.g. 1e-12 in float16) the floor becomes
+    the smallest positive normal number of that dtype. With deletion enabled, zeros are legitimate and epsilon is kept.
+    """
+    epsilon = float(config.genome.param_epsilon)
+    if config.genome.weight_del_prob == 0.0:
+        try:
+            epsilon = max(epsilon, float(torch.finfo(dtype).tiny))
+        except TypeError:
+            pass
+    return epsilon
+
+
 def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
     ts = clock.perf_counter()
     if config.genome.init_type == 'normal':
@@ -91,6 +105,12 @@ def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
         _execute[*kernel_shape](
             array, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,
             config.genome.weight_min_value, config.genome.weight_max_value, rng_states)
+
+        # Never hand out exact zeros (reproduction's post-mutation clamp does the same for children)
+        eps = effective_epsilon(config, dtype)
+        small = cp.abs(array) < eps
+        cp.copyto(array, eps, where=small & (array >= 0))
+        cp.copyto(array, -eps, where=small & (array < 0))
 
         # try:
         #     check_for_illegal_zeros(config, array, param, module)

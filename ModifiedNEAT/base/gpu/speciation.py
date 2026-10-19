@@ -1,4 +1,3 @@
-
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.nn.genome import Genome, INT
@@ -29,8 +28,8 @@ _Number = Union[float, int]
 
 @cuda.jit(device=True) # , cache=True)
 def atomic_add(array: GPUArray, index: _Index, value: _Number) -> None:
-    # cuda.atomic.add(array, index, value)
-    array[index] += value
+    cuda.atomic.add(array, index, value)
+    # array[index] += value
 
 
 @cuda.jit(device=True) # , cache=True)
@@ -71,7 +70,7 @@ def calc_distance(parameter: GPUArray, total_distance: GPUArray, match_counter: 
 
     # Add to count if values are the same to flag genomes that haven't been mutated properly
     if value0 == value1:
-        match_counter[genome0, genome1] += 1
+        cuda.atomic.add(match_counter, (genome0, genome1), 1)
 
 
 @cuda.jit
@@ -81,31 +80,29 @@ def get_distance(parameter: GPUArray, total_distance: GPUArray, match_counter: G
     x, genome0, genome1 = cuda.grid(3)
     g_lim = total_distance.shape[0]
     x_lim = parameter.shape[1]
-    if genome0 < g_lim and genome1 < g_lim and x < x_lim:
+    # Upper triangle only (diagonal skipped, mirrored on the host) - same logic as the CPU get_distance
+    if genome0 < genome1 and genome1 < g_lim and x < x_lim:
         calc_distance(parameter, total_distance, match_counter, genome0, genome1, x,
                       compatibility_weight_coefficient, compatibility_disjoint_coefficient)
         # cuda.syncthreads()
 
 
-@njit(nogil=True)
-def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArray, mapping: dict[int, int]):
-    hits, misses = 0, 0
-    keys = list(mapping.keys())
-    for i in prange(len(keys)):
-        gi = keys[i]
-        ii = mapping[gi]
-        for j in prange(len(keys)):
-            gj = keys[j]
-            ij = mapping[gj]
-
-            # if ki != kj:
-            key = (gi, gj)
-            if key not in distances:
-                distances[key] = total_distance[ii, ij]
-                misses += 1
-            else:
-                hits += 1
-    return hits, misses
+def _check_distinct_genomes(total_distance, mapping):
+    """Two different genomes can never be at distance exactly 0 (crossover and mutation always change values)."""
+    zero = (total_distance == 0.0)
+    np.fill_diagonal(zero, False)
+    if zero.any():
+        i, j = [int(v) for v in np.argwhere(zero)[0]]
+        keys = {index: key for key, index in mapping.items()}
+        print(f"Was running genomes '{keys.get(i)}', and '{keys.get(j)}', "
+              f"distances = {total_distance[i, j]}, {total_distance[j, i]}")
+        raise ValueError(
+            f"The genetic distance between two different genomes cannot be 0, "
+            f"\nsince crossover and mutation exists. Even clones are mutated after creation"
+            f"\nWithin the config file:"
+            f"\n1. Check the weight and disjoint coefficient values."
+            f"\n2. Check mutation coefficients' values  "
+        )
 
 
 def update_distances_cache(config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,
@@ -136,7 +133,7 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
         # with cuda.defer_cleanup():
         genome_num = len(module.mapping)
         dtype = param.data.dtype if param.data.dtype != torch.bfloat16 else torch.float32
-        array = cp.asarray(reshape(param.data.clone().to(dtype), 2)[0])
+        array = cp.asarray(reshape(param.data.to(dtype), 2)[0])
         axes = array.shape[1:]
         kernel_shape = calc_grid(*axes, genome_num, genome_num, tpb=tpb)
         # if verbose:
@@ -164,18 +161,18 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
     neat_params_total = len(module.neat_parameters())
     reproduction_error = faulty_counter >= neat_params_total
     if cp.any(reproduction_error):
-        error_count = cp.sum(reproduction_error).item() // 2
+        error_count = cp.sum(reproduction_error).item()
         raise ValueError(f"Genomes cannot 100% match each other! \n"
                          f"{error_count} cases confirmed! Error in crossover or mutation of values.")
 
     if verbose and verbose >= 4:
         print(f"Maximum fault count was {cp.max(faulty_counter).item()} / {neat_params_total}")
 
-    total_distance = total_distance.get()
-    h, m = update_dict(genome_cache.distances, total_distance, Dict(module.mapping.items()))
+    # Mirror the upper triangle (diagonal is 0)
+    total_distance = (total_distance + total_distance.T).get()
+    _check_distinct_genomes(total_distance, module.mapping)
+    genome_cache.mapping = Dict(module.mapping.items())
     genome_cache.total_distance = total_distance
-    genome_cache.hits += h
-    genome_cache.misses += m
 
     # Remove GPU data
     cp.get_default_memory_pool().free_all_blocks()
@@ -237,6 +234,8 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
 
     key = available_key
     done = List.empty_list(INT)
+    # Representative keys list is built once and appended to when a new species is created
+    mapping = List(representatives.keys())
     # Loop through unspeciated genomes
     for idx in prange(len(unspeciated)):
         gid = unspeciated[idx]
@@ -244,8 +243,7 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
 
         # Find the species with the most similar representative.
         candidates: list[tuple[int, int]] = List()
-        mapping = List(representatives.keys())
-        for i in prange(len(representatives)):
+        for i in range(len(mapping)):
             sid = mapping[i]
             rid = representatives[sid]
             rep = population[rid]
@@ -262,6 +260,7 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
             sid = key
             key += 1
             representatives[sid] = gid
+            mapping.append(sid)
             members[sid] = List([gid])
         done.append(gid)
     if len(done) != len(unspeciated):
@@ -371,9 +370,10 @@ def speciate(config: Config, genera: list[int], modules: dict[int, NeatModule],
             print(f"{CM('Updated species mapping', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
             print(f"{CM('Completed speciating', Fore.CYAN)} in {round(clock.perf_counter() - gts, 2)} s")
 
-        distances.extend(distances_cache.list())
+        distances.append(np.asarray(distances_cache.total_distance).ravel())
 
-    distances = [x for x in distances if not any([np.isnan(x), np.isinf(x), x is None])]
+    distances = np.concatenate(distances) if len(distances) > 0 else np.zeros(0, np.float32)
+    distances = distances[np.isfinite(distances)]
     gd_mean = np.mean(distances)
     gd_std = np.std(distances)
     species_set.last_ct = (gd_mean, gd_std)

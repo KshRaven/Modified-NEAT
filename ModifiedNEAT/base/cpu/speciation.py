@@ -52,7 +52,7 @@ def calc_distance(parameter: CPUArray, total_distance: CPUArray,
     # if size != 0:
     current_distance = current_distance / size
 
-    total_distance[genome0, genome1] += current_distance
+    return current_distance
 
 
 @njit(parallel=True) # , cache=True)
@@ -76,19 +76,24 @@ def get_distance(parameter: CPUArray, total_distance: CPUArray,
         # TODO: The nested pranges may raise performance warning so find a way to combine
         #       and iterate over a single integer like other parralel functions
         # Fill the lower triangle
-        for genome0 in prange(g_lim):
-            for genome1 in prange(genome0, g_lim):
-                for x in prange(x_lim):
-                    # Assert limits
-                    if genome0 < g_lim and genome1 < g_lim and x < x_lim:
-                        if genome0 == genome1:
-                            total_distance[genome0, genome1] += 0.0
-                        else:
-                            calc_distance(
-                                parameter, total_distance, genome0, genome1, x,
-                                compatibility_weight_coefficient, compatibility_disjoint_coefficient
-                            )
-                    else: ret_code = 2
+        # Rows i and (g_lim - 1 - i) are handled by the same iteration to balance the triangular workload.
+        # Each row is owned by exactly one iteration, the diagonal is skipped (it only ever added 0.0), and
+        # the per-element sum is accumulated in a local (same order as before, so results are identical).
+        half = (g_lim + 1) // 2
+        for r in prange(half):
+            row = np.int64(r)  # prange index is unsigned; keep everything int64 (uint64 with int64 -> float64)
+            for side in range(2):
+                genome0 = row if side == 0 else g_lim - 1 - row
+                if side == 1 and genome0 == row:
+                    continue
+                for genome1 in range(genome0 + 1, g_lim):
+                    acc = total_distance[genome0, genome1]
+                    for x in range(x_lim):
+                        acc += calc_distance(
+                            parameter, total_distance, genome0, genome1, x,
+                            compatibility_weight_coefficient, compatibility_disjoint_coefficient
+                        )
+                    total_distance[genome0, genome1] = acc
         # Fill the upper triangle
         for genome0 in prange(g_lim):
             for genome1 in prange(genome0):
@@ -101,44 +106,15 @@ def get_distance(parameter: CPUArray, total_distance: CPUArray,
     return ret_code
 
 
-@njit(nogil=True)
-# NOTE: Left as nogil (not parallel=True) on purpose: every prange iteration here
-#       inserts into the shared typed dict `distances`, and concurrent inserts into
-#       a numba typed Dict (which can trigger a resize) are not safe the way
-#       concurrent writes to distinct array slots are in crossover()/mutate()/
-#       get_distance(). Parallelizing this would need a redesign (e.g. write into
-#       a pre-sized array and build the dict from it afterwards single-threaded).
-# TODO: New updates remove the effect of parralel on Dict, List and Set resize so func
-#       can be paralellized
-def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArray, mapping: dict[int, int]):
-    ret_code: int = 0
-    
-    hits, misses = 0, 0
-    keys = list(mapping.keys())
-    for i in prange(len(keys)):
-        gi = keys[i]
-        ii = mapping[gi]
-        for j in prange(len(keys)):
-            gj = keys[j]
-            ij = mapping[gj]
-
-            # if ki != kj:
-            key = (gi, gj)
-            if key not in distances:
-                distance: float = total_distance[ii, ij]
-                if distance == 0.0 and gi != gj:
-                    if ret_code != 1:
-                        print(
-                            f"Was running genomes '{gi}', and '{gj}', "
-                            f"distances = {total_distance[ii, ij]}, {total_distance[ij, ii]}, "
-                        )
-                    ret_code = 1
-                distances[key] = distance
-                misses += 1
-            else:
-                hits += 1
-
-    if ret_code == 1:
+def _check_distinct_genomes(total_distance, mapping):
+    """Two different genomes can never be at distance exactly 0 (crossover and mutation always change values)."""
+    zero = (total_distance == 0.0)
+    np.fill_diagonal(zero, False)
+    if zero.any():
+        i, j = [int(v) for v in np.argwhere(zero)[0]]
+        keys = {index: key for key, index in mapping.items()}
+        print(f"Was running genomes '{keys.get(i)}', and '{keys.get(j)}', "
+              f"distances = {total_distance[i, j]}, {total_distance[j, i]}")
         raise ValueError(
             f"The genetic distance between two different genomes cannot be 0, "
             f"\nsince crossover and mutation exists. Even clones are mutated after creation"
@@ -146,8 +122,6 @@ def update_dict(distances: dict[tuple[int, int], float], total_distance: CPUArra
             f"\n1. Check the weight and disjoint coefficient values."
             f"\n2. Check mutation coefficients' values  "
         )
-    
-    return hits, misses # , ret_code
 
 
 def update_distances_cache(config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,
@@ -171,7 +145,7 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
     ts = clock.perf_counter()
     for param in module.neat_parameters():
         dtype = param.data.dtype if param.data.dtype != torch.bfloat16 else torch.float32
-        array = np.asarray(reshape(param.data.clone().to(dtype), 2)[0])
+        array = np.asarray(reshape(param.data.to(dtype), 2)[0])
 
         try:
             ret_code = get_distance(
@@ -191,11 +165,9 @@ def update_distances_cache(config: Config, module: NeatModule, genome_cache: Gen
     if verbose and verbose >= 2:
         print(f"{CM('Ran distance kernel', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
 
+    _check_distinct_genomes(total_distance, module.mapping)
+    genome_cache.mapping = Dict(module.mapping.items())
     genome_cache.total_distance = total_distance
-    h, m = update_dict(genome_cache.distances, total_distance, Dict(module.mapping.items()))
-    # genome_cache.total_distance = total_distance
-    genome_cache.hits += h
-    genome_cache.misses += m
 
     # Remove GPU data
     gc.collect()
@@ -264,6 +236,8 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
 
     key = available_key
     done = List.empty_list(INT)
+    # Representative keys list is built once and appended to when a new species is created
+    mapping = List(representatives.keys())
     # Loop through unspeciated genomes
     for idx in prange(len(unspeciated)):
         gid = unspeciated[idx]
@@ -271,8 +245,7 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
 
         # Find the species with the most similar representative.
         candidates: list[tuple[int, int]] = List()
-        mapping = list(representatives.keys())
-        for i in prange(len(representatives)):
+        for i in range(len(mapping)):
             sid = mapping[i]
             rid = representatives[sid]
             rep = population[rid]
@@ -289,6 +262,7 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
             sid = key
             key += 1
             representatives[sid] = gid
+            mapping.append(sid)
             members[sid] = List([gid])
         done.append(gid)
     if len(done) != len(unspeciated):
@@ -398,9 +372,10 @@ def speciate(config: Config, genera: list[int], modules: dict[int, NeatModule],
             print(f"{CM('Updated species mapping', Fore.CYAN)} in {round(clock.perf_counter() - ts, 2)} s")
             print(f"{CM('Completed speciating', Fore.CYAN)} in {round(clock.perf_counter() - gts, 2)} s")
 
-        distances.extend(distances_cache.list())
+        distances.append(np.asarray(distances_cache.total_distance).ravel())
 
-    distances = [x for x in distances if not any([np.isnan(x), np.isinf(x), x is None])]
+    distances = np.concatenate(distances) if len(distances) > 0 else np.zeros(0, np.float32)
+    distances = distances[np.isfinite(distances)]
     gd_mean = np.mean(distances).item()
     gd_std = np.std(distances).item()
     species_set.last_ct = (gd_mean, gd_std)

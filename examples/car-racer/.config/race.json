@@ -42,6 +42,7 @@
     "enabled": true,
     "racers": 11,
     "max_racers": 12,
+    "lidar_detect_cars": true,
 
     "start_grid": {
       "cars_per_tile": [4, 7],

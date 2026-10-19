@@ -360,6 +360,7 @@ def creates_cycle(connections: list[tuple[int, int]], test: tuple[int, int]):
 
 
 NETWORK = Network.class_type.instance_type
+# TODO: Plan to remove the depracated classes and functions within this file
 
 
 @jitclass([

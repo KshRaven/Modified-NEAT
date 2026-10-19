@@ -1260,8 +1260,11 @@ class Model(NeatModule):
 
 def check_for_illegal_zeros(config: Config, array: Union[CPUArray, GPUArray], param: NeatParameter, modules: Union[NeatModule, list[NeatModule], dict[Any, NeatModule]]):
     zero = 0.0 # config.genome.param_epsilon
+    # Skip the full-array scan (and GPU sync) entirely when weight deletion is enabled
+    if config.genome.weight_del_prob != 0.0:
+        return
     array_has_zeros = (np.any(array == zero) if isinstance(array, CPUArray) else cp.any(array == zero).get()).item()
-    if config.genome.weight_del_prob == 0.0 and array_has_zeros:
+    if array_has_zeros:
         # NOTE: By this point the module_index of parameters should be set.
         error = f"Illegal zero value has been encountered when parameter epsilon or deletion has been enabled!"
         # Attempt to find modules it belongs to
