@@ -404,7 +404,7 @@ def run():
     DISCRETE        = False
     INPUTS          = ENV.observation_space.shape[-1]
     OUTPUTS         = 2
-    EMBED_SIZE      = 64
+    EMBED_SIZE      = 128
     LAYERS          = 1
     FWD_EXP         = 1
     BIAS            = True

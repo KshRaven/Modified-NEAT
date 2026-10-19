@@ -504,7 +504,6 @@ def update_children(
 
     valid_perc = np.count_nonzero([check_param_compatibility(pg) for pg in pgs])
     gpu_fails = 0
-    filled_cache = {}  # reused `filled` buffers per shape (zeroed with fill() instead of re-allocated)
     if verbose and verbose >= 2:
         print(f"{CM('Valid Count', Fore.CYAN)} = {valid_perc} / {len(pgs)}")
     if equal_param_num:
@@ -542,11 +541,7 @@ def update_children(
                 attempts -= 1
                 array_update[...] = 0  # clean slate for every attempt
                 fshape = array_update.shape + (sources.shape[-1],)
-                filled = filled_cache.get(fshape)
-                if filled is None:
-                    filled = filled_cache[fshape] = cp.zeros(fshape, bool)
-                else:
-                    filled.fill(False)
+                filled = cp.zeros(fshape, bool)  # freed with the other per-parameter buffers (keeps peak GPU memory low)
                 updates_total = 0
                 for genus_, source_ in zip(genus_mapping.keys(), array_sources):
                     if config.reproduction.cross_threshold == 0.0 and genus_ != genus:
@@ -627,7 +622,6 @@ def update_children(
 
         # Remove GPU data
         del sources, child_filter
-        filled_cache.clear()
         cp.get_default_memory_pool().free_all_blocks()
         gc.collect()
     else:

@@ -66,7 +66,7 @@ class Game(Env):
         self.min_laps = config.min_laps
         
         features_total = self.cars.get_state().shape[-1]
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(1, features_total), dtype=np.float64)
+        self.observation_space = spaces.Box(low=-1, high=self._obs_high(), shape=(1, features_total), dtype=np.float64)
         self.action_space = spaces.Box(low=-1, high=1, shape=(1, 2), dtype=np.float64) # spaces.Discrete(3)
 
         self.terminated = False
@@ -86,6 +86,14 @@ class Game(Env):
             yield self
         finally:
             self.set_race_mode(previous)
+
+    def _obs_high(self) -> float:
+        """Upper observation bound. Slipstream lets speed exceed max_linear_velocity, so the
+        normalised velocity feature can reach 1 + top_speed_bonus (it is never clipped)."""
+        race = self.config.race
+        if race.enabled and race.slipstream.enabled:
+            return 1.0 + max(race.slipstream.top_speed_bonus, 0.0)
+        return 1.0
 
     def reset(self, **params) -> tuple[Array, dict[str, Any]]:
         """
@@ -112,7 +120,7 @@ class Game(Env):
         total = len(keys)    
         
         features_total = self.cars.get_state().shape[-1]
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(total, features_total), dtype=np.float64)
+        self.observation_space = spaces.Box(low=-1, high=self._obs_high(), shape=(total, features_total), dtype=np.float64)
         self.action_space = spaces.Box(low=-1, high=1, shape=(total, 2), dtype=np.float64) # spaces.Discrete(3)
 
         self.grid.random(self.config.max_attempts, self.config.min_tiles, seed)

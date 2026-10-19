@@ -132,7 +132,7 @@ class CarConfig(Configuration):
         self.slip_gravel: float = self.params.get("slip_gravel", 0.50)
         
         # LiDAR configuration
-        self.lidar_angles: int = self.params.get("lidar_angles", 12)
+        self.lidar_angles: int = self.params.get("lidar_angles", 8)
         self.lidar_max_dist: float | None = self.params.get("lidar_max_dist", None)  # If None, uses grid.cell_size * 2.5
         self.lidar_step: int = self.params.get("lidar_step", 4)
         
