@@ -4,10 +4,10 @@
   "layout": null,
   "max_attempts": 1000,
   "min_tiles": 14,
-  "seed": 7,
+  "seed": null,
   "lives": 5,
   "max_hiatus": 120,
-  "max_frames": 20000,
+  "max_frames": 10000,
   "min_laps": 3,
   "tile": {
     "gravel": 0.05,
@@ -19,12 +19,12 @@
   },
   "grid": { "granularity": "pixels" },
   "car": {
-    "max_linear_velocity": 5.0,
-    "max_angular_velocity": 8.0,
+    "max_linear_velocity": 4.0,
+    "max_angular_velocity": 3.0,
     "linear_acceleration": 0.15,
     "angular_acceleration": 1.5,
     "car_scale": 0.20,
-    "use_lidar": false,
+    "use_lidar": true,
     "toggle_reverse": false,
     "restrict_movement": 1,
     "friction_curb": 0.985,
@@ -65,7 +65,8 @@
       "push": 0.15,
       "top_speed_bonus": 0.05,
       "ramp": 0.06,
-      "decay": 0.05
+      "decay": 0.05,
+      "trail_type": "line"
     },
 
     "collision": {

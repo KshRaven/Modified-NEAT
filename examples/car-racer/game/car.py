@@ -9,7 +9,7 @@ from pygame import Surface, Mask
 from pygame.font import Font
 from typing import Optional, Any
 
-from .config import CarConfig, RaceConfig, overwrite_config
+from .config import CarConfig, RaceConfig, RewardConfig, overwrite_config
 from .functional import Type, Position
 from .constants import NP_INT, NP_FLOAT, IMAGE_DIR, COLOR_LIDAR, COLOR_CURB_PRI, COLOR_CURB_SEC
 from .util import scale_image, draw_arrow, grid, draw_panel
@@ -158,6 +158,14 @@ def _update_lidar(
                 elif v & L_ROAD:   hit = 0
             surface_hits[c, b] = hit
 
+
+def _flame_color(base, hot, heat: float):
+    """heat 1 -> `hot` (core), 0.5 -> `base`, 0 -> a dark ember of `base`."""
+    if heat >= 0.5:
+        u, a, b = (heat - 0.5) * 2.0, base, hot
+    else:
+        u, a, b = heat * 2.0, tuple(0.25 * v for v in base), base
+    return (int(a[0] + (b[0] - a[0]) * u), int(a[1] + (b[1] - a[1]) * u), int(a[2] + (b[2] - a[2]) * u))
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _lidar_cars(
@@ -452,6 +460,150 @@ def _signals(
 
 
 @njit(parallel=True, fastmath=True, cache=True)
+def _traffic_shape(
+    extra_pos: Array, extra_neg: Array, edge_mult: Array,
+    x: Array, y: Array, angle: Array, vel_lin: Array, active: Array,
+    progress: Array, prev_progress: Array, on_road: Array, align: Array, corner_curr: Array,
+    car_w: float, car_h: float, size: float, max_vel_lin: float,
+    reach: float, gate: float, edge_guard: float, w_veer: float, w_close: float, w_lane: float, w_pass: float,
+):
+    """
+    Race-mode traffic shaping from true car positions (independent of LiDAR beam count / density).
+
+    For the nearest car in the cone ahead (`reach` px, +-`gate` car widths):
+      * edge_mult   : off-road costs grow as it gets closer, so dodging a car by leaving the road is
+                      never cheaper than passing it on the road
+      * veer        : cost for heading away from the track direction on a straight while blocked
+      * closing     : cost for running up to a car in the same lane
+    plus a per-frame bonus for being level with a car in the next lane (on the road, not slower) and a
+    one-off bonus for completing a clean pass.
+    """
+    total, indices = grid((x.shape[0],))
+    for i in prange(total):
+        c = indices[i]
+        extra_pos[c] = 0.0
+        extra_neg[c] = 0.0
+        edge_mult[c] = 1.0
+        if not active[c]:
+            continue
+        fx = -math.sin(angle[c] * math.pi / 180.0)
+        fy = -math.cos(angle[c] * math.pi / 180.0)
+
+        best_gap = 1.0e18
+        best_lat = 0.0
+        best_v   = 0.0
+        found    = False
+        lane     = False
+        passed   = False
+        for j in range(x.shape[0]):
+            if j == c or not active[j]:
+                continue
+            rx = x[j] - x[c]; ry = y[j] - y[c]
+            ahead = rx * fx + ry * fy
+            lat   = abs(-rx * fy + ry * fx)
+            if ahead > 0.0 and ahead < reach and lat < gate * car_w and ahead < best_gap:
+                best_gap = ahead; best_lat = lat; best_v = vel_lin[j]; found = True
+            if (ahead > -0.6 * car_h and ahead < 1.2 * car_h and lat >= 0.9 * car_w
+                    and lat < gate * car_w and vel_lin[c] >= 0.95 * vel_lin[j]):
+                lane = True
+            if (rx * rx + ry * ry < (2.5 * car_h) ** 2
+                    and prev_progress[c] <= prev_progress[j] and progress[c] > progress[j]
+                    and abs(progress[c] - prev_progress[c]) < 0.5 * size
+                    and abs(progress[j] - prev_progress[j]) < 0.5 * size):
+                passed = True
+
+        if on_road[c]:
+            if lane:   extra_pos[c] += w_lane
+            if passed: extra_pos[c] += w_pass
+        if found:
+            near = 1.0 - best_gap / reach                         # 0 far ... 1 touching
+            edge_mult[c] = 1.0 + (edge_guard - 1.0) * near
+            if not corner_curr[c]:
+                extra_neg[c] += w_veer * (1.0 - align[c]) * near
+            closing = max(vel_lin[c] - best_v, 0.0) / max_vel_lin
+            same    = max(1.0 - best_lat / car_w, 0.0)
+            tight   = max(1.0 - best_gap / (0.5 * reach), 0.0)
+            extra_neg[c] += w_close * closing * same * tight
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _reward_shape(
+    shape_pos: Array, shape_neg: Array, target_norm: Array,
+    extra_pos: Array, extra_neg: Array, edge_mult: Array,
+    progress: Array, prev_progress: Array, in_tile: Array, vel_lin: Array, vel_norm: Array,
+    rotation: Array, prev_rotation: Array,
+    tile_idx: Array, t_turn: Array, t_next: Array, corner_curr: Array,
+    on_road: Array, on_curb: Array, on_grass: Array, on_gravel: Array, bumped: Array,
+    size: float, max_vel_lin: float, a_dec: float, f1: float, f2: float,
+    lookahead: int, window: int,
+    w_prog: float, w_time: float, w_surv: float, w_over: float, w_steer: float, w_jit: float,
+    w_curb: float, curb_disc: float, w_grass: float, w_gravel: float, w_bump: float,
+):
+    """
+    Dense time-trial shaping.  Looks `lookahead` tiles down the track, grades every corner it
+    finds (net heading change over `window` tiles: a 90 degree bend = 1, a U-turn = 2, an S of two
+    opposite bends = 0.5 because it can be driven as a diagonal), turns that into a safe speed and
+    a braking-distance speed profile, and then
+
+      +  progress along the centre line, credited only up to the target speed
+      -  speed above the target, steering on open straights, steering jitter, surface contact,
+         car-to-car contact and a small constant time cost.
+    """
+    total, indices = grid((progress.shape[0],))
+    for i in prange(total):
+        c  = indices[i]
+        t0 = tile_idx[c]
+
+        vt = max_vel_lin
+        d_corner = 1.0e9
+        for j in range(lookahead + 1):
+            tj = t0
+            for _ in range(j):
+                tj = t_next[tj]
+            if t_turn[tj] == 0.0:
+                continue
+            cum = 0.0; cmin = 0.0; cmax = 0.0; tw = tj
+            for _ in range(window):
+                cum += t_turn[tw]
+                cmin = min(cmin, cum); cmax = max(cmax, cum)
+                tw = t_next[tw]
+            m = min(max(abs(cum), 0.5 * (cmax - cmin)), 2.0)
+            if m <= 1.0: f = 1.0 - (1.0 - f1) * m * m
+            else:        f = f1 - (f1 - f2) * (m - 1.0)
+            d = 0.0 if j == 0 else max(j * size - in_tile[c], 0.0)
+            vc = f * max_vel_lin
+            vt = min(vt, math.sqrt(vc * vc + 2.0 * a_dec * d))   # can still brake down to vc by the corner
+            d_corner = min(d_corner, d)
+        tn = vt / max_vel_lin
+        target_norm[c] = tn
+
+        pos = 0.0
+        neg = w_time
+        dp = progress[c] - prev_progress[c]
+        if abs(dp) > 0.5 * size: dp = 0.0                 # lap wrap / respawn jump, not driving
+        if dp > 0.0:
+            pos += w_prog * dp * min(1.0, vt / max(vel_lin[c], 1.0e-6)) / size
+        else:
+            neg += w_prog * (-dp) / size
+        neg += w_over * max(vel_norm[c] - tn, 0.0)
+
+        open_road = min(max((d_corner - 0.3 * size) / (0.7 * size), 0.0), 1.0)
+        neg += w_steer * abs(rotation[c]) * open_road + w_jit * abs(rotation[c] - prev_rotation[c])
+
+        em = edge_mult[c]
+        if on_grass[c]:    neg += w_grass * em
+        elif on_gravel[c]: neg += w_gravel * em
+        elif on_curb[c]:   neg += w_curb * em * ((1.0 - curb_disc) if corner_curr[c] else 1.0)
+        pos += extra_pos[c]
+        neg += extra_neg[c]
+        if on_road[c]:     pos += w_surv
+        if bumped[c]:      neg += w_bump
+
+        shape_pos[c] = pos
+        shape_neg[c] = neg
+
+
+@njit(parallel=True, fastmath=True, cache=True)
 def _get_state(
     state: Array, x: Array, y: Array, angle: Array, vel_lin: Array, vel_ang: Array,
     tile_idx: Array, t_orient: Array, t_next: Array, t_next2: Array, t_check: Array,
@@ -485,7 +637,7 @@ def _get_state(
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _progress(
-    progress: Array, x: Array, y: Array, tile_idx: Array, laps_done: Array,
+    progress: Array, in_tile: Array, x: Array, y: Array, tile_idx: Array, laps_done: Array,
     t_lap: Array, t_line: Array, n_tiles: int, size: float,
 ):
     """Distance driven along the track centre line (race order key)."""
@@ -506,6 +658,7 @@ def _progress(
             if d2 < best_d:
                 best_d = d2
                 best   = s * (size / 2.0) + u * (size / 2.0)
+        in_tile[c]  = best
         progress[c] = (laps_done[c] * n_tiles + t_lap[t]) * size + best
 
 
@@ -520,11 +673,13 @@ class Cars:
         self, 
         grid: Grid, players: Players, config: CarConfig | None = None, 
         race: RaceConfig | None = None,
+        reward: RewardConfig | None = None,
         **params: dict[str, Any]
     ):
         if config is None:
             config = CarConfig()
         self.race = race if race is not None else RaceConfig()
+        self.reward = reward if reward is not None else RewardConfig()
 
         overwrite_config(config, params)
         self.config = config
@@ -697,8 +852,17 @@ class Cars:
         self.track: TrackGeometry | None = None
         self.draft_level = np.zeros((self.total,), dtype=NP_FLOAT)   # slipstream strength [0, 1]
         self._init_trail()
+        self._trail_overlay: Surface | None = None   # SRCALPHA layer for the flame trail
         self.bumped      = np.zeros((self.total,), dtype=bool)       # touched another car this frame
         self.progress    = np.zeros((self.total,), dtype=NP_FLOAT)   # px driven along the track
+        self.in_tile     = np.zeros((self.total,), dtype=NP_FLOAT)
+        self._prev_rotation = np.zeros((self.total,), dtype=NP_FLOAT)
+        self.shape_pos   = np.zeros((self.total,), dtype=NP_FLOAT)
+        self.shape_neg   = np.zeros((self.total,), dtype=NP_FLOAT)
+        self.target_speed = np.ones((self.total,), dtype=NP_FLOAT)   # safe speed ahead / max speed
+        self._tr_pos     = np.zeros((self.total,), dtype=NP_FLOAT)
+        self._tr_neg     = np.zeros((self.total,), dtype=NP_FLOAT)
+        self._tr_edge    = np.ones((self.total,), dtype=NP_FLOAT)
         self.race_order: Array | None = None                         # car indices, leader first
 
         self.usr_engaged = False
@@ -882,6 +1046,7 @@ class Cars:
         self.t_orient = np.array([float(t.orientation) for t in tiles], dtype=NP_FLOAT)
         self.t_rot    = np.array([float(t.rotation) for t in tiles], dtype=NP_FLOAT)
         self.t_start  = self.t_type == Type.START.value
+        self.t_turn   = np.where(self.t_type == Type.LEFT.value, 1.0, np.where(self.t_type == Type.RIGHT.value, -1.0, 0.0)).astype(NP_FLOAT)
         self.t_next   = np.array([self._tile_id.get(cont.get(t), i) for i, t in enumerate(tiles)], dtype=NP_INT)
         self.t_next2  = self.t_next[self.t_next]
         self.t_center = np.array([t.center_abs for t in tiles], dtype=NP_FLOAT)
@@ -1105,6 +1270,8 @@ class Cars:
         self._update_location()
         self._update_surface()   # update self.surface from centre-point lookup
         self._update_lidar()     # cast beams; update lidar_distances / lidar_surface_hits
+        prev_progress = self.progress.copy()
+        self._compute_progress()
 
         # ------------------------------------------------------------------
         # Derived signals for reward shaping, counters and crash flags
@@ -1128,6 +1295,39 @@ class Cars:
         )
 
         # ------------------------------------------------------------------
+        # Dense time-trial shaping (progress / target speed / smoothness / surfaces)
+        # ------------------------------------------------------------------
+        rw = self.reward
+        if rw.shaping:
+            if self.race_on:
+                _traffic_shape(
+                    self._tr_pos, self._tr_neg, self._tr_edge,
+                    self.x, self.y, self.angle, self.vel_lin, self.race_active,
+                    self.progress, prev_progress, sg['on_road'], sg['phase_align'], sg['corner_curr'],
+                    float(self.width), float(self.height), float(self.track.size), float(self.max_vel_lin),
+                    float(rw.traffic_range * self.height), float(rw.traffic_gate), float(rw.edge_guard),
+                    float(rw.veer_weight), float(rw.closing_weight), float(rw.lane_weight), float(rw.overtake_bonus),
+                )
+            else:
+                self._tr_pos[:] = 0.0; self._tr_neg[:] = 0.0; self._tr_edge[:] = 1.0
+            _reward_shape(
+                self.shape_pos, self.shape_neg, self.target_speed,
+                self._tr_pos, self._tr_neg, self._tr_edge,
+                self.progress, prev_progress, self.in_tile, self.vel_lin, vel_norm,
+                rotation, self._prev_rotation,
+                self.tile_idx, self.t_turn, self.t_next, sg['corner_curr'],
+                sg['on_road'], self.on_curb, self.on_grass, self.on_gravel, self.bumped,
+                float(self.track.size), float(self.max_vel_lin), float(self._a_dec),
+                float(self._corner_f1), float(self._corner_f2),
+                int(rw.lookahead_tiles), int(rw.corner_window),
+                float(rw.progress_weight), float(rw.time_penalty), float(rw.survival_bonus),
+                float(rw.overspeed_weight), float(rw.steer_weight), float(rw.jitter_weight),
+                float(rw.curb_weight), float(rw.curb_corner_discount),
+                float(rw.grass_weight), float(rw.gravel_weight), float(rw.bump_weight),
+            )
+        self._prev_rotation[:] = rotation
+
+        # ------------------------------------------------------------------
         # Player (reward) update
         # ------------------------------------------------------------------
         self.players.update(
@@ -1145,21 +1345,41 @@ class Cars:
             self.corner_entry_speed,
             self.tile_crash,
             None, verbose,
+            shape_pos=self.shape_pos, shape_neg=self.shape_neg,
         )
 
         if self.race_on:
-            self._update_race_order()
+            self._update_race_order(recompute=False)
         elif np.count_nonzero(self.laps_done >= 1) <= 3:
             self.ranking = np.argsort(-self.players.scores)
 
         self.restart()
+        self._compute_progress()   # respawned cars must not register a progress jump next frame
 
-    def _update_race_order(self) -> None:
-        """Live race positions from distance driven (laps are offset so the grid starts fair)."""
+    def _compute_progress(self) -> None:
+        """Distance driven along the centre line (+ distance inside the current tile)."""
         _progress(
-            self.progress, self.x, self.y, self.tile_idx, self.laps_done,
+            self.progress, self.in_tile, self.x, self.y, self.tile_idx, self.laps_done,
             self.t_lap, self.t_line, int(self.track.n_tiles), float(self.track.size),
         )
+
+    def _setup_reward(self) -> None:
+        """Physics-derived corner speed for the reward (what a 90 degree bend can be taken at)."""
+        rw = self.reward
+        size = float(self.track.size)
+        if rw.corner_speed_ratio is not None:
+            f1 = float(rw.corner_speed_ratio)
+        else:
+            omega = self.max_vel_ang * self.config.handling_road * math.pi / 180.0       # rad / frame
+            f1 = rw.corner_safety * omega * (rw.corner_line_radius * size / 2.0) / self.max_vel_lin
+        self._corner_f1 = min(max(f1, 0.25), 1.0)
+        self._corner_f2 = self._corner_f1 * (rw.uturn_ratio if self._corner_f1 < 1.0 else 1.0)
+        self._a_dec = self.acc_lin * (1.0 + 0.5 * self.coeff_brake) * rw.braking_margin
+
+    def _update_race_order(self, recompute: bool = True) -> None:
+        """Live race positions from distance driven (laps are offset so the grid starts fair)."""
+        if recompute:
+            self._compute_progress()
         key = np.where(self.race_active, self.progress, -np.inf)
         self.race_order = np.argsort(-key, kind='stable')
         self.ranking = self.race_order
@@ -1333,17 +1553,71 @@ class Cars:
 
         self._render_race(surface)
 
+    def _draw_trail(self, pts: Array, color, ss, tail_alpha: float, dirty):
+        """Draw one streak onto the shared SRCALPHA layer; returns the updated dirty rect.
+
+        `pts` runs newest -> oldest.  Opacity falls linearly from ss.alpha_head at the car to
+        `tail_alpha` at the last point, for the line, particle and flame styles alike.
+        """
+        if self._trail_overlay is None or self._trail_overlay.get_size() != self.screen_size():
+            self._trail_overlay = Surface(self.screen_size(), pygame.SRCALPHA)
+        ov = self._trail_overlay
+        m = len(pts)
+        span = max(m - 1, 1)
+        pad = int(max(ss.flame_width, ss.particle_spread, 3.0)) + 3
+        lo, lo_y = float(pts[:, 0].min()), float(pts[:, 1].min())
+        hi, hi_y = float(pts[:, 0].max()), float(pts[:, 1].max())
+        box = pygame.Rect(int(lo) - pad, int(lo_y) - pad, int(hi - lo) + 2 * pad, int(hi_y - lo_y) + 2 * pad)
+
+        def alpha_at(k: int) -> float:
+            return ss.alpha_head + (tail_alpha - ss.alpha_head) * (k / span)
+
+        if ss.flame:
+            L = ss.flame_layers
+            for layer in range(L):                    # outer glow first, hot core last (painted on top)
+                core = layer / max(L - 1, 1)          # 0 = outer ... 1 = core
+                heat_layer = 0.35 + 0.65 * core
+                for k in range(m):
+                    age = k / span
+                    fade = alpha_at(k) * (0.55 + 0.45 * core)     # outer glow is fainter than the core
+                    if ss.flame_flicker > 0.0:
+                        fade *= 1.0 + ss.flame_flicker * 0.5 * math.sin(self._frame * 0.9 + k * 1.7 + layer * 2.1)
+                    alpha = int(255 * min(max(fade, 0.0), 1.0))
+                    if alpha <= 0:
+                        continue
+                    rgb = _flame_color(color, ss.flame_hot, heat_layer * (1.0 - 0.65 * age))   # cools to the tail
+                    radius = max(1.0, 0.5 * ss.flame_width * (1.0 - ss.flame_taper * age) * (1.0 - 0.6 * core))
+                    pygame.draw.circle(ov, (*rgb, alpha), (int(pts[k, 0]), int(pts[k, 1])), int(round(radius)))
+        elif ss.particles:
+            for k in range(m):
+                rgba = (*color, int(255 * min(max(alpha_at(k), 0.0), 1.0)))
+                px, py = int(pts[k, 0]), int(pts[k, 1])
+                if k < m // 2:
+                    pygame.draw.circle(ov, rgba, (px, py), 2)
+                else:
+                    ov.fill(rgba, (px, py, 1, 1))
+        else:                                         # line: one segment per pair of points
+            for k in range(m - 1):
+                rgba = (*color, int(255 * min(max(alpha_at(k), 0.0), 1.0)))
+                pygame.draw.line(ov, rgba, (pts[k, 0], pts[k, 1]), (pts[k + 1, 0], pts[k + 1, 1]), 1)
+        return box if dirty is None else dirty.union(box)
+
+    def screen_size(self) -> tuple[int, int]:
+        return self._screen_size
+
     def _render_race(self, surface: Surface) -> None:
         """Curved slipstream streaks (or particles) behind drafting cars + a small position tower."""
         if not self.race_on:
             return
         ss = self.race.slipstream
         self._frame += 1
+        self._screen_size = surface.get_size()
         if ss.enabled:
             cap = ss.trail_length
             step = ss.particle_step if ss.particles else 1
             spread = ss.particle_spread if ss.particles else 0.0
             side_px = self.width * ss.side_offset
+            dirty = None
             for i in np.flatnonzero(self.draft_level > DRAFT_VISIBLE):
                 if not self.players.active[i]:
                     continue
@@ -1359,15 +1633,14 @@ class Cars:
                     if m < 2:
                         continue
                     pts = self._trail_buf[:m]
-                    if ss.particles:
-                        for k in range(m):
-                            px, py = int(pts[k, 0]), int(pts[k, 1])
-                            if k < m // 2:
-                                pygame.draw.circle(surface, color, (px, py), 2)
-                            else:
-                                surface.fill(color, (px, py, 1, 1))
-                    else:
-                        pygame.draw.lines(surface, color, False, pts.tolist(), 1)
+                    frac = (n - 2) / max(cap - 2, 1)          # current streak length vs the maximum
+                    tail_alpha = ss.alpha_tail_short + (ss.alpha_tail_long - ss.alpha_tail_short) * min(max(frac, 0.0), 1.0)
+                    dirty = self._draw_trail(pts, color, ss, tail_alpha, dirty)
+
+            if dirty is not None:                      # composite the translucent flame layer once
+                dirty = dirty.clip(surface.get_rect())
+                surface.blit(self._trail_overlay, dirty, dirty)
+                self._trail_overlay.fill((0, 0, 0, 0), dirty)
 
         if self.font is not None and self.race_order is not None:
             total = len(self.race_order)
@@ -1618,9 +1891,17 @@ class Cars:
         self._init_trail()
         self.bumped      = np.zeros((self.total,), dtype=bool)
         self.progress    = np.zeros((self.total,), dtype=NP_FLOAT)
+        self.in_tile     = np.zeros((self.total,), dtype=NP_FLOAT)
+        self._prev_rotation = np.zeros((self.total,), dtype=NP_FLOAT)
+        self.shape_pos   = np.zeros((self.total,), dtype=NP_FLOAT)
+        self.shape_neg   = np.zeros((self.total,), dtype=NP_FLOAT)
+        self.target_speed = np.ones((self.total,), dtype=NP_FLOAT)   # safe speed ahead / max speed
+        self._tr_pos     = np.zeros((self.total,), dtype=NP_FLOAT)
+        self._tr_neg     = np.zeros((self.total,), dtype=NP_FLOAT)
+        self._tr_edge    = np.ones((self.total,), dtype=NP_FLOAT)
         self.race_order  = None
-        self.track       = TrackGeometry(self.grid) if self.race.enabled else None
-        if self.track is not None:
+        self.track       = TrackGeometry(self.grid)   # lap geometry also feeds the reward (progress / corners)
+        if self.race.enabled:
             slots = StartingGrid(
                 self.track, self.race.start_grid, self.width, self.height, self.race.max_racers
             ).layout(self.total)
@@ -1636,8 +1917,9 @@ class Cars:
         if self.track is not None:
             self._cache_progress_table()
 
+        self._setup_reward()
         self.players.reset(total)
-        if self.track is not None:
+        if self.race.enabled:
             self._update_race_order()   # needs players.active, so after the players reset
 
     def restart(self):

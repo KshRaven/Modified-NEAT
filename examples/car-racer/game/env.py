@@ -49,10 +49,10 @@ class Game(Env):
         self.grid.random(config.max_attempts, config.min_tiles, config.seed)
         
         # Create players
-        self.players = Players(config.lives, config.max_hiatus)
+        self.players = Players(config.lives, config.max_hiatus, config.reward)
         
         # Create cars with CarConfig
-        self.cars = Cars(self.grid, self.players, config=config.car, race=config.race)
+        self.cars = Cars(self.grid, self.players, config=config.car, race=config.race, reward=config.reward)
         self.cars.reset(1)
         
         # Create window with WindowConfig

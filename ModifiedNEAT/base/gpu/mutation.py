@@ -1,5 +1,7 @@
-from ModifiedNEAT.base.gpu.functional import clamp, prob, get_value, set_value, normal
-from ModifiedNEAT.base.gpu.initialization import initialize_genome
+"""GPU mutation kernels (numba.cuda). See ``ModifiedNEAT.base.mutation`` for the notes on how mutation works."""
+
+from .functional import clamp, prob, get_value, set_value, normal
+from .initialization import initialize_genome
 
 from numba import cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray
@@ -8,13 +10,6 @@ from typing import Union
 import cupy as cp
 
 GPUArray = Union[DeviceNDArray, cp.ndarray]
-
-# NOTE:
-# 1. Activations are immutable
-# 2. The size of a genome's network is immutable
-# 3. Nodes(biases) and Connections are indistinguishable at this level and all are just Parameters/ Weights
-# 4. Deletion of nodes and connections can be simulated by setting weights and biases of a module to 0
-# 5. Addition of nodes and connections can be simulated by re-initializing values that were set to 0 (deleted)
 
 
 @cuda.jit(device=True)

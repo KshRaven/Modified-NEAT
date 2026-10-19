@@ -1,16 +1,11 @@
-from .functional import clamp, prob, normal, get_enumeration
+"""CPU mutation kernels (numba, prange). See ``ModifiedNEAT.base.mutation`` for the notes on how mutation works."""
+
+from .functional import clamp, prob, normal
 from .initialization import initialize_genome
 
 import numpy as np
 from numba import njit, prange
 from numpy import ndarray as CPUArray
-
-# NOTE:
-# 1. Activations are immutable
-# 2. The size of a genome's network is immutable
-# 3. Nodes(biases) and Connections are indistinguishable at this level and all are just Parameters/ Weights
-# 4. Deletion of nodes and connections can be simulated by setting weights and biases of a module to 0
-# 5. Addition of nodes and connections can be simulated by re-initializing values that were set to 0 (deleted)
 
 
 @njit
@@ -87,12 +82,10 @@ def mutate(
         x_lim = 1 if updates.ndim <= 1 else updates.shape[1]
         y_lim = 1 if updates.ndim <= 2 else updates.shape[2]
 
-        # indices, total = get_enumeration(updates)
         # Flat index -> (genome, x, y) without materializing a list of index tuples
         total = s_g * s_x * s_y
         yz = s_x * s_y
         for i in prange(total):
-            # genome_idx, x, y = indices[i]
             # prange indices are unsigned: cast to int64 so // and % stay integers (uint64 with int64 -> float64)
             flat = np.int64(i)
             genome_idx = flat // yz

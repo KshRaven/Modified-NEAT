@@ -1,41 +1,27 @@
-import numpy as np
+from ModifiedNEAT.base import functional as shared
+from ModifiedNEAT.base.functional import SEED, set_seed, clamp, threads_total
 
 from numba import njit
 from numpy import ndarray as CPUArray
 
-try:
-    import cupy as cp
-except ModuleNotFoundError:
-    cp = np
-
-SEED = int(np.random.randint(0, int(2 ** 20)))
+import numpy as np
 
 
-def set_seed(seed: int):
-    global SEED
-    SEED = seed
-
-
-def get_rng_states(kernel_shape: tuple, seed: int = None, get_normal=True, dtype=np.float64) -> tuple[cp.ndarray, int]:
+def get_rng_states(kernel_shape: tuple, seed: int = None, get_normal=True, dtype=np.float64) -> tuple[np.ndarray, int]:
     if seed is None:
-        seed = SEED
-    threads_total = int(np.prod([np.prod(v) for v in kernel_shape]))
+        seed = shared.SEED
+    total = threads_total(kernel_shape)
     if get_normal:
-        rng_states = np.random.normal(size=threads_total).astype(dtype)
+        rng_states = np.random.normal(size=total).astype(dtype)
     else:
-        rng_states = np.random.uniform(size=threads_total).astype(dtype)
-    return rng_states, threads_total
-
-
-@njit
-def clamp(value: float, minimum: float, maximum: float):
-    return min(max(value, minimum), maximum)
+        rng_states = np.random.uniform(size=total).astype(dtype)
+    return rng_states, total
 
 
 @njit
 def gauss(states: CPUArray, index: int) -> float:
     """
-    Get the value at a given index for a Normal Distribution GPU Array
+    Get the value at a given index for a Normal Distribution CPU Array
     :param states: 1D CPUArray for all max possible threads
     :param index: int
     :return:
@@ -46,7 +32,7 @@ def gauss(states: CPUArray, index: int) -> float:
 @njit
 def prob(states: CPUArray, index: int) -> float:
     """
-    Get the value at a given index for a Probability (Uniform[0, 1]) GPU Array
+    Get the value at a given index for a Probability (Uniform[0, 1]) CPU Array
     :param states: 1D CPUArray for all max possible threads
     :param index: int
     :return:

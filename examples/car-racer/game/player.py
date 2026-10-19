@@ -5,6 +5,7 @@ from numpy import ndarray as Array
 
 from .constants import NP_FLOAT, NP_INT
 from .util import grid
+from .config import RewardConfig
 
 
 # ---------------------------------------------------------------------------
@@ -19,11 +20,12 @@ def _update(
     fitness: Array, prev_fitness: Array,
     # per-frame signals (read only)
     checked: Array, finished: Array, out_of_bounds: Array, hiatus: Array,
-    moved_forward: Array, tile_stag: Array,
+    moved_forward: Array, tile_stag: Array, vel_norm: Array, shape_pos: Array, shape_neg: Array,
     corner_tile_curr: Array, straight_tile_curr: Array,
     on_road: Array, turn_steps: Array, straight_steps: Array,
     # scalars
     lives_total: int, max_hiatus: int, min_turn_steps: int, min_straight_steps: int,
+    shaping: bool, crash_penalty: float,
 ):
     """
     Per-player lifecycle / fitness update.
@@ -86,8 +88,13 @@ def _update(
         # -- 4a. Road-keeping reward/penalty ---------------------------------
         #   ON road:  +5/frame * lives   -- grows with survival
         #   OFF road: -2/frame * deaths  -- escalates for repeat offenders
-        if on_road[t]: fitness[t] += 5.0 * _lives
-        else:          fitness[t] -= 2.0 * _deaths
+        if shaping:
+            # Dense time-trial shaping from Cars: progress / speed-vs-target / smoothness / surfaces
+            fitness[t] += shape_pos[t] * _lives
+            fitness[t] -= shape_neg[t] * _deaths
+        else:
+            if on_road[t]: fitness[t] += 5.0 * _lives
+            else:          fitness[t] -= 2.0 * _deaths
 
         # -- 4e. Turning into corners ----------------------------------------
         if corner_tile_curr[t]:
@@ -108,8 +115,12 @@ def _update(
 
         # -- 4h. Elimination (death) one-off penalty -------------------------
         if elim:
-            if straight_tile_curr[t]: fitness[t] -= 30.0 * _deaths
-            if corner_tile_curr[t]:   fitness[t] -= 30.0 * _deaths
+            if shaping:
+                # Heavier the faster the car was going: botching a corner must never beat slowing down
+                fitness[t] -= crash_penalty * (1.0 + abs(vel_norm[t])) * _deaths
+            else:
+                if straight_tile_curr[t]: fitness[t] -= 30.0 * _deaths
+                if corner_tile_curr[t]:   fitness[t] -= 30.0 * _deaths
 
         # ------------------------------------------------------------------
         # 5.  Housekeeping
@@ -129,7 +140,8 @@ class Players:
     kernel mutates in place.
     """
 
-    def __init__(self, lives: int = 3, max_hiatus: int = 100):
+    def __init__(self, lives: int = 3, max_hiatus: int = 100, reward: RewardConfig | None = None):
+        self.reward: RewardConfig = reward if reward is not None else RewardConfig()
         self.total: int       = 1
         self.lives_total: int = int(lives)
         self.max_hiatus: int  = int(max_hiatus)
@@ -220,7 +232,9 @@ class Players:
                                    #   prevents checkpoint rewards on crash tile
         # ── optional / legacy ─────────────────────────────────────────────
         distances: Array | None = None,
-        verbose=False
+        verbose=False,
+        shape_pos: Array | None = None,   # float (N,) dense positive shaping (weights, pre-scaling)
+        shape_neg: Array | None = None,   # float (N,) dense negative shaping
     ):
         # NOTE: ``corner_tile_next, vel_norm, phase_align, turning, braking, brake_steps,
         #       min_brake_steps, brake_check, straight_aligned, turn_align,
@@ -228,14 +242,18 @@ class Players:
         #       currently disabled (see the commented block below). They are still accepted
         #       so the call signature is unchanged; to re-enable a term, add the array to
         #       ``_update`` and uncomment its scalar version there.
+        if shape_pos is None: shape_pos = np.zeros(self.total, dtype=NP_FLOAT)
+        if shape_neg is None: shape_neg = np.zeros(self.total, dtype=NP_FLOAT)
         eliminated = _update(
             self.lives, self.deaths, self.scores, self.true_scores,
             self.disqualified, self.completed, self.frames_done,
             self.fitness, self.prev_fitness,
             checked, finished, out_of_bounds, hiatus, moved_forward, tile_stag,
+            vel_norm, shape_pos, shape_neg,
             corner_tile_curr, straight_tile_curr,
             on_road, turn_steps, straight_steps,
             self.lives_total, self.max_hiatus, int(min_turn_steps), int(min_straight_steps),
+            bool(self.reward.shaping), float(self.reward.crash_penalty),
         )
 
         # # ------------------------------------------------------------------

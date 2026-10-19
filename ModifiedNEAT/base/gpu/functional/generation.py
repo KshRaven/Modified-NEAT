@@ -1,36 +1,24 @@
+from ModifiedNEAT.base import functional as shared
+from ModifiedNEAT.base.functional import SEED, set_seed, clamp, threads_total
 
-from numba import cuda, njit
+from numba import cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
-# from numba.cuda import random
 
 import numpy as np
 import cupy as cp
 
-SEED = int(np.random.randint(0, int(2 ** 20)))
-
-
-def set_seed(seed: int):
-    global SEED
-    SEED = seed
-
 
 def get_rng_states(kernel_shape: tuple, seed: int = None, get_normal=True, use_cuda=True) -> tuple[cp.ndarray, int]:
     if seed is None:
-        seed = SEED
-    threads_total = int(np.prod([np.prod(v) for v in kernel_shape]))
-    # rng_states = random.create_xoroshiro128p_states(threads_total, seed=seed)
+        seed = shared.SEED
+    total = threads_total(kernel_shape)
     if get_normal:
-        rng_states = cp.random.normal(size=threads_total, dtype=cp.float32) if use_cuda \
-            else np.random.normal(size=threads_total).astype(cp.float32)
+        rng_states = cp.random.normal(size=total, dtype=cp.float32) if use_cuda \
+            else np.random.normal(size=total).astype(cp.float32)
     else:
-        rng_states = cp.random.uniform(size=threads_total, dtype=cp.float32) if use_cuda \
-            else np.random.uniform(size=threads_total).astype(cp.float32)
-    return rng_states, threads_total
-
-
-@njit
-def clamp(value: float, minimum: float, maximum: float):
-    return min(max(value, minimum), maximum)
+        rng_states = cp.random.uniform(size=total, dtype=cp.float32) if use_cuda \
+            else np.random.uniform(size=total).astype(cp.float32)
+    return rng_states, total
 
 
 @cuda.jit(device=True)
@@ -41,7 +29,6 @@ def gauss(states: GPUArray, index: int) -> float:
     :param index: int
     :return:
     """
-    # return random.xoroshiro128p_normal_float64(states, index)
     return states[index]
 
 
@@ -53,7 +40,6 @@ def prob(states: GPUArray, index: int) -> float:
     :param index: int
     :return:
     """
-    # return random.xoroshiro128p_uniform_float64(states, index)
     return states[index]
 
 

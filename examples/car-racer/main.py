@@ -136,7 +136,7 @@ def evaluate(population: neat.Population, **options):
     print(f"started generation {population.generation}")
     stack = []
     with torch.no_grad():
-        if population.generation % 10 == 0: ENV.render_mode = 'human'
+        if population.generation % 20 == 0: ENV.render_mode = 'human'
         else:                               ENV.render_mode = None
         states = ENV.reset(keys=keys)[0]
         done = False
@@ -404,7 +404,7 @@ def run():
     DISCRETE        = False
     INPUTS          = ENV.observation_space.shape[-1]
     OUTPUTS         = 2
-    EMBED_SIZE      = 128
+    EMBED_SIZE      = 96
     LAYERS          = 1
     FWD_EXP         = 1
     BIAS            = True
