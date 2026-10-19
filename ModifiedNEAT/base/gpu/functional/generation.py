@@ -1,5 +1,5 @@
-from ModifiedNEAT.base import functional as shared
-from ModifiedNEAT.base.functional import SEED, set_seed, clamp, threads_total
+from ModifiedNEAT.base import seeding
+from ModifiedNEAT.base.functional import set_seed, clamp, threads_total
 
 from numba import cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
@@ -9,15 +9,16 @@ import cupy as cp
 
 
 def get_rng_states(kernel_shape: tuple, seed: int = None, get_normal=True, use_cuda=True) -> tuple[cp.ndarray, int]:
-    if seed is None:
-        seed = shared.SEED
+    if seed is not None:
+        seeding.configure(seed)
     total = threads_total(kernel_shape)
-    if get_normal:
-        rng_states = cp.random.normal(size=total, dtype=cp.float32) if use_cuda \
-            else np.random.normal(size=total).astype(cp.float32)
+    if use_cuda:
+        rng = seeding.cupy_rng()
+        rng_states = rng.standard_normal(size=total, dtype=cp.float32) if get_normal \
+            else rng.random(size=total, dtype=cp.float32)
     else:
-        rng_states = cp.random.uniform(size=total, dtype=cp.float32) if use_cuda \
-            else np.random.uniform(size=total).astype(cp.float32)
+        rng = seeding.numpy_rng()
+        rng_states = (rng.standard_normal(size=total) if get_normal else rng.random(size=total)).astype(cp.float32)
     return rng_states, total
 
 

@@ -10,12 +10,14 @@ from numba import njit
 import math
 import numpy as np
 
-SEED = int(np.random.randint(0, int(2 ** 20)))
+from ModifiedNEAT.base.seeding import set_seed, get_seed  # noqa: F401  (set_seed re-exported for compatibility)
 
 
-def set_seed(seed: int):
-    global SEED
-    SEED = seed
+def __getattr__(name):
+    # Legacy ``functional.SEED`` now reflects the seed set through ``config.general.seed`` / ``set_seed``
+    if name == 'SEED':
+        return get_seed()
+    raise AttributeError(name)
 
 
 def calc_grid(*block_sizes: int, tpb: int = 4, multiplier: float = None):

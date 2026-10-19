@@ -1,5 +1,5 @@
-from ModifiedNEAT.base import functional as shared
-from ModifiedNEAT.base.functional import SEED, set_seed, clamp, threads_total
+from ModifiedNEAT.base import seeding
+from ModifiedNEAT.base.functional import set_seed, clamp, threads_total
 
 from numba import njit
 from numpy import ndarray as CPUArray
@@ -8,13 +8,15 @@ import numpy as np
 
 
 def get_rng_states(kernel_shape: tuple, seed: int = None, get_normal=True, dtype=np.float64) -> tuple[np.ndarray, int]:
-    if seed is None:
-        seed = shared.SEED
+    # `seed` is applied through ``seeding.configure(config.general.seed)``; an explicit value re-seeds the backend
+    if seed is not None:
+        seeding.configure(seed)
+    rng = seeding.numpy_rng()
     total = threads_total(kernel_shape)
     if get_normal:
-        rng_states = np.random.normal(size=total).astype(dtype)
+        rng_states = rng.standard_normal(size=total).astype(dtype)
     else:
-        rng_states = np.random.uniform(size=total).astype(dtype)
+        rng_states = rng.random(size=total).astype(dtype)
     return rng_states, total
 
 

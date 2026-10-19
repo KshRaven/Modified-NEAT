@@ -5,7 +5,6 @@ from ModifiedNEAT.util.storage import STORAGE_DIR
 
 import os
 import math
-import random
 
 
 class GeneralConfig(Configuration):
@@ -16,7 +15,8 @@ class GeneralConfig(Configuration):
         self.fitness_threshold   = math.inf
         self.pop_size            = 100
         self.reset_on_extinction = True
-        self.seed                = random.randint(1, int(2**20))
+        # None -> no reproducibility (fresh entropy); int -> reproducible. Only affects the ModifiedNEAT backend.
+        self.seed                = None
 
 
 class GenomeConfig(Configuration):

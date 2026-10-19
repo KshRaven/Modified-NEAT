@@ -16,6 +16,7 @@ from ModifiedNEAT.stagnation import Stagnation
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.base.backend import Backend
 from ModifiedNEAT.base.functional import calc_grid, threads_total
+from ModifiedNEAT.base import seeding
 from ModifiedNEAT.base.mutation import mutation_arguments
 from ModifiedNEAT.base.util import (
     init_type_code, parameter_dtype, reshape_to_ndim, check_param_compatibility,
@@ -84,10 +85,14 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
     return spawn_amounts
 
 
-@njit(parallel=True)
+@njit
 def select_parents(pool_fitness, pool_foreign, pool_keys, spawn, clone_cutoff, coeff_cross, coeff_fitness,
                    first_parents, second_parents):
     """
+    NOTE: runs serially on purpose. Numba has its own per-thread RNG state (not the numpy one), so a ``prange`` would
+    make the draws depend on thread scheduling. ``create_children`` seeds the numba RNG once per call from the
+    backend seed stream, which makes the selection reproducible (or not, when ``seed = None``).
+
     Array based parent selection (same scoring as the former per-child `choice`): the fitness/genus factors are
     computed once per pool and every child only draws its random numbers, so children are independent and can be
     chosen in parallel. Genome objects are only touched afterwards, serially.
@@ -111,7 +116,7 @@ def select_parents(pool_fitness, pool_foreign, pool_keys, spawn, clone_cutoff, c
             factor = 0.0
         base[i] = factor
 
-    for s in prange(spawn):
+    for s in range(spawn):
         probabilities = np.random.rand(size)
         best = np.argmax(probabilities + base)
         first_parents[s] = best
@@ -135,7 +140,9 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
                     available_gid: int, spawn_amounts: list[int], remaining_species: list[Species], to_delete: list[int],
                     elitism: float, survival_threshold: float, clone_threshold: float, cross_threshold: float,
                     cross_multiplier: float, darwin_multiplier: float,
-                    criteria: str, ancestors: dict[int, tuple[Genome, Genome]], equal_params: bool, preserve: bool):
+                    criteria: str, ancestors: dict[int, tuple[Genome, Genome]], equal_params: bool, preserve: bool,
+                    rng_seed: int):
+    np.random.seed(rng_seed)  # Numba's own RNG state; does not touch the Python-level numpy global state
     if len(spawn_amounts) != len(remaining_species):
         raise ValueError(f"Mismatch in reproduction data")
 
@@ -348,7 +355,7 @@ def update_children(
     if len(emergency_keys) == 0:
         emergency_keys = [key for key, genome in old_population.items() if genome.genus == genus]
     emergency_prob = torch.softmax(torch.tensor([old_population[key].fitness for key in emergency_keys]), -1).numpy()
-    emergency_choices = np.random.choice(emergency_keys, size=len(new_population), p=emergency_prob)
+    emergency_choices = seeding.numpy_rng().choice(emergency_keys, size=len(new_population), p=emergency_prob)
     try:
         for index, (key, genome) in enumerate(new_population.items()):
             emeg_key = emergency_choices[index]
@@ -470,7 +477,7 @@ def update_children(
         del array_sources
         # ------------------------------ Define mutation kernel and randomizer values ------------------------------ #
         probabilities = rng_planes[1:]
-        normals = backend.normal_states(kernel_shape, seed)[0]
+        normals = backend.normal_states(kernel_shape)[0]
         # ------------------------------ Run mutation using configuration ------------------------------ #
         backend.mutate(
             array_update, child_filter, *mutation_arguments(config, init_type, eps_eff), probabilities, normals,
@@ -496,6 +503,7 @@ def reproduce(
         ancestors: dict[int, tuple[Genome, Genome]], generation: int, to_delete: list[int], genome_indexer: int,
         stagnation: Stagnation, species_set: SpeciesSet, reporters: ReporterSet,
         tpb=1, verbose: int = None):
+    seeding.configure(config.general.seed)
     assert all([module.genus in genera for module in modules.values()])
     # Filter out stagnated species, collect the set of non-stagnated
     # species members, and compute their average adjusted fitness.
@@ -567,7 +575,8 @@ def reproduce(
             to_delete, config.reproduction.elitism,
             config.reproduction.survival_threshold, config.reproduction.clone_threshold, config.reproduction.cross_threshold,
             config.reproduction.cross_multiplier, config.reproduction.darwin_multiplier,
-            config.general.fitness_criterion, ancestors, False, config.reproduction.preserve_elite
+            config.general.fitness_criterion, ancestors, False, config.reproduction.preserve_elite,
+            seeding.numba_seed()
         )
         update_children(
             backend, config, genus, modules, population, genus_population, ancestors, tpb, config.general.seed, verbose

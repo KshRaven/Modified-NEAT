@@ -1,4 +1,5 @@
 from ModifiedNEAT.base.backend import Backend
+from ModifiedNEAT.base import seeding
 from .functional import get_rng_states
 from .initialization import initialize as _initialize_kernel
 from .mutation import mutate as _mutate_kernel
@@ -25,7 +26,7 @@ class CpuBackend(Backend):
         gc.collect()
 
     def uniform(self, shape: tuple):
-        return np.random.uniform(size=shape)
+        return seeding.numpy_rng().random(size=shape)
 
     def normal_states(self, kernel_shape: tuple, seed: int = None):
         return get_rng_states(kernel_shape, seed, get_normal=True)

@@ -1,4 +1,5 @@
 from ModifiedNEAT.base.backend import Backend
+from ModifiedNEAT.base import seeding
 from ModifiedNEAT.base.cpu.reproduction import crossover as _crossover_cpu
 from .functional import get_rng_states
 from .initialization import _execute as _initialize_kernel
@@ -30,7 +31,7 @@ class GpuBackend(Backend):
         cp.get_default_memory_pool().free_all_blocks()
 
     def uniform(self, shape: tuple):
-        return cp.random.uniform(size=shape, dtype=cp.float32)
+        return seeding.cupy_rng().random(size=shape, dtype=cp.float32)
 
     def normal_states(self, kernel_shape: tuple, seed: int = None):
         return get_rng_states(kernel_shape, seed, get_normal=True, use_cuda=True)

@@ -7,6 +7,7 @@ from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.base.backend import Backend
 from ModifiedNEAT.base.functional import calc_grid
+from ModifiedNEAT.base import seeding
 from ModifiedNEAT.base.util import init_type_code, parameter_dtype, reshape_to_ndim, effective_epsilon, clamp_to_epsilon
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
@@ -15,6 +16,7 @@ import time as clock
 
 
 def initialize(backend: Backend, config: Config, module: NeatModule, tpb=1, verbose: int = None):
+    seeding.configure(config.general.seed)
     ts = clock.perf_counter()
     init_type = init_type_code(config)
 
@@ -30,7 +32,7 @@ def initialize(backend: Backend, config: Config, module: NeatModule, tpb=1, verb
         # Get kernel dims
         kernel_shape = calc_grid(*array.shape, tpb=tpb)
         # Get rng states for each element in the param
-        rng_states, threads_total = backend.normal_states(kernel_shape, config.general.seed)
+        rng_states, threads_total = backend.normal_states(kernel_shape)
         # Run kernel
         backend.initialize(
             array, init_type, config.genome.weight_init_mean, config.genome.weight_init_std,

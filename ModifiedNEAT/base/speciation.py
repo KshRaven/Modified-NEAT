@@ -9,6 +9,7 @@ from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.nn.genome import Genome, INT
 from ModifiedNEAT.species import Species, SpeciesSet, GenomeDistanceCache, get_ct
 from ModifiedNEAT.base.backend import Backend
+from ModifiedNEAT.base import seeding
 from ModifiedNEAT.base.util import check_distinct_genomes
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
@@ -165,6 +166,7 @@ def speciate(backend: Backend, config: Config, genera: list[int], modules: dict[
     assumption, you should make sure other necessary parts of the code are updated to reflect
     the new behavior.
     """
+    seeding.configure(config.general.seed)
     assert isinstance(population, (Dict, dict))
     assert all([module.genus in genera for module in modules.values()])
 
