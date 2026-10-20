@@ -16,7 +16,9 @@ from .util import scale_image, draw_arrow, grid, draw_panel
 from .grid import Grid
 from .tile import Tile
 from .player import Players
+from .sprite import make_car, make_halo, rainbow, HALO_COLORS, WHEEL_PAD, export_car_images
 from .race import TrackGeometry, StartingGrid, slipstream, collide, trail_push, trail_points
+
 
 
 # Surface integer codes (shared by Cars.surface and lidar_surface_hits)
@@ -167,6 +169,7 @@ def _flame_color(base, hot, heat: float):
         u, a, b = heat * 2.0, tuple(0.25 * v for v in base), base
     return (int(a[0] + (b[0] - a[0]) * u), int(a[1] + (b[1] - a[1]) * u), int(a[2] + (b[2] - a[2]) * u))
 
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _lidar_cars(
     x: Array, y: Array, angle: Array, active: Array, beam_offsets: Array,
@@ -287,16 +290,20 @@ def _update_location(
 @njit(parallel=True, fastmath=True, cache=True)
 def _steer(
     rotation: Array, vel_ang: Array, on_gravel: Array, on_grass: Array, on_curb: Array,
-    friction: Array, handling: Array, slip: Array, friction_prev: Array, slip_prev: Array,
+    friction: Array, handling: Array, slip: Array,
     coef: Array,   # (3, 4): rows friction/handling/slip, cols road/curb/grass/gravel
     max_vel_ang: float, acc_ang: float, coeff_checker: float,
 ):
-    """Per-car surface coefficients + steering (degraded on loose surfaces)."""
+    """
+    Per-car surface coefficients + steering.
+
+    `handling` is steering authority: it scales both how fast the yaw rate builds and its cap, so a
+    value above 1 makes the body rotate more eagerly.  How far the *path* follows the nose is not
+    decided here (see slip in `_drive`).
+    """
     total, indices = grid((vel_ang.shape[0],))
     for i in prange(total):
         c = indices[i]
-        friction_prev[c] = friction[c]
-        slip_prev[c]     = slip[c]
 
         col = 0
         if   on_gravel[c]: col = 3
@@ -306,56 +313,94 @@ def _steer(
         handling[c] = coef[1, col]
         slip[c]     = coef[2, col]
 
+        h   = handling[c]
+        cap = max_vel_ang * h
         rot = rotation[c]
         va  = vel_ang[c]
         if _sign(rot) != _sign(va):
             rot *= 1.0 + abs(va / max_vel_ang) * coeff_checker
-        va = min(max(va + acc_ang * rot, -max_vel_ang), max_vel_ang)
-        vel_ang[c] = va * handling[c]
+        vel_ang[c] = min(max(va + acc_ang * h * rot, -cap), cap)
 
 
 @njit(parallel=True, fastmath=True, cache=True)
 def _drive(
     acceleration: Array, vel_lin: Array, vel_ang: Array, angle: Array, x: Array, y: Array,
     disp_x: Array, disp_y: Array, vel_norm: Array,
-    friction: Array, slip: Array, friction_prev: Array, slip_prev: Array,
+    friction: Array, slip: Array,
     on_gravel: Array, draft: Array, gravel_noise: Array,
     max_vel_lin: float, acc_lin: float, coeff_brake: float, coeff_reverse: float,
     reverse_enabled: bool, drafting: bool, ss_bonus: float, ss_push: float,
+    lateral_grip: float, grip_relief: float, slide_drag: float,
 ):
-    """Accelerate / brake, friction, heading update and displacement for every car."""
+    """
+    Longitudinal speed, heading and the velocity vector of every car.
+
+    * friction (traction) scales the engine / brake force and the surface's top speed. Speed is never
+      multiplied down: over the top speed the excess is shed at engine-brake rate, coasting keeps momentum.
+    * The path direction chases the nose at a rate limited by lateral grip / speed (lag grows with the
+      surface's slip and with speed), so sliding only redirects speed and never adds any; sliding
+      sideways scrubs a little speed (slide_drag).
+    """
     total, indices = grid((x.shape[0],))
     disp_max = max_vel_lin * (1.0 + ss_bonus) if drafting else max_vel_lin
     for i in prange(total):
         c = indices[i]
+        f = friction[c]
 
-        top  = max_vel_lin
+        top  = max_vel_lin * f
         push = 0.0
         if drafting:
-            top = max_vel_lin * (1.0 + ss_bonus * draft[c])
+            top = max_vel_lin * f * (1.0 + ss_bonus * draft[c])
             if acceleration[c] > 0.0: push = ss_push * acc_lin * draft[c]
 
         acc = acceleration[c]
         v   = vel_lin[c]
         if _sign(acc) != _sign(v):
             acc *= 1.0 + abs(v / max_vel_lin) * coeff_brake
+        dv = acc_lin * acc * f + push
         lo = -max_vel_lin if reverse_enabled else 0.0
-        v  = min(max(v + acc_lin * acc + push, lo), top)
+        if v > top:
+            nv = min(v + dv, v - acc_lin)          # engine braking sheds the excess ...
+            if dv >= -acc_lin: nv = max(nv, top)   # ... down to the surface top speed, not below it
+        else:
+            nv = min(v + dv, top)
+        v = max(nv, lo)
         if reverse_enabled and v < 0.0: v *= coeff_reverse
-        v *= friction[c]
         vel_lin[c] = v
 
         vn = min(max(v / max_vel_lin, -1.0), 1.0)
         vel_norm[c] = vn
+        avn = abs(vn)
 
         a = (angle[c] + vel_ang[c]) % 360.0
-        if on_gravel[c]: a += gravel_noise[c]
+        if on_gravel[c]: a += gravel_noise[c] * avn
         angle[c] = a
         rad = a * math.pi / 180.0
 
-        f3 = friction_prev[c] ** 3
-        dx = min(max(math.sin(rad) * v + disp_x[c] * slip_prev[c] * abs(vn) * f3, -disp_max), disp_max)
-        dy = min(max(math.cos(rad) * v + disp_y[c] * slip[c]      * abs(vn) * f3, -disp_max), disp_max)
+        # Path direction vs nose direction. The nose rotates freely (handling), but the PATH can only
+        # turn towards it at the rate the tyres allow:  turn rate = lateral grip / speed.  That is what
+        # makes full speed impossible in a tight corner (the car slides wide) and makes grass / gravel
+        # (high slip = little grip) barely follow a rotated nose.  Near standstill grip is restored.
+        s       = slip[c]
+        nose    = rad if v >= 0.0 else rad + math.pi
+        speed   = abs(v)
+        pdx = disp_x[c]; pdy = disp_y[c]
+        pspeed  = math.sqrt(pdx * pdx + pdy * pdy)
+        phi     = math.atan2(pdx, pdy) if pspeed > 1.0e-3 else nose
+        delta   = (nose - phi + math.pi) % (2.0 * math.pi) - math.pi
+        w_grip  = lateral_grip * (1.0 - s) / max(max(pspeed, speed), 0.5)       # rad / frame
+        step    = min(abs(delta), w_grip * (1.0 - s * avn))                      # slip also lags the path
+        relief  = max(1.0 - speed / max(grip_relief * max_vel_lin, 1.0e-6), 0.0)
+        step   += relief * (abs(delta) - step)
+        phi    += step if delta >= 0.0 else -step
+        misalign = abs((nose - phi + math.pi) % (2.0 * math.pi) - math.pi)
+        m  = speed * (1.0 - slide_drag * (1.0 - math.cos(misalign)) * 0.5)      # sliding sideways scrubs speed
+        dx = m * math.sin(phi)
+        dy = m * math.cos(phi)
+        n = math.sqrt(dx * dx + dy * dy)
+        if n > disp_max:
+            dx *= disp_max / n
+            dy *= disp_max / n
         disp_x[c] = dx
         disp_y[c] = dy
         x[c] -= dx
@@ -533,11 +578,12 @@ def _reward_shape(
     progress: Array, prev_progress: Array, in_tile: Array, vel_lin: Array, vel_norm: Array,
     rotation: Array, prev_rotation: Array,
     tile_idx: Array, t_turn: Array, t_next: Array, corner_curr: Array,
-    on_road: Array, on_curb: Array, on_grass: Array, on_gravel: Array, bumped: Array,
+    on_road: Array, on_curb: Array, on_grass: Array, on_gravel: Array, bumped: Array, prev_off: Array,
     size: float, max_vel_lin: float, a_dec: float, f1: float, f2: float,
     lookahead: int, window: int,
     w_prog: float, w_time: float, w_surv: float, w_over: float, w_steer: float, w_jit: float,
     w_curb: float, curb_disc: float, w_grass: float, w_gravel: float, w_bump: float,
+    off_progress: float, w_entry: float,
 ):
     """
     Dense time-trial shaping.  Looks `lookahead` tiles down the track, grades every corner it
@@ -582,7 +628,9 @@ def _reward_shape(
         dp = progress[c] - prev_progress[c]
         if abs(dp) > 0.5 * size: dp = 0.0                 # lap wrap / respawn jump, not driving
         if dp > 0.0:
-            pos += w_prog * dp * min(1.0, vt / max(vel_lin[c], 1.0e-6)) / size
+            credit = w_prog * dp * min(1.0, vt / max(vel_lin[c], 1.0e-6)) / size
+            if on_grass[c] or on_gravel[c]: credit *= off_progress
+            pos += credit
         else:
             neg += w_prog * (-dp) / size
         neg += w_over * max(vel_norm[c] - tn, 0.0)
@@ -590,6 +638,7 @@ def _reward_shape(
         open_road = min(max((d_corner - 0.3 * size) / (0.7 * size), 0.0), 1.0)
         neg += w_steer * abs(rotation[c]) * open_road + w_jit * abs(rotation[c] - prev_rotation[c])
 
+        if (on_grass[c] or on_gravel[c]) and not prev_off[c]: neg += w_entry   # first touch of loose surface
         em = edge_mult[c]
         if on_grass[c]:    neg += w_grass * em
         elif on_gravel[c]: neg += w_gravel * em
@@ -603,36 +652,80 @@ def _reward_shape(
         shape_neg[c] = neg
 
 
+@njit(fastmath=True, cache=True)
+def _tile_beam(px, py, dx, dy, x0, x1, y0, y1):
+    """
+    Signed distance along (dx, dy) from (px, py) to the FAR boundary of the axis-aligned tile [x0,x1]x[y0,y1],
+    i.e. the far end of the line/tile intersection (slab method).
+      inside the tile : the usual distance to the boundary ahead (>= 0, at most the tile diagonal)
+      outside the tile: the beam keeps searching along its line, so one of two opposite beams goes negative
+                        (closest boundary is behind it) and the other overshoots the diagonal (farthest boundary)
+    """
+    t_far = 1e18
+    if abs(dx) > 1e-9:
+        ta = (x0 - px) / dx
+        tb = (x1 - px) / dx
+        t_far = min(t_far, max(ta, tb))
+    if abs(dy) > 1e-9:
+        ta = (y0 - py) / dy
+        tb = (y1 - py) / dy
+        t_far = min(t_far, max(ta, tb))
+    return t_far
+
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _get_state(
     state: Array, x: Array, y: Array, angle: Array, vel_lin: Array, vel_ang: Array,
-    tile_idx: Array, t_orient: Array, t_next: Array, t_next2: Array, t_check: Array,
+    tile_idx: Array, t_orient: Array, t_next: Array, t_check: Array, t_center: Array,
     lidar_distances: Array, surface: Array,
-    half: float, max_vel_lin: float, max_vel_ang: float, use_lidar: bool,
+    half: float, tile_size: float, max_vel_lin: float, max_vel_ang: float,
+    n_tiles: int, use_tile_lidar: bool, use_surface: bool, use_lidar: bool,
 ):
     """
-    Observation rows: [dist x3, phase x3, vel_lin, vel_ang, heading] (+ lidar beams + surface).
+    Observation rows (features roughly within [-1, 1]):
+        [dist x n_tiles, phase x n_tiles, vel_lin, vel_ang, heading,
+         (tile_lidar x4 if use_tile_lidar), (surface if use_surface), (lidar beams if use_lidar)]
+
+    dist_k     : 1 - distance to the exit-boundary midpoint (t_check) of the k-th tile ahead / (half * (k + 1)), clipped
+    phase_k    : wrapped heading difference to the k-th tile's exit orientation / 180
+    tile_lidar : 4 beams at car heading +0/+90/+180/+270 deg measuring the distance to the CURRENT tile's boundary
+                 (not surfaces). Normalised by the tile diagonal and mapped to [-1, 1] (no clipping): inside the
+                 tile every beam is in [-1, 1]; once the car is outside, one beam of an opposite pair goes
+                 below -1 (nearest boundary now behind it) and the other above +1 (farthest boundary of the tile).
     """
     total, indices = grid((x.shape[0],))
     beams = lidar_distances.shape[1]
+    base = 2 * n_tiles + 3
+    diag = tile_size * math.sqrt(2.0)
+    hs = tile_size * 0.5
     for i in prange(total):
         c  = indices[i]
-        t0 = tile_idx[c]
-        t1 = t_next[t0]
-        t2 = t_next2[t0]
-        state[c, 0] = 1.0 - math.hypot(t_check[t0, 0] - x[c], t_check[t0, 1] - y[c]) / half
-        state[c, 1] = 1.0 - math.hypot(t_check[t1, 0] - x[c], t_check[t1, 1] - y[c]) / (half * 2.0)
-        state[c, 2] = 1.0 - math.hypot(t_check[t2, 0] - x[c], t_check[t2, 1] - y[c]) / (half * 3.0)
-        state[c, 3] = _wrap180(t_orient[t0] - angle[c]) / 180.0
-        state[c, 4] = _wrap180(t_orient[t1] - angle[c]) / 180.0
-        state[c, 5] = _wrap180(t_orient[t2] - angle[c]) / 180.0
-        state[c, 6] = vel_lin[c] / max_vel_lin
-        state[c, 7] = vel_ang[c] / max_vel_ang
-        state[c, 8] = (angle[c] - 180.0) / (-180.0)
+        t  = tile_idx[c]
+        # Euclidean distance to Nth tile's exit boundary center and phase difference to its exit orientaion
+        for k in range(n_tiles):
+            state[c, k] = min(max(1.0 - math.hypot(t_check[t, 0] - x[c], t_check[t, 1] - y[c]) / (half * (k + 1.0)), -1.0), 1.0)
+            state[c, n_tiles + k] = _wrap180(t_orient[t] - angle[c]) / 180.0
+            t = t_next[t]
+        state[c, base - 3] = vel_lin[c] / max_vel_lin                                               # Linear velocity
+        state[c, base - 2] = vel_ang[c] / max_vel_ang                                               # Angular velocity
+        state[c, base - 1] = (angle[c] - 180.0) / (-180.0)                                          # Car orientation
+        col = base
+        if use_tile_lidar:
+            t0 = tile_idx[c]
+            cx = t_center[t0, 0]
+            cy = t_center[t0, 1]
+            for k in range(4):
+                a = (angle[c] + 90.0 * k) * math.pi / 180.0
+                d = _tile_beam(x[c], y[c], -math.sin(a), -math.cos(a), cx - hs, cx + hs, cy - hs, cy + hs)
+                state[c, col + k] = (d / diag) * 2.0 - 1.0
+            col += 4
+        if use_surface:
+            # Surface under the car centre (codes 0..4: road, curb, grass, gravel, void -> [-1, 1])
+            state[c, col] = (float(surface[c]) / 4.0) * 2.0 - 1.0
+            col += 1
         if use_lidar:
             for b in range(beams):
-                state[c, 9 + b] = lidar_distances[c, b] * 2.0 - 1.0
-            state[c, 9 + beams] = (float(surface[c]) / 4.0) * 2.0 - 1.0
+                state[c, col + b] = lidar_distances[c, b] * 2.0 - 1.0
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -662,13 +755,7 @@ def _progress(
         progress[c] = (laps_done[c] * n_tiles + t_lap[t]) * size + best
 
 
-
 class Cars:
-    BOT_CAR_IMG = pygame.image.load(f"{IMAGE_DIR}/purple-car.png")
-    USR_CAR_IMG = pygame.image.load(f"{IMAGE_DIR}/green-car.png")
-    POS2_CAR_IMG = pygame.image.load(f"{IMAGE_DIR}/white-car.png")
-    POS3_CAR_IMG = pygame.image.load(f"{IMAGE_DIR}/red-car.png")
-
     def __init__(
         self, 
         grid: Grid, players: Players, config: CarConfig | None = None, 
@@ -689,10 +776,16 @@ class Cars:
         self.grid_mapping: dict[Position, Tile] = {tile.position: tile for tile in self.grid._cells.flatten()}
         self.reverse_mapping: dict[Tile, Position] = {tile: position for position, tile in self.grid_mapping.items()}
 
-        self.bot_car_img = scale_image(self.BOT_CAR_IMG, config.scale)
-        self.usr_car_img = scale_image(self.USR_CAR_IMG, config.scale)
-        self.pos2_car_img = scale_image(self.POS2_CAR_IMG, config.scale)
-        self.pos3_car_img = scale_image(self.POS3_CAR_IMG, config.scale)
+        # Procedural car (see sprite.py): neutral body drives the masks / LiDAR footprint, the per-car
+        # rainbow variants are built lazily in _sprite() and drawn with the same footprint.
+        self.bot_car_img = make_car((150, 150, 160), config.scale)
+        export_car_images(IMAGE_DIR)                    # static r/g/b/black/white previews, only if missing
+        # Env-private RNG (gravel jitter): never touches np.random's global state
+        self.rng = np.random.default_rng()
+        self._sprites: dict[tuple[int, int], Surface] = {}
+        self._halos: list[Surface] | None = None
+        self.labels: list[str] | None = None            # per-car text shown on the top-3 halos / leaderboard
+        self._label_cache: dict[tuple, Surface] = {}
         self.mask = pygame.mask.from_surface(self.bot_car_img)
         self._car_lut_off, self._car_lut_n, self._car_lut_id = self._build_car_lut(self.bot_car_img)
         self.width, self.height = self.bot_car_img.get_size()
@@ -702,6 +795,9 @@ class Cars:
         
         # Physics and control configuration
         self.use_lidar: bool        = config.use_lidar
+        self.state_tiles: int       = max(1, int(config.state_tiles))   # tiles ahead in the dist/phase features
+        self.use_tile_lidar: bool   = config.use_tile_lidar   # 4 beams to the current tile's boundary
+        self.use_surface: bool      = config.use_surface      # surface code under the car centre
         self.max_vel_lin: float     = config.max_linear_velocity
         self.max_vel_ang: float     = config.max_angular_velocity
         self.acc_lin: float         = config.linear_acceleration
@@ -857,6 +953,7 @@ class Cars:
         self.progress    = np.zeros((self.total,), dtype=NP_FLOAT)   # px driven along the track
         self.in_tile     = np.zeros((self.total,), dtype=NP_FLOAT)
         self._prev_rotation = np.zeros((self.total,), dtype=NP_FLOAT)
+        self._prev_off   = np.zeros((self.total,), dtype=bool)
         self.shape_pos   = np.zeros((self.total,), dtype=NP_FLOAT)
         self.shape_neg   = np.zeros((self.total,), dtype=NP_FLOAT)
         self.target_speed = np.ones((self.total,), dtype=NP_FLOAT)   # safe speed ahead / max speed
@@ -867,6 +964,7 @@ class Cars:
 
         self.usr_engaged = False
         self.font: Optional[Font] = None
+        self.label_font: Optional[Font] = None
 
     def _init_trail(self) -> None:
         """Pose history (ring buffers) used to draw the curved slipstream streaks."""
@@ -1213,7 +1311,7 @@ class Cars:
         # ------------------------------------------------------------------
         _steer(
             rotation, self.vel_ang, self.on_gravel, self.on_grass, self.on_curb,
-            self.friction, self.handling, self.slip, self._friction_prev, self._slip_prev,
+            self.friction, self.handling, self.slip,
             self._coef, float(self.max_vel_ang), float(self.acc_ang), float(self.coeff_checker),
         )
 
@@ -1233,20 +1331,22 @@ class Cars:
                 self.draft_level < prev_level - DRAFT_TREND_EPS, True,
                 np.where(self.draft_level > prev_level + DRAFT_TREND_EPS, False, self._draft_decay),
             )
-        # Gravel jitter is drawn here (not inside the prange kernel) so np.random.seed()
+        # Gravel jitter is drawn here (not inside the prange kernel) so the env-private RNG (Game seed)
         # controls it and runs are reproducible, exactly like the original implementation.
         noise = np.zeros(self.total, dtype=NP_FLOAT)
         n_gravel = int(np.count_nonzero(self.on_gravel))
         if n_gravel:
-            noise[self.on_gravel] = np.random.uniform(-2, 2, size=n_gravel)
+            amp = float(self.config.gravel_noise)
+            noise[self.on_gravel] = self.rng.uniform(-amp, amp, size=n_gravel)
         _drive(
             acceleration, self.vel_lin, self.vel_ang, self.angle, self.x, self.y,
             self.disp_x, self.disp_y, self._vel_norm,
-            self.friction, self.slip, self._friction_prev, self._slip_prev,
+            self.friction, self.slip,
             self.on_gravel, self.draft_level, noise,
             float(self.max_vel_lin), float(self.acc_lin), float(self.coeff_brake), float(self.coeff_reverse),
             bool(self.toggle_reverse or self.race_on), drafting,
             float(ss.top_speed_bonus), float(ss.push),
+            float(self.config.lateral_grip), float(self.config.grip_relief), float(self.config.slide_drag),
         )
         vel_norm = self._vel_norm
 
@@ -1316,7 +1416,7 @@ class Cars:
                 self.progress, prev_progress, self.in_tile, self.vel_lin, vel_norm,
                 rotation, self._prev_rotation,
                 self.tile_idx, self.t_turn, self.t_next, sg['corner_curr'],
-                sg['on_road'], self.on_curb, self.on_grass, self.on_gravel, self.bumped,
+                sg['on_road'], self.on_curb, self.on_grass, self.on_gravel, self.bumped, self._prev_off,
                 float(self.track.size), float(self.max_vel_lin), float(self._a_dec),
                 float(self._corner_f1), float(self._corner_f2),
                 int(rw.lookahead_tiles), int(rw.corner_window),
@@ -1324,8 +1424,10 @@ class Cars:
                 float(rw.overspeed_weight), float(rw.steer_weight), float(rw.jitter_weight),
                 float(rw.curb_weight), float(rw.curb_corner_discount),
                 float(rw.grass_weight), float(rw.gravel_weight), float(rw.bump_weight),
+                float(rw.offroad_progress), float(rw.offroad_entry_penalty),
             )
         self._prev_rotation[:] = rotation
+        self._prev_off[:] = self.on_grass | self.on_gravel
 
         # ------------------------------------------------------------------
         # Player (reward) update
@@ -1370,8 +1472,12 @@ class Cars:
         if rw.corner_speed_ratio is not None:
             f1 = float(rw.corner_speed_ratio)
         else:
-            omega = self.max_vel_ang * self.config.handling_road * math.pi / 180.0       # rad / frame
-            f1 = rw.corner_safety * omega * (rw.corner_line_radius * size / 2.0) / self.max_vel_lin
+            radius = rw.corner_line_radius * size / 2.0
+            omega  = self.max_vel_ang * self.config.handling_road * math.pi / 180.0       # rad / frame
+            v_turn = omega * radius                                                         # yaw-rate limit
+            grip   = self.config.lateral_grip * (1.0 - self.config.slip_road)
+            v_grip = math.sqrt(grip * radius)                                               # tyre limit
+            f1 = rw.corner_safety * min(v_turn, v_grip) / self.max_vel_lin
         self._corner_f1 = min(max(f1, 0.25), 1.0)
         self._corner_f2 = self._corner_f1 * (rw.uturn_ratio if self._corner_f1 < 1.0 else 1.0)
         self._a_dec = self.acc_lin * (1.0 + 0.5 * self.coeff_brake) * rw.braking_margin
@@ -1435,40 +1541,31 @@ class Cars:
 
     def get_state(self) -> Array:
         """
-        Return the observation vector for all cars.
+        Return the observation vector for all cars, shape (N, features).
 
-        Parameters
-        ----------
-        use_lidar : bool
-            False (default) → 9-feature geometric state (backward-compatible).
-            True            → geometric state + LiDAR distances + surface code,
-                              shape (N, 9 + lidar_angles + 1).
-
-        Default (geometric) features
-        -----------------------------
-        0  dist_check          normalised distance to current checkpoint
-        1  dist_check_next     normalised distance to next checkpoint
-        2  dist_center         normalised distance to tile centre
-        3  vel_lin             normalised linear speed
-        4  phase               heading offset from current tile (normalised)
-        5  phase_next          heading offset from next tile
-        6  angle               absolute car heading (normalised)
-        7  friction            normalised surface friction coefficient
-        8  handling            normalised surface handling coefficient
-
-        LiDAR extension (use_lidar=True)
-        ---------------------------------
-        9 … 9+B-1  lidar_distances[b]  per-beam normalised road-edge distance
-        9+B        surface / 3         dominant surface under car centre [0, 1]
+        Layout (n = state_tiles, default 3, minimum 1):
+        0 … n-1        dist      1 - distance to exit-boundary midpoint of tile k ahead (k=0 is current), clipped
+        n … 2n-1       phase     heading offset to the exit orientation of tile k ahead
+        2n             vel_lin   normalised linear speed
+        2n+1           vel_ang   normalised angular speed
+        2n+2           heading   absolute car heading
+        Optional, in this order:
+        use_tile_lidar (4)  beams at heading +0/+90/+180/+270 to the current tile's boundary, / tile diagonal, [-1, 1]
+                            (below -1 / above +1 when the car is outside the tile, see _get_state)
+        use_surface    (1)  surface code under the car centre, in [-1, 1]
+        use_lidar      (B)  lidar_distances[b] per-beam normalised hit distance
         """
-        features = 9 + (self.lidar_angles + 1 if self.use_lidar else 0)
+        n = self.state_tiles
+        features = (2 * n + 3 + (4 if self.use_tile_lidar else 0) + (1 if self.use_surface else 0)
+                    + (self.lidar_angles if self.use_lidar else 0))
         state = np.empty((self.total, features), dtype=NP_FLOAT)
         _get_state(
             state, self.x, self.y, self.angle, self.vel_lin, self.vel_ang,
-            self.tile_idx, self.t_orient, self.t_next, self.t_next2, self.t_check,
+            self.tile_idx, self.t_orient, self.t_next, self.t_check, self.t_center,
             self.lidar_distances, self.surface,
-            float(np.sqrt((self.grid.cell_size ** 2) * 2) / 2),
-            float(self.max_vel_lin), float(self.max_vel_ang), bool(self.use_lidar),
+            float(np.sqrt((self.grid.cell_size ** 2) * 2) / 2), float(self.grid.cell_size),
+            float(self.max_vel_lin), float(self.max_vel_ang), int(n),
+            bool(self.use_tile_lidar), bool(self.use_surface), bool(self.use_lidar),
         )
         return state
 
@@ -1492,66 +1589,118 @@ class Cars:
     # Rendering
     # ======================================================================
 
+    def set_labels(self, labels: "list[str] | None") -> None:
+        """Per-car display text (index -> label). ``None`` falls back to the car index."""
+        self.labels = None if labels is None else [str(l) for l in labels]
+        self._label_cache.clear()
+
+    def label(self, idx: int) -> "str | None":
+        if self.labels is not None and 0 <= idx < len(self.labels):
+            return self.labels[idx]
+        return None
+
+    def _steer_angle(self, idx: int) -> float:
+        """Visual front-wheel angle (deg, + = left). Follows the yaw rate; the lock shrinks with speed."""
+        cfg = self.config
+        turn = float(np.clip(self.vel_ang[idx] / max(self.max_vel_ang, 1e-6), -1.0, 1.0))
+        spd = float(np.clip(abs(self.vel_lin[idx]) / max(self.max_vel_lin, 1e-6), 0.0, 1.0))
+        lock = cfg.wheel_lock_low_speed + (cfg.wheel_lock_top_speed - cfg.wheel_lock_low_speed) * spd
+        return turn * lock
+
+    def _sprite(self, idx: int, steer: float = 0.0) -> Surface:
+        step = max(float(self.config.wheel_angle_step), 0.5)
+        bucket = int(round(steer / step))                  # quantised so sprites can be cached
+        key = (idx, self.total, bucket)
+        img = self._sprites.get(key)
+        if img is None:
+            if len(self._sprites) > 4096:
+                self._sprites.clear()
+            img = self._sprites[key] = make_car(rainbow(idx, self.total), self.config.scale,
+                                                steer=bucket * step, pad=WHEEL_PAD)
+        return img
+
+    def _text(self, text: str, color) -> Surface:
+        key = (text, tuple(color))
+        surf = self._label_cache.get(key)
+        if surf is None:
+            if len(self._label_cache) > 256:
+                self._label_cache.clear()
+            surf = self._label_cache[key] = self.label_font.render(text, True, color)
+        return surf
+
     def render(self, surface: Surface, verbose: int | bool = False):
         if self.font is None:
-            self.font = pygame.font.Font(None, 24) # , self.font_size)
+            self.font = pygame.font.Font(None, 17)
+        if self.label_font is None:
+            self.label_font = pygame.font.Font(None, 15)
+        if self._halos is None:
+            radius = int(max(self.width, self.height) * 0.8)
+            self._halo_r = radius
+            self._halos = [make_halo(c, radius) for c in HALO_COLORS]
 
-        ranking = (self.ranking if self.ranking is not None else np.argsort(-self.players.fitness))[:3]
+        self._render_race(surface, hud=False)               # slipstream streaks, under the cars
+
+        ranking = [int(i) for i in (self.ranking if self.ranking is not None else np.argsort(-self.players.fitness))[:3]]
+        tags = []
+        best_idx = ranking[0] if not self.usr_engaged and ranking else (self.total - 1)
         for idx, (x, y, angle, active) in enumerate(zip(*self.center, self.angle, self.players.active)):
-            if active or (self.usr_engaged and idx == self.total - 1):
-                ranked = idx in ranking
-                if not ranked:
-                    img = self.bot_car_img
-                else:
-                    if idx == ranking[0]:
-                        img = self.usr_car_img
-                    elif self.total >= 2 and idx == ranking[1]:
-                        img = self.pos2_car_img
-                    else:
-                        img = self.pos3_car_img
-                if self.usr_engaged:
-                    if idx == self.total - 1:
-                        img = self.usr_car_img
-                    else:
-                        if ranked:
-                            if img == self.usr_car_img:
-                                img = self.pos2_car_img
-                            elif img == self.pos2_car_img:
-                                img = self.pos3_car_img
-                            else:
-                                img = self.bot_car_img
+            if not (active or (self.usr_engaged and idx == self.total - 1)):
+                continue
+            cx, cy = x.item(), y.item()
+            rank = ranking.index(idx) if idx in ranking else -1
 
-                img_center_point = (x.item(), y.item())
-                rot_img  = pygame.transform.rotate(img, angle.item())
-                rot_rect = rot_img.get_rect(center=img_center_point)
-                surface.blit(rot_img, rot_rect.topleft)
+            if rank >= 0:                                   # halo under the car (never rotated)
+                halo = self._halos[rank]
+                surface.blit(halo, halo.get_rect(center=(cx, cy)))
 
-                best_idx = ranking[0] if not self.usr_engaged else self.total - 1
-                if idx == best_idx:
+            rot_img  = pygame.transform.rotate(self._sprite(idx, self._steer_angle(idx)), angle.item())
+            surface.blit(rot_img, rot_img.get_rect(center=(cx, cy)))
+
+            if self.usr_engaged and idx == self.total - 1:  # the human-driven car: thin white ring
+                pygame.draw.circle(surface, (255, 255, 255), (int(cx), int(cy)), self._halo_r, width=1)
+            if rank >= 0:
+                tags.append((rank, idx, cx, cy))
+            if idx == best_idx:
+                self._render_debugging(surface, idx)        # debugging text
+                if verbose:
+                    tile_curr = self.tile[idx]
+                    tile_next = self.grid.continuity[tile_curr]
+                    tile_next_1 = self.grid.continuity[tile_next]
+                    draw_arrow(surface, tile_curr.respawn_point, tile_curr.center_check_abs, color=(102, 0, 153))
+                    draw_arrow(surface, tile_next.respawn_point, tile_next.center_check_abs, color=(255, 255, 255))
+                    draw_arrow(surface, tile_next_1.respawn_point, tile_next_1.center_check_abs, color=(255, 255, 255))
                     position = (x, y)
+                    draw_arrow(surface, position, tile_curr.center_check_abs, color=(255, 0, 0))
+                    draw_arrow(surface, position, tile_next.center_check_abs, color=(0, 0, 255))
+                    draw_arrow(surface, position, tile_next_1.center_check_abs, color=(0, 255, 0))
+                    if self.use_lidar:
+                        self._render_lidar(surface, best_idx, cx, cy)
 
-                    # Render debugging text
-                    self._render_debugging(surface, idx)
+        # Labels follow their halo; drawn last so no car covers them
+        if tags:
+            sw, sh = surface.get_size()
+            for rank, idx, cx, cy in tags:
+                text = self.label(idx)
+                if text is None:
+                    text = str(idx)                          # no keys/mapping given: show the car index
+                color = HALO_COLORS[rank]
+                txt = self._text(f"{rank + 1}  {text}", (240, 240, 240))
+                w, h = txt.get_width() + 8, txt.get_height() + 4
+                ty = cy - self._halo_r - 6 - h
+                if ty < 2:                                  # near the top edge: flip below the halo
+                    ty = cy + self._halo_r + 6
+                    anchor = (cx, cy + self._halo_r)
+                else:
+                    anchor = (cx, cy - self._halo_r)
+                rect = pygame.Rect(0, 0, w, h)
+                rect.centerx = int(min(max(cx, w // 2 + 2), sw - w // 2 - 2))
+                rect.y = int(ty)
+                pygame.draw.line(surface, color, anchor, (rect.centerx, rect.bottom if ty < cy else rect.top), 1)
+                draw_panel(surface, rect, self.config.overlay_color, 170, radius=4)
+                pygame.draw.rect(surface, color, rect, width=1, border_radius=4)
+                surface.blit(txt, (rect.x + 4, rect.y + 2))
 
-                    if verbose:
-                        # Render directions
-                        tile_curr = self.tile[idx]
-                        tile_next = self.grid.continuity[tile_curr]
-                        tile_next_1 = self.grid.continuity[tile_next]
-                        draw_arrow(surface, tile_curr.respawn_point, tile_curr.center_check_abs, color=(102, 0, 153))
-                        draw_arrow(surface, tile_next.respawn_point, tile_next.center_check_abs, color=(255, 255, 255))
-                        draw_arrow(surface, tile_next_1.respawn_point, tile_next_1.center_check_abs, color=(255, 255, 255))
-            
-                        # Render Checkpoint midpoint
-                        draw_arrow(surface, position, tile_curr.center_check_abs, color=(255, 0, 0))
-                        draw_arrow(surface, position, tile_next.center_check_abs, color=(0, 0, 255))
-                        draw_arrow(surface, position, tile_next_1.center_check_abs, color=(0, 255, 0))
-
-                    # Draw the LiDAR system
-                    if verbose and self.use_lidar:
-                        self._render_lidar(surface, best_idx, x.item(), y.item())
-
-        self._render_race(surface)
+        self._render_race(surface, hud=True)                # race leaderboard, on top of everything
 
     def _draw_trail(self, pts: Array, color, ss, tail_alpha: float, dirty):
         """Draw one streak onto the shared SRCALPHA layer; returns the updated dirty rect.
@@ -1605,14 +1754,15 @@ class Cars:
     def screen_size(self) -> tuple[int, int]:
         return self._screen_size
 
-    def _render_race(self, surface: Surface) -> None:
+    def _render_race(self, surface: Surface, hud: bool = False) -> None:
         """Curved slipstream streaks (or particles) behind drafting cars + a small position tower."""
         if not self.race_on:
             return
         ss = self.race.slipstream
-        self._frame += 1
-        self._screen_size = surface.get_size()
-        if ss.enabled:
+        if not hud:
+            self._frame += 1
+            self._screen_size = surface.get_size()
+        if ss.enabled and not hud:
             cap = ss.trail_length
             step = ss.particle_step if ss.particles else 1
             spread = ss.particle_spread if ss.particles else 0.0
@@ -1642,26 +1792,27 @@ class Cars:
                 surface.blit(self._trail_overlay, dirty, dirty)
                 self._trail_overlay.fill((0, 0, 0, 0), dirty)
 
-        if self.font is not None and self.race_order is not None:
+        if hud and self.font is not None and self.race_order is not None:
             total = len(self.race_order)
             tower = self.race_order[:5]
             rows = []
             for row, idx in enumerate(tower):
-                tag = f"{row + 1}. car {idx}" + (" *" if self.draft_level[idx] > DRAFT_TOWER_MARK else "")
+                name = self.label(int(idx))
+                tag = f"{row + 1} {int(idx)}" + (f" {name}" if name is not None else "") + (" *" if self.draft_level[idx] > DRAFT_TOWER_MARK else "")
                 rows.append(self.font.render(tag, True, (230, 230, 230)))
             if rows:
                 pad = 6
                 w = max(r.get_width() for r in rows) + 2 * pad
-                rect = pygame.Rect(surface.get_width() - w - 4, 4, w, len(rows) * 22 + 2 * pad - 4)
+                rect = pygame.Rect(surface.get_width() - w - 4, 4, w, len(rows) * 16 + 2 * pad - 4)
                 draw_panel(surface, rect, self.config.overlay_color, self.config.overlay_alpha)
                 for row, txt in enumerate(rows):
-                    surface.blit(txt, (rect.x + pad, rect.y + pad + row * 22))
+                    surface.blit(txt, (rect.x + pad, rect.y + pad + row * 16))
             if self.usr_engaged:
                 me = self.total - 1
                 pos = int(np.flatnonzero(self.race_order == me)[0]) + 1
                 col = ss.color_decay if self._draft_decay[me] else ss.color_gain
                 txt = self.font.render(f"P{pos}/{total}  Draft {self.draft_level[me] * 100:3.0f}%", True, col)
-                rect = pygame.Rect(4, surface.get_height() - 34, txt.get_width() + 12, txt.get_height() + 8)
+                rect = pygame.Rect(4, surface.get_height() - (txt.get_height() + 12), txt.get_width() + 12, txt.get_height() + 8)
                 draw_panel(surface, rect, self.config.overlay_color, self.config.overlay_alpha)
                 surface.blit(txt, (rect.x + 6, rect.y + 4))
 
@@ -1719,7 +1870,7 @@ class Cars:
             f"PhC: {phase_curr:.1f} "
             f"PhN: {phase_next:.1f} "
         )
-        lines.append((self.font.render(pos_text, True, (200, 200, 200)), (10, 40)))
+        lines.append((self.font.render(pos_text, True, (200, 200, 200)), (10, 28)))
 
         # Render car status text
         score_text = (
@@ -1727,7 +1878,7 @@ class Cars:
             f"Laps: {self.laps_done[index]} "
             f"Crashes: {self.crashes_done[index]} "
         )
-        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 70)))
+        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 46)))
 
         # Render player status text
         score_text = (
@@ -1736,14 +1887,14 @@ class Cars:
             f"Lives: {self.players.lives[index]} "
             f"Score: {self.players.true_scores[index]} "
         )
-        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 100)))
+        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 64)))
 
         # Render player status text
         score_text = (
             f"Brake: {self.brake_steps[index]} "
             f"Turn: {self.turn_steps[index]} "
         )
-        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 130)))
+        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 82)))
 
         # Translucent backdrop (cars on the track stay visible), then the text
         pad = 6
@@ -1893,6 +2044,7 @@ class Cars:
         self.progress    = np.zeros((self.total,), dtype=NP_FLOAT)
         self.in_tile     = np.zeros((self.total,), dtype=NP_FLOAT)
         self._prev_rotation = np.zeros((self.total,), dtype=NP_FLOAT)
+        self._prev_off   = np.zeros((self.total,), dtype=bool)
         self.shape_pos   = np.zeros((self.total,), dtype=NP_FLOAT)
         self.shape_neg   = np.zeros((self.total,), dtype=NP_FLOAT)
         self.target_speed = np.ones((self.total,), dtype=NP_FLOAT)   # safe speed ahead / max speed

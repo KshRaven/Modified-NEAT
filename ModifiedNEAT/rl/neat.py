@@ -443,7 +443,7 @@ class NEAT(Algorithm):
 
                 # Compute current returns
                 ts = clock.perf_counter()
-                returns_current = self.compute_returns(rewards, self.gamma, self.kappa, 1.0, 0, False, episode_mapping)
+                returns_current = self.compute_returns(rewards, self.gamma, self.kappa, 1.0, 0, False, False, episode_mapping)
                 ret_comp_time = clock.perf_counter() - ts
                 if verbose and verbose >= 2:
                     print(f"computed primary returns in {CM(f'{round(ret_comp_time, 2)}s', Fore.LIGHTCYAN_EX)}")
@@ -545,11 +545,11 @@ class NEAT(Algorithm):
                 if verbose and verbose >= 2:
                     print(f"fetched secondary data in {CM(f'{round(sec_fetch_time, 2)}s', Fore.LIGHTCYAN_EX)}")
                 ts = clock.perf_counter()
-                returns = self.compute_returns(returns, 0, 0, self.alpha, self.order, self.normalize, full_mapping)
+                returns = self.compute_returns(returns, 0, 0, self.alpha, self.order, False, self.normalize, full_mapping)
                 if self.ghosts is not None:
                     dependant_genera = list(self.ghosts.keys())
                     reduction_raw_reduced = self.compute_returns(
-                        reduction_raw, 0, 0, 1, self.beta_order, False, full_mapping,
+                        reduction_raw, 0, 0, 1, self.beta_order, False, False, full_mapping,
                         dependant_genera, self.beta
                     )
                 else:

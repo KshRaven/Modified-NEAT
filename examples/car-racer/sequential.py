@@ -332,7 +332,7 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
             process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
 
         with torch.no_grad():
-            states = ENV.reset(keys=keys)[0]
+            states = ENV.reset(keys=list(mapping.keys()))[0]   # labels come from the mapping keys
             # MODEL.reset_cache()
             done = False
             ENV.render()

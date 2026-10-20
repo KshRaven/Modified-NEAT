@@ -26,7 +26,7 @@ from game.race import heading_to_angle, wrap180
 class Autopilot:
     """Tiny pure-pursuit driver: aim a little way down the centre line, slow for corners."""
 
-    def __init__(self, cars, seed=0):
+    def __init__(self, cars, seed: int | None = None):
         rng = np.random.default_rng(seed)
         self.cars = cars
         n = cars.total
@@ -118,7 +118,7 @@ def main():
     env.cars.usr_engaged = args.human
     racers = args.racers or cfg.race.racers
     env.reset(keys=racers)             # should show the countdown when rendering in human mode
-    pilot = Autopilot(env.cars, seed=cfg.seed or 0)
+    pilot = Autopilot(env.cars, seed=cfg.seed)
 
     t0, frame, info = time.perf_counter(), 0, {}
     done = False

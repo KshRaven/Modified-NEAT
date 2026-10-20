@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import pygame
 
@@ -18,6 +19,9 @@ from .window import Window
 from .functional import Type
 from .race import Autopilot
 from contextlib import contextmanager
+
+
+_DICT_KEYS_WARNED = False
 
 
 class Game(Env):
@@ -45,8 +49,10 @@ class Game(Env):
         self.config = config
         
         # Create grid with GridConfig and TileConfig
+        self._active_seed: int | None = None
         self.grid = Grid(config=config.grid, tile_config=config.tile)
-        self.grid.random(config.max_attempts, config.min_tiles, config.seed)
+        self.grid.rng.seed(config.seed)                 # None -> OS entropy; the global `random` is never used
+        self.grid.random(config.max_attempts, config.min_tiles)
         
         # Create players
         self.players = Players(config.lives, config.max_hiatus, config.reward)
@@ -54,6 +60,8 @@ class Game(Env):
         # Create cars with CarConfig
         self.cars = Cars(self.grid, self.players, config=config.car, race=config.race, reward=config.reward)
         self.cars.reset(1)
+        self.cars.rng = np.random.default_rng(config.seed)   # Env-private RNGs (config.seed defaults to None)
+        self._active_seed = config.seed                      # grid.rng was seeded with it before the first track
         
         # Create window with WindowConfig
         self.window = Window(self.grid, self.players, self.cars, config=config.window, race=config.race)
@@ -70,6 +78,55 @@ class Game(Env):
         self.action_space = spaces.Box(low=-1, high=1, shape=(1, 2), dtype=np.float64) # spaces.Discrete(3)
 
         self.terminated = False
+
+    def seed(self, seed: int | None = None, force: bool = False) -> None:
+        """
+        Seed every RNG this Env owns: the track generator (``random.Random``) and the car physics
+        (``numpy.random.Generator``). They are private instances, so this never touches the global
+        ``random`` / ``np.random`` / torch / cupy / numba state, and nothing else can change them.
+
+        * integer: the generators restart from it only when it differs from the seed currently in use.
+          Repeating the same value keeps the streams running, so each reset gives the *next* track of that
+          seed's reproducible sequence instead of the same track again (``force=True`` restarts anyway).
+        * ``None``: re-seeds both from OS entropy (fully non-reproducible), even if an integer seed was
+          used earlier in the same process.
+        """
+        if seed is not None:
+            seed = int(seed)
+            if not force and seed == self._active_seed:
+                return
+        self._active_seed = seed
+        self.grid.rng.seed(seed)                        # random.Random.seed(None) -> OS entropy
+        self.cars.rng = np.random.default_rng(seed)     # default_rng(None)       -> OS entropy
+
+    @property
+    def rng(self) -> np.random.Generator:
+        """The Env-private NumPy generator (use it in wrappers/bots that must stay reproducible per Env)."""
+        return self.cars.rng
+
+    @staticmethod
+    def _fmt_key(key: Any) -> str:
+        if isinstance(key, (tuple, list, set, frozenset)):
+            return "/".join(Game._fmt_key(k) for k in key)   # grouped key (123, 678) -> "123/678"
+        return str(key)
+
+    @staticmethod
+    def _labels_from(mapping: dict | list | tuple | None) -> list[str] | None:
+        """
+        Car index -> label.
+          * list / tuple of keys   : position in the list is the car index
+          * dict {key: index}      : the key is shown for its index (keys sharing an index are joined with ',')
+        Keys may be grouped (e.g. a tuple (123, 678) mapped to index 0 is shown as "123/678").
+        """
+        if mapping is None:
+            return None
+        if isinstance(mapping, dict):
+            size = max((int(i) for i in mapping.values()), default=-1) + 1
+            groups: list[list[str]] = [[] for _ in range(size)]
+            for key, index in mapping.items():
+                groups[int(index)].append(Game._fmt_key(key))
+            return [",".join(g) if g else str(i) for i, g in enumerate(groups)]
+        return [Game._fmt_key(k) for k in mapping]
 
     def set_race_mode(self, enabled: bool) -> bool:
         """Enable/disable race mode (grid, slipstream, collisions, countdown). Takes effect on the
@@ -98,8 +155,15 @@ class Game(Env):
     def reset(self, **params) -> tuple[Array, dict[str, Any]]:
         """
         Resets the entire game.
-        :kwarg seed: optional(int) - Seed for random number generator.
-        :kwarg keys: list(int) | int - Keys used to create players
+        :kwarg seed: optional(int) - Seeds this Env's private RNGs and overrides ``config.seed`` (default None).
+                     Without it, ``config.seed`` is used. An integer only restarts the RNGs when it differs from the seed
+                     already in use (repeats continue its track sequence); None re-seeds from OS entropy.
+        :kwarg keys: list(key) | int | dict - Keys used to create players (one car per key, in order). A list
+                     is also shown as the car labels (halo labels / leaderboard); an int gives plain indices.
+                     A dict is treated as a ``mapping`` (warns once).
+        :kwarg mapping: optional(dict[key, index]) - Alternative to ``keys``: keys are taken from
+                     ``mapping.keys()`` and shown as labels. Use the consolidated mapping, not the group one.
+        At least one of ``keys`` / ``mapping`` is required (the race config's ``racers`` is the fallback).
         """
         self.terminated = False
         
@@ -108,14 +172,33 @@ class Game(Env):
         else:
             self.window.initialize()
         
-        seed = params.get('seed', self.config.seed)
-        keys: list[int] | int | None = params.get('keys')
+        seed = params.get('seed')
+        if seed is None:
+            seed = self.config.seed
+        keys: list[int] | int | dict | None = params.get('keys')
+        mapping: dict | list | tuple | None = params.get('mapping')
+        if isinstance(keys, dict):
+            global _DICT_KEYS_WARNED
+            if not _DICT_KEYS_WARNED:
+                _DICT_KEYS_WARNED = True
+                warnings.warn("reset(keys=<dict>) is treated as a mapping; pass keys=list(mapping.keys()) "
+                              "or mapping=<dict> instead.", stacklevel=2)
+            if mapping is None:
+                mapping = keys
+            keys = None
+        if keys is None and mapping is not None:
+            keys = list(mapping.keys()) if isinstance(mapping, dict) else list(mapping)
         if keys is None and self.config.race.enabled and self.config.race.racers:
             keys = self.config.race.racers
         if keys is None:
             raise ValueError(f"Must inputs list of key or keys_total to reset environment")
         elif isinstance(keys, int):
             keys = list(range(keys))
+            labels = None                                   # plain indices
+        else:
+            labels = self._labels_from(mapping if mapping is not None else list(keys))
+        if isinstance(params.get('keys'), int) and mapping is not None:
+            labels = self._labels_from(mapping)
 
         total = len(keys)    
         
@@ -123,8 +206,10 @@ class Game(Env):
         self.observation_space = spaces.Box(low=-1, high=self._obs_high(), shape=(total, features_total), dtype=np.float64)
         self.action_space = spaces.Box(low=-1, high=1, shape=(total, 2), dtype=np.float64) # spaces.Discrete(3)
 
-        self.grid.random(self.config.max_attempts, self.config.min_tiles, seed)
+        self.seed(seed)
+        self.grid.random(self.config.max_attempts, self.config.min_tiles)
         self.cars.reset(len(keys))
+        self.cars.set_labels(labels)
 
         self.rewards = self.players.get_reward()
         self.previous_rewards = self.rewards.copy()
@@ -213,7 +298,7 @@ class Game(Env):
         def new_race():
             nonlocal pilot
             self.cars.reset(total=total)
-            pilot = Autopilot(self.cars, seed=self.config.seed or 0) if total > 1 else None
+            pilot = Autopilot(self.cars, seed=int(self.rng.integers(2**31))) if total > 1 else None
             if race.countdown.enabled:
                 self.window.countdown()
 
@@ -258,7 +343,7 @@ class Game(Env):
                 print(f"\rstate = {state[-1]}", end='')
 
                 if randomize or np.all(self.players.lives <= 0):
-                    self.grid.random(self.config.max_attempts, self.config.min_tiles, self.config.seed)
+                    self.grid.random(self.config.max_attempts, self.config.min_tiles)
                     new_race()
 
                 self.window.render()

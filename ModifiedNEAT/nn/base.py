@@ -6,21 +6,29 @@ from ModifiedNEAT.nn.dist import SharpCategorical
 from torch import Tensor
 from itertools import count
 from numba import njit, prange, types
-from numba.cuda.cudadrv.devicearray import DeviceNDArray
 from numpy import ndarray as CPUArray
 from typing import Union, Iterable, Any
 
 import torch
 import torch.nn as nn
 import numpy as np
+import sys
 import traceback
 import warnings
 
-try:
-    import cupy as cp
-    from cupy import ndarray as GPUArray
-except (ModuleNotFoundError, ImportError):
-    cp, GPUArray = np, CPUArray
+# GPU packages are never imported here (CPU-only machines may not have them). A cupy / numba.cuda array can only
+# exist if its package is already loaded, so it is enough to look it up in sys.modules.
+GPUArray = Any  # annotation only
+
+
+def _is_cupy_array(array) -> bool:
+    cupy = sys.modules.get('cupy')
+    return cupy is not None and isinstance(array, cupy.ndarray)
+
+
+def _is_numba_device_array(array) -> bool:
+    module = sys.modules.get('numba.cuda.cudadrv.devicearray')
+    return module is not None and isinstance(array, module.DeviceNDArray)
 
 
 def addindent(text: str, spaces: int):
@@ -124,13 +132,13 @@ class NeatParameter(nn.Parameter):
             raise ValueError(f"Updating genomes of a module without parameters!")
         if isinstance(params, dict):
             params = params[self.param_index] # -> Any Array or Tensor
-        if isinstance(params, DeviceNDArray):
+        if _is_numba_device_array(params):
             params = params.copy_to_host() # -> NumpyArray
         if isinstance(params, Tensor): # Handle Tensors first to avoid copying data twice
             params = params.clone().to(self.device, self.dtype).requires_grad_(self.requires_grad)
         if isinstance(params, CPUArray):
             params = torch.tensor(params, device=self.device, dtype=self.dtype, requires_grad=self.requires_grad)
-        elif isinstance(params, GPUArray):
+        elif _is_cupy_array(params):
             params = torch.from_dlpack(params).to(self.device, self.dtype).requires_grad_(self.requires_grad)
 
         self.genome_num = len(genomes)
@@ -395,7 +403,7 @@ class NeatModule(nn.Module):
                 # Store as numpy array for compatibility
                 if isinstance(param, torch.Tensor):
                     param = param.detach().cpu().numpy()
-                if isinstance(param, GPUArray) and GPUArray != CPUArray:
+                if _is_cupy_array(param):
                     param = param.get()
                 state_dict[name] = param
         
@@ -1263,7 +1271,7 @@ def check_for_illegal_zeros(config: Config, array: Union[CPUArray, GPUArray], pa
     # Skip the full-array scan (and GPU sync) entirely when weight deletion is enabled
     if config.genome.weight_del_prob != 0.0:
         return
-    array_has_zeros = (np.any(array == zero) if isinstance(array, CPUArray) else cp.any(array == zero).get()).item()
+    array_has_zeros = bool((array == zero).any())  # numpy and cupy arrays
     if array_has_zeros:
         # NOTE: By this point the module_index of parameters should be set.
         error = f"Illegal zero value has been encountered when parameter epsilon or deletion has been enabled!"

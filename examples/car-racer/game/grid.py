@@ -69,6 +69,7 @@ class Grid:
         
         self.boundary_limits = (self.cols * self.cell_size, self.rows * self.cell_size)
         self.initialized = False
+        self.rng = random.Random()      # Env-private RNG: the global `random` module is never touched
 
     def verify_track(self) -> bool:
         """
@@ -128,7 +129,7 @@ class Grid:
             Optional RNG seed for reproducibility.
         """
         if seed is not None:
-            random.seed(seed)
+            self.rng.seed(seed)
     
         sys.setrecursionlimit(max(10_000, self.rows * self.cols * 8))
     
@@ -246,7 +247,7 @@ class Grid:
     
             # ── try all exit turns in random order ────────────────────────────
             moves = [Type.STRAIGHT, Type.LEFT, Type.RIGHT]
-            random.shuffle(moves)
+            self.rng.shuffle(moves)
     
             visited.add(next_pos)
             for move in moves:
@@ -275,13 +276,13 @@ class Grid:
             Horizontal (LEFT / RIGHT) → column in [1, cols-2]
             Vertical   (UP   / DOWN)  → row    in [1, rows-2]
             """
-            d = random.choice(list(Direction))
+            d = self.rng.choice(list(Direction))
             if d in (Direction.LEFT, Direction.RIGHT):
-                col = random.randint(1, self.cols - 2)
-                row = random.randint(0, self.rows - 1)
+                col = self.rng.randint(1, self.cols - 2)
+                row = self.rng.randint(0, self.rows - 1)
             else:
-                col = random.randint(0, self.cols - 1)
-                row = random.randint(1, self.rows - 2)
+                col = self.rng.randint(0, self.cols - 1)
+                row = self.rng.randint(1, self.rows - 2)
             return (col, row), d
     
         # ------------------------------------------------------------------ #

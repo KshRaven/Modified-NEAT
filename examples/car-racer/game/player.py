@@ -25,7 +25,7 @@ def _update(
     on_road: Array, turn_steps: Array, straight_steps: Array,
     # scalars
     lives_total: int, max_hiatus: int, min_turn_steps: int, min_straight_steps: int,
-    shaping: bool, crash_penalty: float,
+    shaping: bool, crash_penalty: float, reward_offset: float,
 ):
     """
     Per-player lifecycle / fitness update.
@@ -45,6 +45,13 @@ def _update(
 
     for i in prange(total):
         t = indices[i]
+
+        # A player with no lives left is out: its fitness is frozen. (Otherwise a parked car is
+        # "eliminated" every frame, and the deaths multiplier makes its penalty grow quadratically.)
+        if lives[t] <= 0:
+            prev_fitness[t] = fitness[t]
+            frames_done[t] += 1
+            continue
 
         # ------------------------------------------------------------------
         # 0.  Derived masks
@@ -88,6 +95,7 @@ def _update(
         # -- 4a. Road-keeping reward/penalty ---------------------------------
         #   ON road:  +5/frame * lives   -- grows with survival
         #   OFF road: -2/frame * deaths  -- escalates for repeat offenders
+        fitness[t] += reward_offset
         if shaping:
             # Dense time-trial shaping from Cars: progress / speed-vs-target / smoothness / surfaces
             fitness[t] += shape_pos[t] * _lives
@@ -142,6 +150,10 @@ class Players:
 
     def __init__(self, lives: int = 3, max_hiatus: int = 100, reward: RewardConfig | None = None):
         self.reward: RewardConfig = reward if reward is not None else RewardConfig()
+        # Scale applied to the per-frame reward returned by get_reward(); offset added to every living
+        # player's raw per-frame reward. Both are plain attributes, so they can be changed at runtime.
+        self.reward_scale: float  = float(self.reward.reward_scale)
+        self.reward_offset: float = float(self.reward.reward_offset)
         self.total: int       = 1
         self.lives_total: int = int(lives)
         self.max_hiatus: int  = int(max_hiatus)
@@ -253,7 +265,7 @@ class Players:
             corner_tile_curr, straight_tile_curr,
             on_road, turn_steps, straight_steps,
             self.lives_total, self.max_hiatus, int(min_turn_steps), int(min_straight_steps),
-            bool(self.reward.shaping), float(self.reward.crash_penalty),
+            bool(self.reward.shaping), float(self.reward.crash_penalty), float(self.reward_offset),
         )
 
         # # ------------------------------------------------------------------
@@ -319,8 +331,13 @@ class Players:
         return int(total_score.argmax())
 
     def get_reward(self) -> Array:
-        """Delta fitness since the previous ``update()`` call."""
-        return self.fitness - self.prev_fitness
+        """Delta fitness since the previous ``update()`` call, times ``reward_scale``."""
+        return (self.fitness - self.prev_fitness) * self.reward_scale
+
+    @property
+    def scaled_fitness(self) -> Array:
+        """Accumulated fitness in the same units the learner sees (fitness x reward_scale)."""
+        return self.fitness * self.reward_scale
 
     def __str__(self) -> str:
         return (

@@ -531,7 +531,7 @@ def collide(
 class Autopilot:
     """Tiny pure-pursuit driver: aim a little way down the centre line, slow for corners."""
 
-    def __init__(self, cars, seed=0):
+    def __init__(self, cars, seed: int | None = None):
         rng = np.random.default_rng(seed)
         self.cars = cars
         n = cars.total

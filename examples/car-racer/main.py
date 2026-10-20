@@ -71,20 +71,24 @@ class BaseModel(mn.Model):
         # Build
         self.lat_proj = mn.Sequential(*[
             mn.Linear(inputs, dim_size, True, device, dtype),
+            activation,
             *sum([
                 [
-                    mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
-                    mn.Linear(dim_size, dim_size * self.fwd_exp, bias, device, dtype),
+                    # mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+                    # mn.Linear(dim_size, dim_size * self.fwd_exp, bias, device, dtype),
+                    # activation,
+                    # mn.Linear(dim_size * self.fwd_exp, dim_size, bias, device, dtype),
+                    mn.Linear(dim_size, dim_size, bias, device, dtype),
                     activation,
-                    mn.Linear(dim_size * self.fwd_exp, dim_size, bias, device, dtype),
                 ]
                 for _ in range(layers)
             ], []),
         ])
         self.pol_proj = mn.Sequential(*[
-            mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+            # mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
             mn.Linear(dim_size, dim_size, bias, device, dtype),
-            nn.SiLU(),
+            # nn.SiLU(),
+            activation,
             mn.Linear(dim_size, 2*outputs, True, device, dtype),
         ])
 
@@ -170,6 +174,14 @@ def evaluate(population: neat.Population, **options):
             , end='')
             step += 1
     print("\ndone with env")
+    
+    # print("\n------------------------------ Post debugging ------------------------------")
+    # print(f"Buffer multiplier = {trainer.max_episodes}")
+    # print(f"Mapping = {trainer.episode_mapping}")
+    # print(f"Lengths = {trainer.episode_lengths}")
+    # print(f"Episodes Primary = {trainer.primary.episodes()}")
+    # print(f"Episodes Secondary = {trainer.secondary.episodes()}")
+    # print("----------------------------------------------------------------------------")
 
     scores = torch.mean(torch.stack(stack, dim=0), dim=0)
     for key, index in mapping.items():
@@ -197,13 +209,14 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
 
     print("\n\n---------- RUNNING TEST ON CAR-RACER ----------")
     print(f"best_genome = {POPULATION.best_genome}")
-    ENV.players.lives_total     = 20
+    ENV.players.lives_total     = 40
+    ENV.players.max_hiatus      = 500
     ENV.render_mode             = 'human'
     ENV.window.fps              = 60
     ENV.cars.usr_enganged       = False
     ENV.cars.restrict_movement  = False
-    ENV.min_laps                = 5
-    ENV.max_frames              = 3000
+    ENV.min_laps                = 3
+    ENV.max_frames              = 5000
     ENV.cars.race.enabled       = True
 
     keys = list(POPULATION.genomes.keys())[:20]
@@ -218,7 +231,7 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
         print(f"Recording @ {RECORD_DIR}")
     
 
-    for i in range(25):
+    for i in range(10):
         ffmpeg_cmd = [
             "ffmpeg",
             "-loglevel", "quiet",
@@ -272,7 +285,7 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
         if record:
             process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
         with torch.no_grad():
-            states = ENV.reset(keys=keys)[0]
+            states = ENV.reset(keys=list(mapping.keys()))[0]   # labels come from the mapping keys
             done = False
             ENV.render()
             step = 0
@@ -393,7 +406,7 @@ def run():
     CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.33
+    CONFIG.reproduction.darwin_multiplier   = 0.50
     CONFIG.reproduction.cross_multiplier    = 0.75
     CONFIG.reproduction.preserve_elite      = False
 
@@ -404,11 +417,11 @@ def run():
     DISCRETE        = False
     INPUTS          = ENV.observation_space.shape[-1]
     OUTPUTS         = 2
-    EMBED_SIZE      = 96
-    LAYERS          = 1
+    EMBED_SIZE      = 128
+    LAYERS          = 2
     FWD_EXP         = 1
-    BIAS            = True
-    ACTIVATION      = nn.SiLU()
+    BIAS            = False
+    ACTIVATION      = nn.Tanh() # nn.SiLU()
     PROBABILISTIC   = False
     CLIP_MIN        = -13
     CLIP_MAX        = +0
@@ -419,12 +432,12 @@ def run():
         f"R{int(CLIP_MIN)}~{int(CLIP_MAX)}"
     )
 
-    MEMORY_SIZE     = 8
-    GAMMA           = np.exp(np.log(0.01) / 256)
-    KAPPA           = np.exp(np.log(0.01) / 256)
-    ALPHA           = fix(np.exp(np.log(5.0) / (MEMORY_SIZE - 1)), 1.0)
-    ALPHA_ORDER     = 0
-    REW_NORM        = 4
+    MEMORY_SIZE     = 10
+    GAMMA           = np.exp(np.log(0.1) / 256)
+    KAPPA           = 0.0 # np.exp(np.log(0.01) / 256)
+    ALPHA           = fix(np.exp(np.log(10.0) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA_ORDER     = 1
+    REW_NORM        = 3
     POL_REG         = 0.00
     STD_REG         = 0.00
     print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
@@ -511,7 +524,7 @@ def run():
 
         try:
             trainer.learn(
-                evaluate, env_config.max_frames, EPOCHS, 128, 0.1,
+                evaluate, env_config.max_frames, EPOCHS, 256, 0.1,
                 'continuous' if not DISCRETE else 'discrete', verbose=True,
             )
         except KeyboardInterrupt:

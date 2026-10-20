@@ -14,6 +14,7 @@ import warnings
 # Environment variables for configuration
 DEVICE_ENV_NAME = 'MODIFIEDNEAT_DEVICE'
 TPB_ENV_NAME = 'MODIFIEDNEAT_TPB'
+# TODO: Ensure setup.py sets these env variables systemwide on install
 
 
 # Initialize device from environment variable or default to CPU
@@ -36,8 +37,10 @@ try:
 except ValueError:
     _default_tpb = 10
 
+# Active device. Always starts on CPU (nothing GPU related is imported); the device requested through the
+# environment variable is applied at the end of this module, once everything below is defined.
 DEVICE = cpu
-_device = _default_device
+_device = 'cpu'
 _tpb = _default_tpb
 
 def get_device():
@@ -45,16 +48,17 @@ def get_device():
     return _device
 
 def cuda_is_available():
-    """Check if CUDA is available."""
+    """Check if the GPU backend can be used (numba.cuda with a usable device, and cupy installed)."""
     try:
         from numba import cuda
-        return cuda.is_available()
-    except ModuleNotFoundError as e:
-        warnings.warn(message=str(e), category=ImportWarning, stacklevel=2)
+        import cupy  # noqa: F401  (required by the GPU backend)
+        return bool(cuda.is_available())
+    except Exception as e:  # missing packages or a broken driver/toolkit: never crash a CPU-only machine
+        warnings.warn(message=f"CUDA backend unavailable: {e}", category=ImportWarning, stacklevel=2)
         return False
 
 def set_device(name, persist_env=False):
-    f"""
+    """
     Set the device for ModifiedNEAT execution.
     
     Parameters
@@ -62,9 +66,8 @@ def set_device(name, persist_env=False):
     name : str or torch.device
         Device name ('cpu' or 'cuda').
     persist_env : bool, optional
-        If False (default), also updates the system environment variable
-        {DEVICE_ENV_NAME} so the setting persists for the current process
-        and any subprocesses spawned from it.
+        If True, also updates the environment variable MODIFIEDNEAT_DEVICE so the setting persists for the
+        current process and any subprocesses spawned from it. Default is False.
     
     Raises
     ------
@@ -183,8 +186,9 @@ def set_tpb_env(value: int):
     os.environ[TPB_ENV_NAME] = str(value)
 
 def initialize(
-        config: Config, module: NeatModule, tpb: int = 10, verbose: int | bool | None = None
+        config: Config, module: NeatModule, tpb: int | None = None, verbose: int | bool | None = None
     ):
+    tpb = _tpb if tpb is None else tpb
     return DEVICE.initialize(
         config, module, tpb, verbose
     )
@@ -192,8 +196,9 @@ def initialize(
 def speciate(
         config: Config, genera: list[int], modules: dict[int, NeatModule],
         species_set: SpeciesSet, population: dict[int, Genome],
-        generation: int, tpb=10, verbose: int = None
+        generation: int, tpb: int | None = None, verbose: int = None
     ):
+   tpb = _tpb if tpb is None else tpb
    return DEVICE.speciate(
        config, genera, modules, species_set, population, generation, tpb, verbose
    )
@@ -202,12 +207,17 @@ def reproduce(
         config: Config, genera: list[int], modules: dict[int, NeatModule], population: dict[int, Genome],
         ancestors: dict[int, tuple[Genome, Genome]], generation: int, to_delete: list[int], genome_indexer: int,
         stagnation: Stagnation, species_set: SpeciesSet, reporters: ReporterSet,
-        tpb=10, verbose: int | bool | None = None
+        tpb: int | None = None, verbose: int | bool | None = None
     ):
+    tpb = _tpb if tpb is None else tpb
     return DEVICE.reproduce(
         config, genera, modules, population, ancestors, generation, to_delete, genome_indexer,
         stagnation, species_set, reporters, tpb, verbose
     )
+
+# Apply the device requested through MODIFIEDNEAT_DEVICE (falls back to CPU with a warning when CUDA is unusable)
+if _default_device == 'cuda':
+    set_device('cuda')
 
 if __name__ == '__main__':
     print(f"Device Type: {DEVICE}")

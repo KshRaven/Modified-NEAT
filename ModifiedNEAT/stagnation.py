@@ -1,16 +1,12 @@
-
 from ModifiedNEAT.config import Config
-from ModifiedNEAT.nn.genome import Genome, INT, FLOAT, BOOL
+from ModifiedNEAT.constants import INT, FLOAT, BOOL
 from ModifiedNEAT.species import SpeciesSet, Species, SPECIES
 from ModifiedNEAT.reporter.base import ReporterSet
-from ModifiedNEAT.util.fancy_text import CM, Fore
 
-from numba import types, njit, optional, prange
+from numba import types, njit
 from numba.typed import List, Dict
 
 import numpy as np
-
-GENOME  = Genome.class_type.instance_type
 
 
 class Stagnation(object):
@@ -23,8 +19,10 @@ class Stagnation(object):
     @njit(nogil=True)
     def get_species_data(species_data: list[tuple[int, Species]], species_dict: dict[int, Species],
                          generation: int, criterion: str):
+        # NOTE: sequential on purpose. Every iteration appends to the shared `species_data` list, which would race
+        #       (and scramble the order) in a parallel loop, and there are only a handful of species anyway.
         mapping = List(species_dict.keys())
-        for idx in prange(len(species_dict)):
+        for idx in range(len(species_dict)):
             sid = mapping[idx]
             specie = species_dict[sid]
             if specie.fitness_history:
@@ -43,7 +41,7 @@ class Stagnation(object):
                 raise ValueError(f"Unexpected fitness_criterion: {criterion}")
             specie.fitness_history.append(specie.fitness)
             specie.adjusted_fitness = None
-            if prev_fitness is None or specie.fitness > prev_fitness:
+            if specie.fitness > prev_fitness:
                 specie.last_improved = generation
 
             species_data.append((sid, specie))
@@ -55,7 +53,10 @@ class Stagnation(object):
         species_fitnesses: list[float] = List.empty_list(FLOAT)
         num_non_stagnant = len(species_data)
 
-        for idx in prange(len(species_data)):
+        # NOTE: sequential on purpose. `num_non_stagnant` is decremented as species are marked stagnant and later
+        #       iterations depend on it (weakest species go first, `species_elitism` protects the best ones), and
+        #       `result` has to keep the ascending-fitness order.
+        for idx in range(len(species_data)):
             # Override stagnant state if marking this species as stagnant would
             # result in the total number of species dropping below the limit.
             # Because species are in ascending fitness order, less fit species
@@ -75,6 +76,9 @@ class Stagnation(object):
             result.append((sid, specie, is_stagnant))
             species_fitnesses.append(specie.fitness)
 
+        # Fitness of every species in the same (ascending) order as `result`, handy for reporting
+        return species_fitnesses
+
     def update(self, genus: int, species_set: SpeciesSet, generation: int):
         """
         Required interface method. Updates species fitness history information,
@@ -90,7 +94,11 @@ class Stagnation(object):
                               generation, self.fitness_criterion)
 
         # Sort in ascending fitness order.
-        species_data = sorted(species_data, key=lambda s: s[1].fitness)
+        ordered = sorted(species_data, key=lambda s: s[1].fitness)
+        # Back to a typed list: numba cannot take a reflected Python list of jitclass instances
+        species_data = List.empty_list(types.Tuple([INT, SPECIES]))
+        for item in ordered:
+            species_data.append(item)
 
         result: list[tuple[int, Species, bool]] = List.empty_list(types.Tuple([INT, SPECIES, BOOL]))
         self.get_result(result, species_data, generation,

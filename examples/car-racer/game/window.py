@@ -41,7 +41,8 @@ class Window:
         self.fps = config.fps
         self.font: Optional[pygame.font.Font] = None
         self.bg_color = config.background_color
-        self.font_size = config.font_size
+        self.font_size = max(8, round(config.font_size * config.font_scale))
+        self.font_scale = config.font_scale
 
     def initialize(self) -> None:
         pygame.init()
@@ -51,12 +52,15 @@ class Window:
             self.clock = pygame.time.Clock()
         self.font = pygame.font.Font(None, self.font_size)
         self.cars.font = pygame.font.Font(None, self.font_size)
+        self.cars.label_font = pygame.font.Font(None, max(8, self.font_size - 2))
         self.running = True
 
     def close(self) -> None:
         self.running = False
         self.font = None # NOTE: Not resetting/closing the font and surfaces leads to segmentation error/ PyGame window freezing
         self.cars.font = None
+        self.cars.label_font = None
+        self.cars._label_cache.clear()
         pygame.quit()
 
     def render(self, verbose: bool | int = False) -> None:
@@ -94,8 +98,8 @@ class Window:
             self.initialize()
         clock = self.clock or pygame.time.Clock()
         w, h = self.screen.get_size()
-        big = pygame.font.Font(None, int(h * 0.32))
-        small = pygame.font.Font(None, int(h * 0.09))
+        big = pygame.font.Font(None, int(h * 0.22))
+        small = pygame.font.Font(None, int(h * 0.06))
         steps = cfg.steps
         total_s = steps * cfg.step_seconds + cfg.go_seconds
         light_r = max(8, int(h * 0.035))
