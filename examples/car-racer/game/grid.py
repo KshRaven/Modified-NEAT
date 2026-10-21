@@ -655,15 +655,9 @@ class Grid:
         if mask is None:
             return None
         
-        width, height = mask.get_size()
-        surf = Surface((width, height), pygame.SRCALPHA)
-        
-        # Set white pixels where mask is set
-        for x in range(width):
-            for y in range(height):
-                if mask.get_at((x, y)):
-                    surf.set_at((x, y), (255, 255, 255, 255))
-        
+        # Done in C by pygame (a per-pixel Python loop took tens of seconds on large grids)
+        surf = Surface(mask.get_size(), pygame.SRCALPHA)
+        mask.to_surface(surf, setcolor=(255, 255, 255, 255), unsetcolor=(0, 0, 0, 0))
         return surf
 
     def _get_object_mask(self, width: int, height: int) -> Mask:

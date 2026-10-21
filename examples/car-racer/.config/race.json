@@ -36,13 +36,20 @@
   "window": {
     "title": "Car Racer - Race Mode",
     "fps": 60,
-    "font_size": 24
+    "font_size": 24,
+    "cinematic": true,
+    "cinematic_size": [1280, 720],
+    "resizable": false
   },
   "race": {
     "enabled": true,
     "racers": 11,
     "max_racers": 12,
     "lidar_detect_cars": true,
+    "finish_line_laps": true,
+    "finish_top_n": 3,
+    "finish_grace_seconds": 5.0,
+    "sim_fps": 60,
 
     "start_grid": {
       "cars_per_tile": [4, 7],

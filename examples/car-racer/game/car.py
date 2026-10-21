@@ -259,11 +259,20 @@ def _update_location(
     x: Array, y: Array, on_track: Array, tile_idx: Array,
     started: Array, finished: Array, crashed: Array, tile_crash: Array,
     laps_done: Array, checks_done: Array, tile_stag_steps: Array,
+    lap_pending: Array, on_finish: Array, strict: bool,
 ):
-    """Tile transition tracking (checkpoints / laps / wrong-tile crashes)."""
+    """Tile transition tracking (checkpoints / laps / wrong-tile crashes).
+
+    strict=False: a lap is counted when the car enters the start tile.
+    strict=True : entering the start tile only arms the lap; it is counted when the car overlaps the
+                  finish line mask (or, as a fallback, when it leaves the start tile)."""
     total, indices = grid((x.shape[0],))
     for i in prange(total):
         c = indices[i]
+        if strict and lap_pending[c] and on_finish[c]:
+            lap_pending[c] = False
+            laps_done[c]  += 1
+            finished[c]    = True
         if on_track[c]:
             kx = int(abs(x[c]) / cell_size)
             ky = int(abs(y[c]) / cell_size)
@@ -273,10 +282,18 @@ def _update_location(
                     old = tile_idx[c]
                     if new == old or new == t_next[old]:
                         if new != old:
-                            if t_start[old]: started[c]  = True
+                            if t_start[old]:
+                                started[c] = True
+                                if lap_pending[c]:             # left the start tile without touching the line
+                                    lap_pending[c] = False
+                                    laps_done[c]  += 1
+                                    finished[c]    = True
                             if t_start[new]:
-                                finished[c]   = True
-                                laps_done[c] += 1
+                                if strict:
+                                    lap_pending[c] = True
+                                else:
+                                    finished[c]   = True
+                                    laps_done[c] += 1
                             checks_done[c]     += 1
                             tile_stag_steps[c]  = 0
                             tile_crash[c]       = False
@@ -903,6 +920,12 @@ class Cars:
         self.finished   = np.full((self.total,), False, dtype=bool)
         self.started    = np.full((self.total,), False, dtype=bool)
         self.laps_done  = np.full((self.total,), 0, dtype=NP_INT)
+        self.lap_pending = np.full((self.total,), False, dtype=bool)   # entered the start tile, line not crossed yet
+        self.race_done = np.full((self.total,), False, dtype=bool)     # finished the race distance
+        self.finish_order: list[int] = []
+        self.finish_frame = np.full((self.total,), -1, dtype=NP_INT)
+        self.race_frame = 0
+        self.race_end_in: float | None = None
         self.checks_done = np.full((self.total,), 0, dtype=NP_INT)
         self.crashes_done = np.full((self.total,), 0, dtype=NP_INT)
         self.hiatus     = np.full((self.total,), 0, dtype=NP_INT)
@@ -924,6 +947,10 @@ class Cars:
         self.handling: Array | None = np.full_like(self.vel_lin, config.handling_road)
         self.slip: Array | None = np.full_like(self.vel_lin, config.slip_road)
         self.ranking: Array | None = None
+        self.race_laps: float = float('inf')                       # laps to win (set by the Env)
+        self.debug_car: int | None = None                           # car shown by the verbose overlays (None = leader)
+        self._debug_idx: int | None = None
+        self._debug_level: int = 0
         self.used_brake = np.full((self.total,), False, dtype=bool)
         self.tile_crash = np.full((self.total,), False, dtype=bool)
 
@@ -1089,8 +1116,10 @@ class Cars:
         def _surf_to_bool(surf) -> Array:
             if surf is None:
                 return np.zeros((self._lidar_gw, self._lidar_gh), dtype=bool)
-            alpha = pygame.surfarray.array_alpha(surf)   # (W, H) uint8
-            return alpha > 0
+            alpha = pygame.surfarray.pixels_alpha(surf)  # (W, H) uint8 view, no copy (the copy was the slow part)
+            out = alpha > 0
+            del alpha                                    # releases the surface lock
+            return out
 
         self._lidar_road_arr   = _surf_to_bool(self.grid._surface_road)
         self._lidar_curb_arr   = _surf_to_bool(self.grid._surface_curb)
@@ -1277,7 +1306,10 @@ class Cars:
             self.x, self.y, self.on_track, self.tile_idx,
             self.started, self.finished, self.crashed, self.tile_crash,
             self.laps_done, self.checks_done, self.tile_stag_steps,
+            self.lap_pending, self.on_finish, bool(self.finish_line_laps),
         )
+        if self.race_done.any():                       # a finished car rolls slowly: that must not cost lives
+            self.tile_stag_steps[self.race_done] = 0
         # Keep the object view (used by rendering / race helpers) in sync with the ids
         for i in np.flatnonzero(self.tile_idx != prev_idx):
             self.tile[i] = self.tiles[self.tile_idx[i]]
@@ -1305,6 +1337,13 @@ class Cars:
         inputs = np.asarray(inputs, dtype=NP_FLOAT)
         acceleration = np.ascontiguousarray(inputs[..., 0])
         rotation     = np.ascontiguousarray(inputs[..., 1])
+        self.race_frame += 1
+        if self.race_on and self.race_done.any():
+            # After the flag a car keeps its steering but has no throttle: it brakes down to a slow roll
+            # (never a full stop, a standstill would cost it lives)
+            d = self.race_done
+            crawl = 0.15 * self.max_vel_lin
+            acceleration[d] = np.where(self.vel_lin[d] > crawl, -1.0, 0.05)
 
         # ------------------------------------------------------------------
         # 1-3. Surface coefficients + steering / handling
@@ -1461,7 +1500,7 @@ class Cars:
     def _compute_progress(self) -> None:
         """Distance driven along the centre line (+ distance inside the current tile)."""
         _progress(
-            self.progress, self.in_tile, self.x, self.y, self.tile_idx, self.laps_done,
+            self.progress, self.in_tile, self.x, self.y, self.tile_idx, self.laps_done + self.lap_pending,
             self.t_lap, self.t_line, int(self.track.n_tiles), float(self.track.size),
         )
 
@@ -1487,6 +1526,9 @@ class Cars:
         if recompute:
             self._compute_progress()
         key = np.where(self.race_active, self.progress, -np.inf)
+        for rank, i in enumerate(self.finish_order):      # finishers keep the order they crossed the line in
+            if key[i] > -np.inf:
+                key[i] = 1.0e15 - rank
         self.race_order = np.argsort(-key, kind='stable')
         self.ranking = self.race_order
 
@@ -1498,6 +1540,22 @@ class Cars:
         if self.usr_engaged and active.size:
             active[-1] = True
         return active
+
+    @property
+    def finish_line_laps(self) -> bool:
+        """Laps only count when the car crosses the finish line (race.finish_line_laps in race mode,
+        car.finish_line_laps otherwise)."""
+        return bool(self.race.finish_line_laps if self.race_on else self.config.finish_line_laps)
+
+    def mark_finished(self, laps_target: float) -> int:
+        """Flag cars that completed `laps_target` laps (call once per step). Returns how many have finished."""
+        newly = (self.laps_done >= laps_target) & ~self.race_done & self.race_active
+        if newly.any():
+            for i in sorted(np.flatnonzero(newly), key=lambda j: -self.progress[j]):
+                self.race_done[i] = True
+                self.finish_frame[i] = self.race_frame
+                self.finish_order.append(int(i))
+        return len(self.finish_order)
 
     @property
     def race_on(self) -> bool:
@@ -1628,7 +1686,15 @@ class Cars:
             surf = self._label_cache[key] = self.label_font.render(text, True, color)
         return surf
 
-    def render(self, surface: Surface, verbose: int | bool = False):
+    def render(self, surface: Surface, verbose: int | bool = False, hud: bool = True, debug_panel: bool = True):
+        """
+        verbose is a level: 0 nothing extra, 1 stats panel, 2 + LiDAR beams, 3 + tile exit arrows
+        (True counts as 3). The stats / arrows / LiDAR describe `debug_car` when set, else the leader
+        (the human car in a manual run). debug_panel=False leaves the stats panel to `render_debug`,
+        so a camera can draw it on the screen instead of the world.
+        """
+        level = 3 if verbose is True else int(verbose or 0)
+        self._debug_level = level
         if self.font is None:
             self.font = pygame.font.Font(None, 17)
         if self.label_font is None:
@@ -1643,6 +1709,9 @@ class Cars:
         ranking = [int(i) for i in (self.ranking if self.ranking is not None else np.argsort(-self.players.fitness))[:3]]
         tags = []
         best_idx = ranking[0] if not self.usr_engaged and ranking else (self.total - 1)
+        if self.debug_car is not None and 0 <= self.debug_car < self.total:
+            best_idx = self.debug_car
+        self._debug_idx = best_idx
         for idx, (x, y, angle, active) in enumerate(zip(*self.center, self.angle, self.players.active)):
             if not (active or (self.usr_engaged and idx == self.total - 1)):
                 continue
@@ -1661,8 +1730,11 @@ class Cars:
             if rank >= 0:
                 tags.append((rank, idx, cx, cy))
             if idx == best_idx:
-                self._render_debugging(surface, idx)        # debugging text
-                if verbose:
+                if debug_panel and level >= 1:
+                    self._render_debugging(surface, idx)    # debugging text
+                if self.use_lidar and level >= 2:
+                    self._render_lidar(surface, best_idx, cx, cy)
+                if level >= 3:
                     tile_curr = self.tile[idx]
                     tile_next = self.grid.continuity[tile_curr]
                     tile_next_1 = self.grid.continuity[tile_next]
@@ -1673,8 +1745,6 @@ class Cars:
                     draw_arrow(surface, position, tile_curr.center_check_abs, color=(255, 0, 0))
                     draw_arrow(surface, position, tile_next.center_check_abs, color=(0, 0, 255))
                     draw_arrow(surface, position, tile_next_1.center_check_abs, color=(0, 255, 0))
-                    if self.use_lidar:
-                        self._render_lidar(surface, best_idx, cx, cy)
 
         # Labels follow their halo; drawn last so no car covers them
         if tags:
@@ -1700,7 +1770,18 @@ class Cars:
                 pygame.draw.rect(surface, color, rect, width=1, border_radius=4)
                 surface.blit(txt, (rect.x + 4, rect.y + 2))
 
-        self._render_race(surface, hud=True)                # race leaderboard, on top of everything
+        if hud:
+            self._render_race(surface, hud=True)            # race leaderboard, on top of everything
+
+    def render_debug(self, surface: Surface) -> None:
+        """Stats panel of the debug car (verbose level >= 1), drawn onto `surface` (e.g. the screen)."""
+        idx = getattr(self, "_debug_idx", None)
+        if self._debug_level >= 1 and idx is not None and 0 <= idx < self.total:
+            self._render_debugging(surface, idx)
+
+    def render_hud(self, surface: Surface) -> None:
+        """Race leaderboard / driver panel only. Lets a camera draw it on the screen instead of the world."""
+        self._render_race(surface, hud=True)
 
     def _draw_trail(self, pts: Array, color, ss, tail_alpha: float, dirty):
         """Draw one streak onto the shared SRCALPHA layer; returns the updated dirty rect.
@@ -1796,9 +1877,19 @@ class Cars:
             total = len(self.race_order)
             tower = self.race_order[:5]
             rows = []
+            lead = int(self.race_order[0])
+            done = max(0, int(self.laps_done[lead]))
+            if math.isfinite(self.race_laps):
+                head = f"Laps {min(done, int(self.race_laps))}/{int(self.race_laps)}"
+            else:
+                head = f"Laps {done}"
+            if self.race_end_in is not None:
+                head += f"  ends {self.race_end_in:.1f}s"
+            rows.append(self.font.render(head, True, (255, 215, 0)))
             for row, idx in enumerate(tower):
                 name = self.label(int(idx))
-                tag = f"{row + 1} {int(idx)}" + (f" {name}" if name is not None else "") + (" *" if self.draft_level[idx] > DRAFT_TOWER_MARK else "")
+                tag = f"{row + 1} {int(idx)}" + (f" {name}" if name is not None else "")
+                tag += " FIN" if self.race_done[idx] else (" *" if self.draft_level[idx] > DRAFT_TOWER_MARK else "")
                 rows.append(self.font.render(tag, True, (230, 230, 230)))
             if rows:
                 pad = 6
@@ -1998,6 +2089,12 @@ class Cars:
         self.finished    = np.full((self.total,), False, dtype=bool)
         self.started     = np.full((self.total,), False, dtype=bool)
         self.laps_done   = np.full((self.total,), 0, dtype=NP_INT)
+        self.lap_pending = np.full((self.total,), False, dtype=bool)   # entered the start tile, line not crossed yet
+        self.race_done = np.full((self.total,), False, dtype=bool)     # finished the race distance
+        self.finish_order: list[int] = []
+        self.finish_frame = np.full((self.total,), -1, dtype=NP_INT)
+        self.race_frame = 0
+        self.race_end_in: float | None = None
         self.checks_done = np.full((self.total,), 0, dtype=NP_INT)
         self.crashes_done= np.full((self.total,), 0, dtype=NP_INT)
         self.tile_crash = np.full((self.total,), False, dtype=bool)
@@ -2075,6 +2172,7 @@ class Cars:
             self._update_race_order()   # needs players.active, so after the players reset
 
     def restart(self):
+        # TODO: Maybe handle this under Numba wrapper
         restart_all  = self.crashed | self.finished
         restart_part = restart_all if not self.endless else self.crashed
 
@@ -2089,6 +2187,11 @@ class Cars:
                 self.angle[idx] = self.t_rot[tid] + np.where(
                     ttype == Type.LEFT.value, 45.0, np.where(ttype == Type.RIGHT.value, -45.0, 0.0)
                 )
+                pend = idx[self.lap_pending[idx]]
+                if pend.size:                          # respawn is past the line: count the armed lap
+                    if not self.full_restart:
+                        self.laps_done[pend] += 1
+                    self.lap_pending[pend] = False
                 self._update_regions()
 
             self.disp_x    [restart_part] = 0

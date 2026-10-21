@@ -212,11 +212,11 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
     ENV.players.lives_total     = 40
     ENV.players.max_hiatus      = 500
     ENV.render_mode             = 'human'
-    ENV.window.fps              = 60
+    ENV.window.fps              = 30
     ENV.cars.usr_enganged       = False
     ENV.cars.restrict_movement  = False
     ENV.min_laps                = 3
-    ENV.max_frames              = 5000
+    ENV.max_frames              = 10000
     ENV.cars.race.enabled       = True
 
     keys = list(POPULATION.genomes.keys())[:20]
@@ -230,124 +230,126 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
             os.mkdir(RECORD_DIR)
         print(f"Recording @ {RECORD_DIR}")
     
+    try:
+        for i in range(10):
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-loglevel", "quiet",
+                "-y",
+                "-f", "rawvideo",
+                "-vcodec", "rawvideo",
+                "-pix_fmt", "rgb24",
+                "-s", f"{WIDTH}x{HEIGHT}",
+                "-r", str(FPS),
+                "-i", "-",  # stdin
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-profile:v", "baseline",
+                "-level", "3.0",
+                "-movflags", "+faststart",
+                f"recordings/test_run_{i:03d}.mp4"
+            ]
 
-    for i in range(10):
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-loglevel", "quiet",
-            "-y",
-            "-f", "rawvideo",
-            "-vcodec", "rawvideo",
-            "-pix_fmt", "rgb24",
-            "-s", f"{WIDTH}x{HEIGHT}",
-            "-r", str(FPS),
-            "-i", "-",  # stdin
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "baseline",
-            "-level", "3.0",
-            "-movflags", "+faststart",
-            f"recordings/test_run_{i:03d}.mp4"
-        ]
-
-        if set_keys is not None:
-            keys = set_keys
-            probs = None
-        else:
-            genomes = list(POPULATION.genomes.values())
-            def sort_key(genome: neat.Genome):
-                fitness = genome.fitness
-                return fitness if fitness is not None else -math.inf, genome.key
-            ranking = sorted(genomes, key=sort_key, reverse=True)[:count + 10]
-            probs = [g.fitness for g in ranking if g.fitness is not None]
-            if len(probs) >= 2:
-                probs = np.array(probs)
-                try:
-                    probs = (probs - probs.min()) / (probs.max() - probs.min())
-                    probs = probs / probs.sum()
-                except Exception:
-                    probs = None
-            else:
+            if set_keys is not None:
+                keys = set_keys
                 probs = None
-            keys = [g.key for g in np.random.choice(ranking, size=count, replace=False, p=probs)]
+            else:
+                genomes = list(POPULATION.genomes.values())
+                def sort_key(genome: neat.Genome):
+                    fitness = genome.fitness
+                    return fitness if fitness is not None else -math.inf, genome.key
+                ranking = sorted(genomes, key=sort_key, reverse=True)[:count + 10]
+                probs = [g.fitness for g in ranking if g.fitness is not None]
+                if len(probs) >= 2:
+                    probs = np.array(probs)
+                    try:
+                        probs = (probs - probs.min()) / (probs.max() - probs.min())
+                        probs = probs / probs.sum()
+                    except Exception:
+                        probs = None
+                else:
+                    probs = None
+                keys = [g.key for g in np.random.choice(ranking, size=count, replace=False, p=probs)]
 
-        if probs is None:
-            random.shuffle(keys)
-        best_genome = POPULATION.best_genome
-        if best_genome is not None and best_genome.key not in keys:
-            keys.insert(0, best_genome.key)
-        if ENV.config.race.enabled:
-            keys = keys[:ENV.config.race.max_racers]   # the grid holds at most max_racers cars
-        mapping = {k: idx for idx, k in enumerate(keys)}
-        reverse = {idx: k for k, idx in mapping.items()}
-        print(f"\nStarting test no {i}")
-        print(f"Running on {len(keys)} Genomes {keys[:10]}")
-        if record:
-            process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
-        with torch.no_grad():
-            states = ENV.reset(keys=list(mapping.keys()))[0]   # labels come from the mapping keys
-            done = False
-            ENV.render()
-            step = 0
-            while not done:
-                debug = i == 0 and step == 0
-
-                states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
-                if debug: print(f"\nstates => \n{states} \n\tshape = {states.shape}")
-                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes, *outputs)
-                if debug: print(f"\nactions => \n{actions} \n\tshape = {actions.shape}")
-                try:
-                    next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
-                except ValueError as e:
-                    print(CM(
-                        (
-                            f"States =>\n{states}\n\tshape: {states.shape}\n"
-                            f"Actions =>\n{actions}\n\tshape: {actions.shape}\n"
-                            f"PlayerTotal => {ENV.cars.total}\n"
-                            f"Prev Displacement X = {ENV.cars.disp_x.shape}\n"
-                            f"Prev Shape = {ENV.cars.slip.shape}\n"
-                            f"Prev Friction = {ENV.cars.friction.shape}\n"
-                        )
-                        , Fore.LIGHTYELLOW_EX
-                    ))
-                    raise e
-                states = next_states
+            if probs is None:
+                random.shuffle(keys)
+            best_genome = POPULATION.best_genome
+            if best_genome is not None and best_genome.key not in keys:
+                keys.insert(0, best_genome.key)
+            if ENV.config.race.enabled:
+                keys = keys[:ENV.config.race.max_racers]   # the grid holds at most max_racers cars
+            mapping = {k: idx for idx, k in enumerate(keys)}
+            reverse = {idx: k for k, idx in mapping.items()}
+            print(f"\nStarting test no {i}")
+            print(f"Running on {len(keys)} Genomes {keys[:10]}")
+            if record:
+                process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
+            with torch.no_grad():
+                states = ENV.reset(keys=list(mapping.keys()))[0]   # labels come from the mapping keys
+                done = False
                 ENV.render()
-                ranking = np.argsort(-ENV.players.fitness)
-                leaders = [reverse[idx] for idx in ranking]
-                # print(
-                #     f"\rLives = {ENV.players.lives.mean().item():.1f}, "
-                #     f"Alive={ENV.players.active_total}, "
-                #     f"{leaders[:5]}{' ' * 15}"
-                #     , end=''
-                # )
+                step = 0
+                while not done:
+                    debug = i == 0 and step == 0
 
-                frame = pygame.surfarray.array3d(ENV.window.screen)
-                frame = np.transpose(frame, (1, 0, 2))  # Pygame → correct orientation
+                    states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+                    if debug: print(f"\nstates => \n{states} \n\tshape = {states.shape}")
+                    actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes, *outputs)
+                    if debug: print(f"\nactions => \n{actions} \n\tshape = {actions.shape}")
+                    try:
+                        next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
+                    except ValueError as e:
+                        print(CM(
+                            (
+                                f"States =>\n{states}\n\tshape: {states.shape}\n"
+                                f"Actions =>\n{actions}\n\tshape: {actions.shape}\n"
+                                f"PlayerTotal => {ENV.cars.total}\n"
+                                f"Prev Displacement X = {ENV.cars.disp_x.shape}\n"
+                                f"Prev Shape = {ENV.cars.slip.shape}\n"
+                                f"Prev Friction = {ENV.cars.friction.shape}\n"
+                            )
+                            , Fore.LIGHTYELLOW_EX
+                        ))
+                        raise e
+                    states = next_states
+                    ENV.render()
+                    ranking = np.argsort(-ENV.players.fitness)
+                    leaders = [reverse[idx] for idx in ranking]
+                    # print(
+                    #     f"\rLives = {ENV.players.lives.mean().item():.1f}, "
+                    #     f"Alive={ENV.players.active_total}, "
+                    #     f"{leaders[:5]}{' ' * 15}"
+                    #     , end=''
+                    # )
 
-                if record:
-                    process.stdin.write(frame.tobytes())
+                    frame = pygame.surfarray.array3d(ENV.window.screen)
+                    frame = np.transpose(frame, (1, 0, 2))  # Pygame → correct orientation
 
-                if done:
-                    print(f"\ninfo: {info}")
+                    if record:
+                        process.stdin.write(frame.tobytes())
 
-                step += 1
+                    if done:
+                        print(f"\ninfo: {info}")
 
-            scores = dict(
-                sorted(
-                    ((k, ENV.players.scores[idx].item()) for k, idx in mapping.items()),
-                    key=lambda item: item[1],
-                    reverse=True
-                )[:5]
-            )
-            print(
-                f"\nDone with test:"
-                f"\n\tScore -> {scores}"
-            )
-        if record:
-            process.stdin.close()
-            process.wait()
-            process.terminate()
+                    step += 1
+
+                scores = dict(
+                    sorted(
+                        ((k, ENV.players.scores[idx].item()) for k, idx in mapping.items()),
+                        key=lambda item: item[1],
+                        reverse=True
+                    )[:5]
+                )
+                print(
+                    f"\nDone with test:"
+                    f"\n\tScore -> {scores}"
+                )
+            if record:
+                process.stdin.close()
+                process.wait()
+                process.terminate()
+    except KeyboardInterrupt:
+        print(f"\nTerminated")
 
 
 def fix(value: float, default: float = 1):
@@ -383,7 +385,7 @@ def run():
     # print(ENV.action_space.sample().shape)
     # sys.exit()
 
-    MULTIPLIER = 0.33
+    MULTIPLIER = 0.25
     CONFIG = neat.Config('racer', '../../storage/configs')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
@@ -400,13 +402,13 @@ def run():
     CONFIG.reproduction.min_species_size    = GENOMES
     CONFIG.reproduction.purge               = 1
     CONFIG.reproduction.clone_threshold     = 0.50
-    CONFIG.reproduction.survival_threshold  = 0.20
+    CONFIG.reproduction.survival_threshold  = 0.10
     CONFIG.reproduction.cross_threshold     = 0.00
     CONFIG.reproduction.elitism             = 0.33
     CONFIG.species.compatibility_threshold  = math.inf
     CONFIG.stagnation.max_stagnation        = 1
     CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.50
+    CONFIG.reproduction.darwin_multiplier   = 0.33
     CONFIG.reproduction.cross_multiplier    = 0.75
     CONFIG.reproduction.preserve_elite      = False
 
@@ -417,10 +419,10 @@ def run():
     DISCRETE        = False
     INPUTS          = ENV.observation_space.shape[-1]
     OUTPUTS         = 2
-    EMBED_SIZE      = 128
+    EMBED_SIZE      = 64
     LAYERS          = 2
     FWD_EXP         = 1
-    BIAS            = False
+    BIAS            = True
     ACTIVATION      = nn.Tanh() # nn.SiLU()
     PROBABILISTIC   = False
     CLIP_MIN        = -13
@@ -432,11 +434,11 @@ def run():
         f"R{int(CLIP_MIN)}~{int(CLIP_MAX)}"
     )
 
-    MEMORY_SIZE     = 10
+    MEMORY_SIZE     = 3
     GAMMA           = np.exp(np.log(0.1) / 256)
     KAPPA           = 0.0 # np.exp(np.log(0.01) / 256)
-    ALPHA           = fix(np.exp(np.log(10.0) / (MEMORY_SIZE - 1)), 1.0)
-    ALPHA_ORDER     = 1
+    ALPHA           = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA_ORDER     = 2
     REW_NORM        = 3
     POL_REG         = 0.00
     STD_REG         = 0.00

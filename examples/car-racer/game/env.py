@@ -171,6 +171,7 @@ class Game(Env):
             self.window.close()
         else:
             self.window.initialize()
+            self.window.show_message("Generating track...")
         
         seed = params.get('seed')
         if seed is None:
@@ -215,6 +216,8 @@ class Game(Env):
         self.previous_rewards = self.rewards.copy()
 
         states = self.cars.get_state()
+        self.cars.race_laps = float(self.min_laps)
+        self.window.reset_camera()
 
         # Race mode: dramatic 3-2-1-GO! over the frozen grid (human rendering only)
         race = self.config.race
@@ -246,6 +249,7 @@ class Game(Env):
 
             # Get the next state to be used
             states = self.cars.get_state() # shape(players, features=5)
+            states = states * 10.0 # TODO: Add configuration for this just like reward scaling
 
             # Get the rewards
             self.previous_rewards = self.rewards.copy()
@@ -253,15 +257,34 @@ class Game(Env):
             rewards = np.expand_dims(self.rewards, -1) # shape(players, features=1)
 
             # Check env status before restarting and games to avoid full reset
-            any_complete = np.any(self.cars.laps_done >= self.min_laps).item()
+            race = self.config.race
+            self.cars.race_laps = float(self.min_laps)
+            if race.enabled:
+                # Race: it ends `finish_grace_seconds` after the first `finish_top_n` cars finished
+                self.cars.mark_finished(self.min_laps)
+                finishers = self.cars.finish_order
+                need = min(race.finish_top_n, self.cars.total)
+                over = False
+                self.cars.race_end_in = None
+                if len(finishers) >= need:
+                    grace = round(race.finish_grace_seconds * race.sim_fps)
+                    since = self.cars.race_frame - int(self.cars.finish_frame[finishers[need - 1]])
+                    self.cars.race_end_in = max(0.0, (grace - since) / race.sim_fps)
+                    over = since >= grace
+                still_racing = self.cars.race_active & ~self.cars.race_done
+                if finishers and not still_racing.any():
+                    over = True                       # everyone left on track has finished
+                any_complete = bool(over)
+            else:
+                any_complete = np.any(self.cars.laps_done >= self.min_laps).item()
             all_disqualified = np.all(~self.players.active).item()
             timed_out = np.any(self.players.frames_done >= self.max_frames).item()
             done = any_complete or all_disqualified or timed_out
 
             if self.render_mode == 'human':
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        done = True
+                self.window.poll_events()           # camera keys, Space (pause); blocks while paused
+                if self.window.consume_stop():      # window closed or Esc: end the episode
+                    done = True
             if done:
                 self.terminated = True
 
@@ -299,6 +322,7 @@ class Game(Env):
             nonlocal pilot
             self.cars.reset(total=total)
             pilot = Autopilot(self.cars, seed=int(self.rng.integers(2**31))) if total > 1 else None
+            self.window.reset_camera()
             if race.countdown.enabled:
                 self.window.countdown()
 
@@ -319,12 +343,8 @@ class Game(Env):
             while self.window.running:
                 done = False
                 randomize = False
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        self.terminated = True
-                        break
-                    # Only check .key if it's a KEYDOWN event
-                    elif event.type == pygame.KEYDOWN:
+                for event in self.window.poll_events():
+                    if event.type == pygame.KEYDOWN:
                         if event.key == pygame.K_b:
                             enable_bots = True
                             break
@@ -334,6 +354,10 @@ class Game(Env):
                         if event.key == pygame.K_q:
                             done = True
                             break
+
+                if self.window.consume_stop():          # window closed or Esc
+                    print(f"\nRun has ended!")
+                    break
 
                 self.cars.update_on_event(
                     verbose=False, bot_inputs=pilot.act() if pilot is not None else None

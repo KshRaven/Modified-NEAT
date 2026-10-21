@@ -36,7 +36,10 @@
   "window": {
     "title": "Car Racer Environment",
     "fps": null,
-    "font_size": 24
+    "font_size": 24,
+    "cinematic": false,
+    "cinematic_size": [1280, 720],
+    "resizable": false
   },
   "race": {
     "enabled": false,
