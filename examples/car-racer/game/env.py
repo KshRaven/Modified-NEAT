@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import warnings
 import numpy as np
 import pygame
@@ -16,7 +18,6 @@ from .grid import Grid
 from .player import Players
 from .car import Cars
 from .window import Window
-from .functional import Type
 from .race import Autopilot
 from contextlib import contextmanager
 
@@ -150,8 +151,8 @@ class Game(Env):
         race = self.config.race
         ss = race.slipstream
         if (race.enabled and ss.enabled) or ss.random_enabled:
-            return 1.0 + max(ss.top_speed_bonus, 0.0)
-        return 1.0
+            return abs(self.config.state_scale) * (1.0 + max(ss.top_speed_bonus, 0.0))
+        return abs(self.config.state_scale)
 
     def reset(self, **params) -> tuple[Array, dict[str, Any]]:
         """
@@ -250,7 +251,7 @@ class Game(Env):
 
             # Get the next state to be used
             states = self.cars.get_state() # shape(players, features=5)
-            states = states * 1.0 # 10.0 # TODO: Add configuration for this just like reward scaling
+            states = states * self.config.state_scale
 
             # Get the rewards
             self.previous_rewards = self.rewards.copy()
@@ -262,7 +263,7 @@ class Game(Env):
             self.cars.race_laps = float(self.min_laps)
             if race.enabled:
                 # Race: it ends `finish_grace_seconds` after the first `finish_top_n` cars finished
-                self.cars.mark_finished(self.min_laps)
+                self.cars.control.mark_finished(self.cars, self.min_laps)
                 finishers = self.cars.finish_order
                 need = min(race.finish_top_n, self.cars.total)
                 over = False
@@ -306,8 +307,7 @@ class Game(Env):
             else:
                 if self.window.screen is not None:
                     self.window.close()
-                # TODO: Implement
-                pass
+                # Only 'human' rendering is supported; other modes just close the window.
 
     def run(self):
         """Manual test drive (WASD). Always a race: bots on a staggered grid, you at the back."""

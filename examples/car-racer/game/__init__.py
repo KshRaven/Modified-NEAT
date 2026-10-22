@@ -6,7 +6,10 @@ Organized game components:
 - config: Configuration classes
 - util: Utility functions for rendering and drawing
 - tiles: Tile and Grid classes for track management
-- cars: Car classes for agents/players
+- car: Car state, movement and boundary logic
+- player: Lives, score and fitness
+- reward: Reward shaping and curriculum
+- race: Race order, slipstream and starting grid
 - window: Window and rendering classes
 - env: Gymnasium Environment wrapper
 """
@@ -27,12 +30,12 @@ from .constants import (
 # Configuration
 from .config import (
     Configuration, CarConfig, GridConfig, TileConfig, WindowConfig, 
-    EnvironmentConfig, GenConfig, PlayerConfig,
+    EnvironmentConfig, GenConfig, PlayerConfig, RewardConfig,
     RaceConfig, StartGridConfig, SlipstreamConfig, CollisionConfig, CountdownConfig,
 )
 
 # Utilities
-from .util import scale_image, blit_rotate_center, draw_sector, clip_rotated_surface
+from .util import scale_image, blit_rotate_center, draw_sector
 
 # Track system
 from .tile import Tile
@@ -40,6 +43,8 @@ from .grid import Grid
 from .car import Cars
 from .window import Window
 from .player import Players
+from .race import Autopilot, RaceControl, RandomSlipstream, Slipstream, StartingGrid, TrackGeometry
+from .reward import RewardShaper
 
 # Environment
 from .env import Game
@@ -54,7 +59,7 @@ __all__ = [
     
     # Configuration
     'Configuration', 'CarConfig', 'GridConfig', 'TileConfig', 'WindowConfig', 
-    'EnvironmentConfig', 'GenConfig', 'PlayerConfig',
+    'EnvironmentConfig', 'GenConfig', 'PlayerConfig', 'RewardConfig',
     'RaceConfig', 'StartGridConfig', 'SlipstreamConfig', 'CollisionConfig', 'CountdownConfig',
     
     # Colors
@@ -62,10 +67,14 @@ __all__ = [
     'COLOR_START_SEC', 'COLOR_START_PRI', 'COLOR_GRAVEL', 'COLOR_EMPTY', 'COLOR_LIDAR',
     
     # Utilities
-    'scale_image', 'blit_rotate_center', 'draw_sector', 'clip_rotated_surface',
+    'scale_image', 'blit_rotate_center', 'draw_sector',
     
     # Track system
     'Tile', 'Grid', 'Cars', 'Window', 'Players',
+
+    # Race and reward
+    'Autopilot', 'RaceControl', 'RandomSlipstream', 'Slipstream', 'StartingGrid', 'TrackGeometry',
+    'RewardShaper',
     
     # Environment
     'Game',

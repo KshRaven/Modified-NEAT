@@ -1,41 +1,42 @@
-import ModifiedNEAT as neat
-import ModifiedNEAT.nn as mn
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import random
+import sys
+import warnings
+
+import numpy as np
 import torch
 import torch.nn as nn
-import os, sys
-import warnings
-import random
-import math
-import numpy as np
-import argparse
-import subprocess as sp
-import pygame
-
-from ModifiedNEAT.rl import NEAT
-from ModifiedNEAT.optim.scheduler import BinaryAnnealing, RandomAnnealing, CosineAnnealing
-from ModifiedNEAT.util.datetime import unix_to_datetime_file, clock
-from ModifiedNEAT.util.fancy_text import CM, Fore
-from torch import Tensor
-from typing import Union
 from numba.core.errors import NumbaPerformanceWarning
+from torch import Tensor
 
 EXMP_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJ_DIR = os.path.dirname(os.path.dirname(EXMP_DIR))
-print(f"Example path = {EXMP_DIR}")
-if EXMP_DIR not in sys.path: sys.path.insert(0, EXMP_DIR)
-if PROJ_DIR not in sys.path: sys.path.insert(0, PROJ_DIR)
+for path in (EXMP_DIR, PROJ_DIR):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
-from game import Game, EnvironmentConfig
+import ModifiedNEAT as neat
+import ModifiedNEAT.nn as mn
+from ModifiedNEAT.optim.scheduler import CosineAnnealing
+from ModifiedNEAT.rl import NEAT
+from ModifiedNEAT.util.datetime import clock, unix_to_datetime_file
+from ModifiedNEAT.util.fancy_text import CM, Fore
+
+from game import EnvironmentConfig, Game
 
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10, edgeitems=3)
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-DTYPE  = torch.float32
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DTYPE = torch.float32
 neat.set_device(DEVICE)
-print(f"Using PyTorch device: '{DEVICE}'. NEAT device: '{neat.get_device()}'")
 neat.util.storage.set_storage_location(f"{PROJ_DIR}/storage/")
-print(f"Storage path = {neat.util.storage.STORAGE_DIR}")
+print(f"Device: '{DEVICE}' | NEAT device: '{neat.get_device()}'")
+print(f"Storage path: {neat.util.storage.STORAGE_DIR}")
 
 
 class BaseModelSeq(mn.Model):
@@ -109,16 +110,16 @@ class BaseModelSeq(mn.Model):
     def extra_repr(self) -> str:
         return f"probabilistic={self.probabilistic}, distro='{self.distribution}'"
 
-    def forward(self, state: Tensor, keys: Union[int, list[int]] = None, **kwargs):
+    def forward(self, state: Tensor, keys: int | list[int] | None = None, **kwargs):
         return self.get_policy(state, keys=keys, **kwargs)
 
-    def _get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
+    def _get_mean_std(self, latent: Tensor, keys: int | list[int] | None = None):
         mean_std      = self.pol_proj(latent, keys=keys)
         mean, log_std = torch.chunk(mean_std, 2, -1)
         std           = torch.exp(log_std.clamp(self.clip_min, self.clip_max))
         return mean, std
 
-    def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
+    def get_policy(self, state: Tensor, keys: int | list[int] | None = None, **options) -> Tensor:
         latent    = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False)).squeeze(-2)
         mean, std = self._get_mean_std(latent, keys=keys)
         action = mean
@@ -162,440 +163,349 @@ class SequenceBuilder(nn.Module):
         return self.sequence
 
 
-ENV: Game | None = None
-MODEL: BaseModelSeq | None = None
-POPULATION: neat.Population | None = None
-FILE_NAME: str = "original"
+# Run options
+RENDER_MODE: str | None = "human"
+LOAD: str | None = None
+TRAIN: bool = True
+
+# Environment
+ENV_CONFIG_FILE: str | None = None  # f"{EXMP_DIR}/.config/main.json"
+
+# Population
+GENOMES = 200
+
+# Model
+DISCRETE = False
+OUTPUTS = 2
+EMBED_SIZE = 96
+LAYERS = 3
+FWD_EXP = 1
+BIAS = True
+ACTIVATION = nn.Tanh()
+PROBABILISTIC = False
+CLIP_MIN = -13
+CLIP_MAX = 0
+DISTRIBUTION = "normal" if not DISCRETE else "discrete"
+
+# Trainer
+MEMORY_SIZE = 2
+GAMMA = np.exp(np.log(0.1) / 256)
+KAPPA = 0.0
+ALPHA = 1.0
+ALPHA_ORDER = 0
+REW_NORM = 3
+POL_REG = 0.00
+STD_REG = 0.00
+EPOCHS = None
+ACCURACY_STEPS = 256
+ACCURACY_ERROR = 0.1
+
+# Evaluation
+RENDER_EVERY = 20
+DEBUG_STEP = 10
+
+# Test
+TEST_COUNT = 10
+TEST_RUNS = 20
+TEST_POOL = 20
+TEST_LIVES = 40
+TEST_MAX_HIATUS = 500
+TEST_FPS = 30
+TEST_MIN_LAPS = 3
+TEST_MAX_FRAMES = 10000
+TEST_RESTRICT_MOVEMENT = 2
+
+# Files
+FILE_NAME = (
+    f"RacerModel-E{EMBED_SIZE}_L{LAYERS}_FX{FWD_EXP}_"
+    f"B{int(BIAS)}_A-{ACTIVATION.__class__.__name__}_R{CLIP_MIN}~{CLIP_MAX}"
+)
+FILE_DIR = "racer"
 FILE_NO: int | None = None
 INIT_GEN: int = 0
 
+ENV_CONFIG = EnvironmentConfig(file=ENV_CONFIG_FILE)
+ENV = Game(render_mode=RENDER_MODE, config=ENV_CONFIG)
+INPUTS = ENV.observation_space.shape[-1]
+
+CONFIG = neat.Config("racer", "../../storage/configs")
+MULTIPLIER = 0.33
+CONFIG.genome.init_type = "normal"
+CONFIG.genome.weight_init_mean = 0.0
+CONFIG.genome.weight_init_std = 1.00 * MULTIPLIER
+CONFIG.genome.weight_min_value = -math.inf
+CONFIG.genome.weight_max_value = +math.inf
+CONFIG.genome.weight_mutate_power = 0.25 * MULTIPLIER
+CONFIG.genome.weight_mutate_rate = 0.65
+CONFIG.genome.weight_replace_rate = 0.00
+CONFIG.genome.weight_add_prob = 0.00
+CONFIG.genome.weight_del_prob = 0.00
+CONFIG.genome.single_structural_mutation = True
+CONFIG.genome.param_epsilon = 0e-9
+CONFIG.reproduction.min_species_size = GENOMES
+CONFIG.reproduction.purge = 1
+CONFIG.reproduction.clone_threshold = 0.50
+CONFIG.reproduction.survival_threshold = 0.10
+CONFIG.reproduction.cross_threshold = 0.00
+CONFIG.reproduction.elitism = 0.33
+CONFIG.reproduction.darwin_multiplier = 0.33
+CONFIG.reproduction.cross_multiplier = 0.75
+CONFIG.reproduction.preserve_elite = False
+CONFIG.species.compatibility_threshold = math.inf
+CONFIG.stagnation.max_stagnation = 1
+CONFIG.stagnation.species_elitism = 2
+CONFIG.save()
+CONFIG.load(verbose=2)
+
+raise RuntimeError("complete...")
+MODEL = BaseModelSeq(
+    INPUTS, OUTPUTS, EMBED_SIZE, LAYERS,
+    ACTIVATION, PROBABILISTIC, BIAS, DEVICE, DTYPE,
+    clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION, fwd_exp=FWD_EXP,
+)
+POPULATION: neat.Population | None = None
+
 
 def evaluate(population: neat.Population, **options):
-    """
-    Run each genome against each other one time to determine the fitness.
-    """
-    trainer: neat.rl.NEAT = options['trainer']
-    global ENV, MODEL, FILE_NAME, FILE_NO
+    """Fitness evaluation: one episode with every genome driving at once."""
+    global FILE_NO
+    trainer: NEAT = options["trainer"]
     mapping: dict[int, int] = population.get_mapping(consolidated=True)
     keys = list(mapping.keys())
-    # cons_mapping = population.get_mapping(consolidated=True)
     trainer.update_mapping(mapping)
 
-    print(f"started generation {population.generation}")
-    stack = []
+    print(f"Generation {population.generation}")
+    rewards_log = []
     with torch.no_grad():
         sequencer = SequenceBuilder(max_seq_len=MODEL.max_seq_len, dim=-2)
         MODEL.enable_cache()
-        if population.generation % 10 == 0: ENV.render_mode = 'human'
-        else:                               ENV.render_mode = None
+        ENV.render_mode = "human" if population.generation % RENDER_EVERY == 0 else None
         states = ENV.reset(keys=keys)[0]
         MODEL.reset_cache()
         done = False
         step = 0
-        DEBUG_STEP = MODEL.max_seq_len - 1
         ENV.render()
         while not done:
-            DEBUG = step == DEBUG_STEP and population.generation == INIT_GEN
-            states: Tensor = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+            debug = step == DEBUG_STEP and population.generation == INIT_GEN
+            states = torch.tensor(states, device=DEVICE, dtype=DTYPE)  # (genomes, features)
             states = sequencer(states)
-            if DEBUG:
-                print(f"\nstates => \n{states} \n\tshape = {states.shape}")
+            if debug:
+                print(f"\nstates {tuple(states.shape)}\n{states}")
             actions = MODEL.get_policy(
-                states.select(-2, -1).unsqueeze(-2).unsqueeze(1), keys=keys, verbose=1 if DEBUG else 0
+                states.select(-2, -1).unsqueeze(-2).unsqueeze(1), keys=keys, verbose=1 if debug else 0
             ).squeeze(1) # shape(genomes)
-            if DEBUG:
-                print(f"actions => \n{actions} \n\tshape = {actions.shape}")
+            if debug:
+                print(f"actions {tuple(actions.shape)}\n{actions}")
             next_states, rewards, _, done, _ = ENV.step(actions.cpu().numpy())
-            rewards = torch.tensor(rewards, device=DEVICE, dtype=DTYPE) # shape(genomes, features=1)
-            if DEBUG:
-                print(f"rewards => \n{rewards} \n\tshape = {rewards.shape}")
-            stack.append(rewards[..., 0])
+            rewards = torch.tensor(rewards, device=DEVICE, dtype=DTYPE)  # (genomes, 1)
+            if debug:
+                print(f"rewards {tuple(rewards.shape)}\n{rewards}")
+            rewards_log.append(rewards[..., 0])
             done = trainer.update(states, actions, rewards, done, done)
             states = next_states
             ENV.render()
 
             print(
-                f"\rLives = {ENV.players.lives.mean().item()}, "
+                f"\rLives={ENV.players.lives.mean().item()}, "
                 f"Scores={ENV.players.scores.max().item()}, "
                 f"Alive={ENV.players.active_total}, "
                 f"Fitness={ENV.players.fitness.mean().item():.1f}, "
                 f"MaxSize={trainer.primary.max_size()}, "
                 f"CacheSize={MODEL.transformer.layers[-1].self_attention.cache_size} "
-                f"{' ' * 5}"
-            , end='')
+                f"{' ' * 5}",
+                end=""
+            )
             step += 1
         MODEL.disable_cache()
-    print("\ndone with env")
-    # sys.exit(1)
+    print("\nEpisode finished")
 
-    scores = torch.mean(torch.stack(stack, dim=0), dim=0)
+    scores = torch.mean(torch.stack(rewards_log, dim=0), dim=0)
     for key, index in mapping.items():
-        genome = population.genomes[key]
-        genome.fitness = scores[index].item()
+        population.genomes[key].fitness = scores[index].item()
 
-    score_mean, score_std = tuple(func(ENV.players.fitness).item() for func in [np.mean, np.std])
+    fit_mean, fit_std = (func(ENV.players.fitness).item() for func in (np.mean, np.std))
     for key, index in mapping.items():
-        if not ENV.cars.used_brake[index] or ENV.players.fitness[index] < (score_mean - (score_std * 1.0)):
+        if not ENV.cars.used_brake[index] or ENV.players.fitness[index] < fit_mean - fit_std:
             population.to_delete.append(key)
 
     _, FILE_NO = population.save_dict(
-        name=FILE_NAME, directory='racer', file_no=FILE_NO, replace=population.generation != INIT_GEN
+        name=FILE_NAME, directory=FILE_DIR, file_no=FILE_NO, replace=population.generation != INIT_GEN
     )
 
 
 def test_best_network(**options):
-    """Test run in race mode: staggered grid, slipstream, collisions and a start countdown."""
+    """Run the best genomes in race mode (staggered grid, slipstream, collisions, countdown)."""
     with ENV.race_mode(True):
         return _test_best_network(**options)
 
 
-def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: bool = False):
+def _test_best_network(*, count: int = TEST_COUNT, set_keys: list[int] | None = None):
     count = max(1, count)
-
-    print("\n\n---------- RUNNING TEST ON CAR-RACER ----------")
+    print("\n---------- TESTING ON CAR-RACER ----------")
     print(f"best_genome = {POPULATION.best_genome}")
-    ENV.players.lives_total     = 20
-    ENV.render_mode             = 'human'
-    ENV.window.fps              = 60
+
+    ENV.players.lives_total     = TEST_LIVES
+    ENV.players.max_hiatus      = TEST_MAX_HIATUS
+    ENV.render_mode             = "human"
+    ENV.window.fps              = TEST_FPS
     ENV.cars.usr_enganged       = False
-    ENV.cars.restrict_movement  = 2
-    ENV.min_laps                = 5
-    ENV.max_frames              = 3000
+    ENV.cars.restrict_movement  = TEST_RESTRICT_MOVEMENT
+    ENV.min_laps                = TEST_MIN_LAPS
+    ENV.max_frames              = TEST_MAX_FRAMES
     ENV.cars.race.enabled       = True
 
-    keys = list(POPULATION.genomes.keys())[:20]
-    POPULATION.crop(keys)
+    POPULATION.crop(list(POPULATION.genomes.keys())[:TEST_POOL])
 
-    WIDTH, HEIGHT = ENV.window.width, ENV.window.height  # or screen.get_size()
-    FPS = 30
-    RECORD_DIR = f"{EXMP_DIR}/recordings"
-    if record:
-        if not os.path.exists(RECORD_DIR):
-            os.mkdir(RECORD_DIR)
-        print(f"Recording @ {RECORD_DIR}")
-
-    sequencer = SequenceBuilder(max_seq_len=MODEL.max_seq_len, dim=-2)
-    
-    MODEL.disable_cache()
-    for i in range(25):
-        ffmpeg_cmd = [
-            "ffmpeg",
-            "-loglevel", "quiet",
-            "-y",
-            "-f", "rawvideo",
-            "-vcodec", "rawvideo",
-            "-pix_fmt", "rgb24",
-            "-s", f"{WIDTH}x{HEIGHT}",
-            "-r", str(FPS),
-            "-i", "-",  # stdin
-            "-c:v", "libx264",
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "baseline",
-            "-level", "3.0",
-            "-movflags", "+faststart",
-            f"recordings/test_run_{i:03d}.mp4"
-        ]
-
-        if set_keys is not None:
-            keys = set_keys
-            probs = None
-        else:
-            genomes = list(POPULATION.genomes.values())
-            def sort_key(genome: neat.Genome):
-                fitness = genome.fitness
-                return fitness if fitness is not None else -math.inf, genome.key
-            ranking = sorted(genomes, key=sort_key, reverse=True)[:count + 10]
-            probs = [g.fitness for g in ranking if g.fitness is not None]
-            if len(probs) >= 2:
-                probs = np.array(probs)
-                try:
-                    probs = (probs - probs.min()) / (probs.max() - probs.min())
-                    probs = probs / probs.sum()
-                except Exception:
-                    probs = None
-            else:
-                probs = None
-            keys = [g.key for g in np.random.choice(ranking, size=count, replace=False, p=probs)]
-
-        if probs is None:
-            random.shuffle(keys)
-        best_genome = POPULATION.best_genome
-        if best_genome is not None and best_genome.key not in keys:
-            keys.insert(0, best_genome.key)
-        if ENV.config.race.enabled:
-            keys = keys[:ENV.config.race.max_racers]   # the grid holds at most max_racers cars
-        mapping = {k: idx for idx, k in enumerate(keys)}
-        reverse = {idx: k for k, idx in mapping.items()}
-        print(f"\nStarting test no {i}")
-        print(f"Running on {len(keys)} Genomes {keys[:10]}")
-        if record:
-            process = sp.Popen(ffmpeg_cmd, stdin=sp.PIPE)
+    try:
+        for run_idx in range(TEST_RUNS):
+            sequencer = SequenceBuilder(max_seq_len=MODEL.max_seq_len, dim=-2)
+            keys = _select_keys(count, set_keys)
+            mapping = {key: idx for idx, key in enumerate(keys)}
+            reverse = {idx: key for key, idx in mapping.items()}
+            print(f"\nTest {run_idx} | {len(keys)} genomes {keys[:10]}")
 
         with torch.no_grad():
-            states = ENV.reset(keys=list(mapping.keys()))[0]   # labels come from the mapping keys
+            states = ENV.reset(keys=keys)[0]
             # MODEL.reset_cache()
             done = False
             ENV.render()
             step = 0
             while not done:
-                debug = i == 0 and step == 0
-
-                states = torch.tensor(states, device=DEVICE, dtype=DTYPE) # shape(genomes, features)
+                debug = run_idx == 0 and step == 0
+                states  = torch.tensor(states, device=DEVICE, dtype=DTYPE)
                 states = sequencer(states)
-                if debug: print(f"\nstates => \n{states} \n\tshape = {states.shape}")
-                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1) # shape(genomes, *outputs)
-                if debug: print(f"\nactions => \n{actions} \n\tshape = {actions.shape}")
+                actions = MODEL.get_policy(states.unsqueeze(1), keys=keys).squeeze(1)
+                if debug:
+                        print(f"states {tuple(states.shape)}, actions {tuple(actions.shape)}")
                 try:
-                    next_states, rewards, _, done, info = ENV.step(actions.cpu().numpy())
-                except ValueError as e:
+                    states, _, _, done, info = ENV.step(actions.cpu().numpy())
+                except ValueError:
                     print(CM(
-                        (
-                            f"States =>\n{states}\n\tshape: {states.shape}\n"
-                            f"Actions =>\n{actions}\n\tshape: {actions.shape}\n"
-                            f"PlayerTotal => {ENV.cars.total}\n"
-                            f"Prev Displacement X = {ENV.cars.disp_x.shape}\n"
-                            f"Prev Shape = {ENV.cars.slip.shape}\n"
-                            f"Prev Friction = {ENV.cars.friction.shape}\n"
-                        )
-                        , Fore.LIGHTYELLOW_EX
+                            f"states {tuple(states.shape)} | actions {tuple(actions.shape)} | "
+                            f"cars {ENV.cars.total} | disp_x {ENV.cars.disp_x.shape} | "
+                            f"slip {ENV.cars.slip.shape} | friction {ENV.cars.friction.shape}",
+                            Fore.LIGHTYELLOW_EX,
                     ))
-                    raise e
-                states = next_states
+                    raise
                 ENV.render()
-                ranking = np.argsort(-ENV.players.fitness)
-                leaders = [reverse[idx] for idx in ranking]
-                # print(
-                #     f"\rLives = {ENV.players.lives.mean().item():.1f}, "
-                #     f"Alive={ENV.players.active_total}, "
-                #     f"{leaders[:5]}{' ' * 15}"
-                #     , end=''
-                # )
-
-                frame = pygame.surfarray.array3d(ENV.window.screen)
-                frame = np.transpose(frame, (1, 0, 2))  # Pygame → correct orientation
-
-                if record:
-                    process.stdin.write(frame.tobytes())
-
                 if done:
                     print(f"\ninfo: {info}")
-
                 step += 1
 
-            scores = dict(
-                sorted(
-                    ((k, ENV.players.scores[idx].item()) for k, idx in mapping.items()),
-                    key=lambda item: item[1],
-                    reverse=True
-                )[:5]
-            )
-            print(
-                f"\nDone with test:"
-                f"\n\tScore -> {scores}"
-            )
-        if record:
-            process.stdin.close()
-            process.wait()
-            process.terminate()
+                top = sorted(((k, ENV.players.scores[i].item()) for k, i in mapping.items()), key=lambda kv: kv[1], reverse=True)[:5]
+                print(f"Top scores: {dict(top)}")
+    except KeyboardInterrupt:
+        print("\nTerminated")
 
 
-def fix(value: float, default: float = 1):
-    if np.isinf(value) or np.isnan(value):
-        return default
+def _select_keys(count: int, set_keys: list[int] | None) -> list[int]:
+    """Pick genome keys for one test run, weighted by fitness; the best genome is always included."""
+    if set_keys is not None:
+        keys = list(set_keys)
+        probs = None
     else:
+        def sort_key(genome: neat.Genome):
+            return genome.fitness if genome.fitness is not None else -math.inf, genome.key
+
+        ranking = sorted(POPULATION.genomes.values(), key=sort_key, reverse=True)[:count + 10]
+        fitness = [g.fitness for g in ranking if g.fitness is not None]
+        probs = None
+        if len(fitness) >= 2 and len(fitness) == len(ranking):
+            fitness = np.array(fitness)
+            try:
+                probs = (fitness - fitness.min()) / (fitness.max() - fitness.min())
+                probs = probs / probs.sum()
+            except Exception:
+                probs = None
+        keys = [g.key for g in np.random.choice(ranking, size=min(count, len(ranking)), replace=False, p=probs)]
+
+    if probs is None:
+        random.shuffle(keys)
+    best = POPULATION.best_genome
+    if best is not None and best.key not in keys:
+        keys.insert(0, best.key)
+    if ENV.config.race.enabled:
+        keys = keys[:ENV.config.race.max_racers]
+    return keys
+
+def fix(value: float, default: float = 1.0) -> float:
+    return default if np.isinf(value) or np.isnan(value) else value
+
+
+def str_to_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
         return value
+    if value.lower() in ("true", "1", "yes", "on"):
+        return True
+    if value.lower() in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(f"Cannot convert '{value}' to bool")
+
+
+def load_population(load: str | None) -> None:
+    """`load`: 'true' for the latest checkpoint, an integer for a file number, None/'false' to skip."""
+    if load is None or load.lower() == "false":
+        return
+    if load.lower() == "true":
+        POPULATION.load_dict(name=FILE_NAME, directory=FILE_DIR, file_no=None)
+        print("Loaded latest checkpoint")
+        return
+    try:
+        file_no = int(load)
+    except ValueError:
+        sys.exit(f"--load must be 'true', 'false' or a file number, got '{load}'")
+    POPULATION.load_dict(name=FILE_NAME, directory=FILE_DIR, file_no=file_no)
+    print(f"Loaded checkpoint {file_no}")
 
 
 def run():
-    global ENV, MODEL, POPULATION, FILE_NAME, FILE_NO, INIT_GEN
+    global POPULATION, FILE_NO, INIT_GEN
     
-    parser = argparse.ArgumentParser(description='Run NEAT algorithm on CarRacer game')
-    parser.add_argument('--render_mode', type=str, default="human", 
-                        help='Render mode for the game (e.g., "human", None)')
-    parser.add_argument('--load', type=str, default=None,
-                        help='Load a previously trained model (True for latest, or specify file number)')
-    parser.add_argument('--train', type=str, default='true',
-                        help='Train the model (True/False or 1/0, default: True)')
+    parser = argparse.ArgumentParser(description="Run NEAT on CarRacer")
+    parser.add_argument("--render_mode", type=str, default=RENDER_MODE, help='"human" or None')
+    parser.add_argument("--load", type=str, default=LOAD, help="'true' for latest, or a file number")
+    parser.add_argument("--train", type=str, default=str(TRAIN), help="true/false")
     args = parser.parse_args()
+    ENV.render_mode = args.render_mode
 
-    GENOMES = 200
-    
-    # Create environment configuration from file
-    config_file = os.path.join(EXMP_DIR, '.config', 'main.json')
-    env_config = EnvironmentConfig(file=None) # config_file)
-    
-    # Create environment with configuration
-    ENV = Game(render_mode=args.render_mode, config=env_config)
-    # ENV.reset(keys=10)
-    # print(f"{ENV.cars.get_state().shape}")
-    # print(ENV.observation_space.sample().shape)
-    # print(ENV.action_space.sample().shape)
-    # sys.exit()
-
-    MULTIPLIER = 0.33
-    CONFIG = neat.Config('racer', '../../storage/configs')
-    CONFIG.genome.init_type                 = 'normal'
-    CONFIG.genome.weight_init_mean          = 0.0
-    CONFIG.genome.weight_init_std           = 1.00 * MULTIPLIER
-    CONFIG.genome.weight_min_value          = -math.inf
-    CONFIG.genome.weight_max_value          = +math.inf
-    CONFIG.genome.weight_mutate_power       = 0.25 * MULTIPLIER
-    CONFIG.genome.weight_mutate_rate        = 0.65
-    CONFIG.genome.weight_replace_rate       = 0.00
-    CONFIG.genome.weight_add_prob           = 0.00
-    CONFIG.genome.weight_del_prob           = 0.00
-    CONFIG.genome.single_structural_mutation = True
-    CONFIG.genome.param_epsilon             = 0e-9
-    CONFIG.reproduction.min_species_size    = GENOMES
-    CONFIG.reproduction.purge               = 1
-    CONFIG.reproduction.clone_threshold     = 0.50
-    CONFIG.reproduction.survival_threshold  = 0.20
-    CONFIG.reproduction.cross_threshold     = 0.00
-    CONFIG.reproduction.elitism             = 0.33
-    CONFIG.species.compatibility_threshold  = math.inf
-    CONFIG.stagnation.max_stagnation        = 1
-    CONFIG.stagnation.species_elitism       = 2
-    CONFIG.reproduction.darwin_multiplier   = 0.33
-    CONFIG.reproduction.cross_multiplier    = 0.75
-    CONFIG.reproduction.preserve_elite      = False
-
-    CONFIG.save()
-    CONFIG.load(verbose=2)
-    print(CONFIG)
-
-    DISCRETE        = False
-    MAX_SEQ_LEN     = 3
-    INPUTS          = ENV.observation_space.shape[-1]
-    OUTPUTS         = 2
-    EMBED_SIZE      = 32
-    LAYERS          = 1
-    HEADS           = 1
-    KV_HEADS        = None
-    FWD_EXP         = 1
-    BIAS            = True
-    ATTN_BIAS       = BIAS
-    DIFFERENTIAL    = False
-    SWIGLU          = False
-    CONSTANT        = 1000
-    ACTIVATION      = nn.SiLU()
-    PROBABILISTIC   = False
-    CLIP_MIN        = -13
-    CLIP_MAX        = +0
-    DISTRIBUTION    = 'normal' if not DISCRETE else 'discrete'
-    FILE_NAME       = (
-        f"RacerModelSequential-E{EMBED_SIZE}_L{LAYERS}_M{MAX_SEQ_LEN}_"
-        f"H{HEADS}_KVH{KV_HEADS}_D{int(DIFFERENTIAL)}_"
-        f"B{int(BIAS)}_AB{int(ATTN_BIAS)}_SW{int(SWIGLU)}_"
-        f"A-{ACTIVATION.__class__.__name__}_"
-        f"R{int(CLIP_MIN)}~{int(CLIP_MAX)}"
-    )
-
-    MEMORY_SIZE     = 8
-    GAMMA           = np.exp(np.log(0.01) / 256)
-    KAPPA           = np.exp(np.log(0.01) / 128)
-    ALPHA           = fix(np.exp(np.log(5.0) / (MEMORY_SIZE - 1)), 1.0)
-    ALPHA_ORDER     = 0
-    REW_NORM        = 1
-    POL_REG         = 0.00
-    STD_REG         = 0.00
-    print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
-
-    MODEL = BaseModelSeq(
-        INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, MAX_SEQ_LEN,
-        HEADS, KV_HEADS, ACTIVATION, PROBABILISTIC,
-        BIAS, DEVICE, DTYPE,
-        clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
-        constant=CONSTANT, differential=DIFFERENTIAL, attn_bias=ATTN_BIAS,
-        use_swiglu=SWIGLU, fwd_exp=FWD_EXP,
-    )
     print(MODEL)
-
     POPULATION = neat.Population(GENOMES, MODEL, CONFIG, init_rep=True)
     print(POPULATION)
-
-    # Handle --load argument
-    if args.load is not None:
-        if args.load.lower() == 'true':
-            # Load the latest checkpoint
-            POPULATION.load_dict(name=FILE_NAME, directory='racer', file_no=None)
-            print(f"Loaded latest population checkpoint")
-        else:
-            # Load a specific file number
-            try:
-                file_no = int(args.load)
-                POPULATION.load_dict(name=FILE_NAME, directory='racer', file_no=file_no)
-                print(f"Loaded population checkpoint from file {file_no}")
-            except ValueError:
-                if args.load.lower() != 'false':
-                    print(f"Error: --load argument must be 'true' or a valid file number, got '{args.load}'")
-                    exit(1)
-    
+    load_population(args.load)
     INIT_GEN = POPULATION.generation
-    FILE_NO = None  # Reset FILE_NO for saving subsequent generations
+    FILE_NO = None
 
-    # Parse --train argument
-    def str_to_bool(value: str) -> bool:
-        if isinstance(value, bool):
-            return value
-        if value.lower() in ('true', '1', 'yes', 'on'):
-            return True
-        elif value.lower() in ('false', '0', 'no', 'off'):
-            return False
-        else:
-            raise ValueError(f"Cannot convert '{value}' to boolean")
-    
-    try:
-        should_train = str_to_bool(args.train)
-    except ValueError as e:
-        print(f"Error: {e}")
-        exit(1)
-
-    EPOCHS = None
-
-    if should_train:
-        print(f"\n{'='*50}")
-        print("Starting training...")
-        print(f"{'='*50}\n")
-        
+    if str_to_bool(args.train):
+        print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
         trainer = NEAT(
-            # TODO: Try PPO trainer instead for pathfinding
             POPULATION,
             schedulers=[
-                # RandomAnnealing(CONFIG, 1e-2, 1e+1, 3, ['weight_init_std', 'weight_mutate_power'], True),
-                CosineAnnealing(CONFIG, 30, 0.5, ['weight_mutate_power', 'weight_init_std'], True, True),
-                # CosineAnnealing(CONFIG, 10, 0.1, 'weight_mutate_rate', True, True),
-                # CosineAnnealing(CONFIG, 10, 0.1, 'weight_replace_rate', True, True),
-                # CosineAnnealing(CONFIG, 15, 0.05, 'weight_add_prob', True, True),
-                # CosineAnnealing(CONFIG, 15, 0.05, 'weight_del_prob', True, True),
+                CosineAnnealing(CONFIG, 30, 0.5, ["weight_mutate_power", "weight_init_std"], True, True),
             ],
             device=DEVICE, dtype=DTYPE,
-            log_sub_dir='car_racer/',
-            log_name=f"{unix_to_datetime_file(clock.time())}_"
-                     f"e{EMBED_SIZE}-m{MAX_SEQ_LEN}-l{LAYERS}-b{int(BIAS)}-h{HEADS}-"
-                     f"prob{int(PROBABILISTIC)}-"
-                     f"g{round(GAMMA, 4)}-k{round(KAPPA, 4)}-"
-                     f"a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
-                     f"rn{REW_NORM}-p{round(POL_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
-                     f"type{int(DISCRETE)}",
+            log_sub_dir="car_racer/",
+            log_name=(
+                f"{unix_to_datetime_file(clock.time())}_"
+                f"e{EMBED_SIZE}-m{MAX_SEQ_LEN}-l{LAYERS}-h{HEADS}-"
+                f"b{int(BIAS)}-prob{int(PROBABILISTIC)}-"
+                f"g{round(GAMMA, 4)}-k{round(KAPPA, 4)}-"
+                f"a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
+                f"rn{REW_NORM}-p{round(POL_REG, 4)}-sm{1}-mem{MEMORY_SIZE}-"
+                f"type{int(DISCRETE)}"
+            ),
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
             rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, validate=True, segr_size=None,
             max_episodes=MEMORY_SIZE,
         )
-
         try:
             trainer.learn(
-                evaluate, env_config.max_frames, EPOCHS, 128, 0.1,
-                'continuous' if not DISCRETE else 'discrete', verbose=True,
+                evaluate, ENV_CONFIG.max_frames, EPOCHS, ACCURACY_STEPS, ACCURACY_ERROR,
+                "continuous" if not DISCRETE else "discrete", verbose=True,
             )
         except KeyboardInterrupt:
             pass
         
-    else:
-        print(f"\n{'='*50}")
-        print("Skipping training...")
-        print(f"{'='*50}\n")
-
-    test_best_network(count=10)
+    test_best_network()
     
     
 if __name__ == "__main__":

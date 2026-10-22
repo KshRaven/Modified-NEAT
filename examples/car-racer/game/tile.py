@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pygame
 import math
 
@@ -6,8 +8,10 @@ from itertools import count
 from pygame import Surface
 
 from .config import TileConfig, overwrite_config
-from .functional import Type, Position, Color
+from .functional import Position, Type
 from .constants import COLOR_START_PRI, COLOR_START_SEC
+
+__all__ = ["Tile"]
 
 
 COLOR_BOUNDARY = (125, 125, 255)
@@ -354,37 +358,6 @@ class Tile:
     # -----------------------------
     # Turn segment
     # -----------------------------
-
-    @staticmethod # TODO: Move to .util
-    def draw_sector(surface: Surface, color: Color, center: Position, radius: float, start_angle: float, end_angle: float):
-        """
-        Draw a sector of a circle
-        
-        Args:
-            surface: pygame surface to draw on
-            color: RGB color tuple
-            center: (x, y) center point
-            radius: radius of the circle
-            start_angle: start angle in radians
-            end_angle: end angle in radians
-        """
-        # Create a list to hold the points of the sector
-        points = [center]
-        
-        # Calculate number of points based on angle difference
-        angle_range = end_angle - start_angle
-        # Use more points for larger angles to get smoother curve
-        num_points = max(5, int(angle_range * radius / 10))
-        
-        # Add points along the arc
-        for i in range(num_points + 1):
-            angle = start_angle + (angle_range * i / num_points)
-            x = center[0] + radius * math.cos(angle)
-            y = center[1] + radius * math.sin(angle)
-            points.append((x, y))
-        
-        # Draw the filled polygon
-        pygame.draw.polygon(surface, color, points)
 
     def _draw_turn(self, tile: Surface):
         base = Surface((self.size, self.size), pygame.SRCALPHA)

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import pygame
 import numpy as np
@@ -12,6 +14,8 @@ from .functional import Type, Direction, Position
 from .functional import get_next_direction, get_next_position, direction_to_rotation, get_next_rotation
 from .constants import COLOR_EMPTY
 from .tile import Tile
+
+__all__ = ["Grid"]
 
 
 class Grid:
@@ -38,7 +42,7 @@ class Grid:
         self.cols, self.rows = tuple(int(dim) for dim in config.grid_size)
         self.cell_size = int(config.cell_size)
         self.width, self.height = self.cols * self.cell_size, self.rows * self.cell_size
-        self.granularity = config.granularity  # TODO: Fix 'cell' mode
+        self.granularity = config.granularity
         
         self.cells: list[list[Optional[Tile]]] = [
             [None for _ in range(self.cols)] for _ in range(self.rows)
@@ -55,7 +59,7 @@ class Grid:
         self.full_track_mask = None  # Mask of all non-empty tiles (actual track)
         self.full_finish_mask = None  # Mask of finish line (START tiles)
         self.full_boundary_mask = None  # Mask of thin 1-pixel tile boundaries
-        self.full_grid_mask = None  # Mask of entire grid area (for boundary checks). TODO: Implement
+        self.full_grid_mask = None  # Mask of entire grid area (for boundary checks)
         
         # Surface storage for debugging/visualization
         self._surface_gravel = None
@@ -460,23 +464,15 @@ class Grid:
                 
                 # Render each layer
                 gravel_surf = tile._render_layer_mask('gravel')
-                # if tile.rotation and tile.type not in (Type.STRAIGHT, Type.START):
-                #     gravel_surf = self._clip_rotated_surface(gravel_surf, tile.rotation, self.cell_size)
                 self._surface_gravel.blit(gravel_surf, (tile_x, tile_y))
                 
                 grass_surf = tile._render_layer_mask('grass')
-                # if tile.rotation:
-                #     grass_surf = self._clip_rotated_surface(grass_surf, tile.rotation, self.cell_size)
                 self._surface_grass.blit(grass_surf, (tile_x, tile_y))
                 
                 curb_surf = tile._render_layer_mask('curb')
-                # if tile.rotation:
-                #     curb_surf = self._clip_rotated_surface(curb_surf, tile.rotation, self.cell_size)
                 self._surface_curb.blit(curb_surf, (tile_x, tile_y))
                 
                 road_surf = tile._render_layer_mask('road')
-                # if tile.rotation:
-                #     road_surf = self._clip_rotated_surface(road_surf, tile.rotation, self.cell_size)
                 self._surface_road.blit(road_surf, (tile_x, tile_y))
 
         # Extract raw masks from surfaces
@@ -567,59 +563,6 @@ class Grid:
         self._surface_grid = Surface((grid_width, grid_height), pygame.SRCALPHA)
         self._surface_grid.fill((255, 255, 255, 255))  # Fully opaque white for entire grid
         self.full_grid_mask = pygame.mask.from_surface(self._surface_grid)
-
-    def _clip_rotated_surface(self, surface: Surface, rotation: int, cell_size: int) -> Surface:
-        """
-        Rotate a surface and clip it to cell boundaries to prevent overflow.
-        
-        When pygame.transform.rotate() is called, the resulting surface can be larger
-        than the original (e.g., a 100x100 surface rotated 45° becomes ~141x141).
-        This causes mask overflow into adjacent cells.
-        
-        This method:
-        1. Rotates the surface
-        2. Creates a cell-sized surface
-        3. Centers and blits the visible portion only
-        4. Returns the clipped result
-        
-        Args:
-            surface: Original surface to rotate
-            rotation: Rotation angle in degrees
-            cell_size: Cell size in pixels (output dimensions)
-            
-        Returns:
-            Surface clipped to exactly cell_size x cell_size
-        """
-        # Rotate the surface
-        rotated = pygame.transform.rotate(surface, rotation)
-        rot_width, rot_height = rotated.get_size()
-        
-        # Create a cell-sized output surface
-        clipped = Surface((cell_size, cell_size), pygame.SRCALPHA)
-        
-        # Calculate center offset to align rotated content
-        offset_x = (cell_size - rot_width) // 2
-        offset_y = (cell_size - rot_height) // 2
-        
-        # Calculate the intersection rect between rotated surface and cell output
-        # This ensures we only copy the portion that fits within the cell
-        intersect_x = max(0, -offset_x)
-        intersect_y = max(0, -offset_y)
-        intersect_width = min(rot_width, rot_width - intersect_x - max(0, offset_x + rot_width - cell_size))
-        intersect_height = min(rot_height, rot_height - intersect_y - max(0, offset_y + rot_height - cell_size))
-        
-        # Calculate destination position in output surface (clamp to cell bounds)
-        dest_x = max(0, offset_x)
-        dest_y = max(0, offset_y)
-        
-        # Create a source rectangle from the rotated surface, taking only the visible portion
-        source_rect = pygame.Rect(intersect_x, intersect_y, intersect_width, intersect_height)
-        
-        # Blit only the intersection portion
-        if source_rect.width > 0 and source_rect.height > 0:
-            clipped.blit(rotated, (dest_x, dest_y), source_rect)
-        
-        return clipped
 
     def _subtract_mask(self, mask_outer: Mask, mask_inner: Mask) -> Mask:
         """

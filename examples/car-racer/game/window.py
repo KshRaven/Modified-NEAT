@@ -1,78 +1,86 @@
-import pygame
-import numpy as np
+"""Pygame window: canvas, camera, keyboard controls, overlays and the race countdown."""
+from __future__ import annotations
 
-from typing import Optional, Any
+from typing import Any
+
+import numpy as np
+import pygame
 from pygame import Surface
 
-from .config import WindowConfig, RaceConfig, overwrite_config
-from .functional import Color        
-from .constants import COLOR_CURB_SEC
-from .tile import Tile
-from .grid import Grid
 from .car import Cars
-from .player import Players
-from .util import draw_panel, render_text, clear_text_cache
+from .config import RaceConfig, WindowConfig, overwrite_config
+from .grid import Grid
 from .pixel import PixelRenderer
+from .player import Players
+from .renderer import CarRenderer
+from .util import clear_text_cache, draw_panel, render_text
+
+__all__ = ["Window"]
 
 
 class Window:
+    FPS_STEPS = (5, 10, 15, 20, 30, 45, 60, 90, 120, 144, 240, None)   # frame rate cap ladder, None = uncapped
+
     def __init__(
-            self, 
-            grid: Grid, players: Players, cars: Cars,
-            config: WindowConfig | None = None,
-            race: RaceConfig | None = None,
-            **params: dict[str, Any]
+        self,
+        grid: Grid, players: Players, cars: Cars,
+        config: WindowConfig | None = None,
+        race: RaceConfig | None = None,
+        **params: dict[str, Any],
     ) -> None:
-        # Require config to be provided
         if config is None:
             config = WindowConfig()
 
         overwrite_config(config, params)
         self.config = config
         self.race = race if race is not None else RaceConfig()
-        
+
         self.grid = grid
         self.players = players
         self.cars = cars
+        self.car_renderer = CarRenderer(cars)
         self.width, self.height = self.grid.width, self.grid.height
         self.offset = 0
         self.title = config.title
-        self.screen: Optional[Surface] = None
-        self._pixel = PixelRenderer(config)         # optional retro renderer (visual only)
-        self.clock: Optional[pygame.time.Clock] = None
+        self.screen: Surface | None = None
+        self._pixel = PixelRenderer(config)
+        self.clock: pygame.time.Clock | None = None
         self.running = False
         self.fps = config.fps
-        self.font: Optional[pygame.font.Font] = None
+        self.font: pygame.font.Font | None = None
         self.bg_color = config.background_color
         self.font_size = max(8, round(config.font_size * config.font_scale))
         self.font_scale = config.font_scale
 
-        # Cinematic mode: the window is a fixed canvas and a camera looks at the grid (the "world")
+        # Cinematic mode: fixed canvas, a camera looks at the grid ("world")
         self.cinematic = bool(config.cinematic)
-        self.world: Optional[Surface] = None
+        self.world: Surface | None = None
         self.world_size = (self.grid.width, self.grid.height)
-        self._canvas: Optional[tuple[int, int]] = None    # window size in cinematic mode, set on first initialize
-        # Camera state. scale = screen pixels per world pixel.
+        self._canvas: tuple[int, int] | None = None
+
+        # Camera. `scale` is screen pixels per world pixel.
         self.cam_x, self.cam_y = self.world_size[0] / 2, self.world_size[1] / 2
         self.scale = 1.0
-        self.auto_fit = True            # frame the leading cars
-        self.focus: Optional[int] = None  # car index being followed
+        self.auto_fit = True                # frame the leading cars
+        self.focus: int | None = None       # car being followed
         self._focus_rank = 0
-        self._zoom_bias = 1.0           # user zoom on top of auto-fit / focus framing
-        self._free_scale = 1.0          # zoom used when neither auto-fit nor focus is active
+        self._focus_slot: int | None = None # followed race position (0 = leader)
+        self._zoom_bias = 1.0               # user zoom on top of auto-fit / focus framing
+        self._free_scale = 1.0              # zoom when neither auto-fit nor focus is active
+        self._fit_grid = False              # whole grid in view
         self._snap = True
         self._rng = np.random.default_rng()
-        # Run control, set by the keyboard and consumed by the loops that own the episode
+
+        # Run control, set by the keyboard and read by the loop that owns the episode
         self.paused = False
-        self.quit_requested = False     # window closed
-        self.end_requested = False      # Esc pressed
+        self.quit_requested = False         # window closed
+        self.end_requested = False          # Esc pressed
         self._verbose: bool | int = False
         self.verbose_level = int(config.verbose_level)
-        self._verbose_touched = False   # True once V was pressed: the manual-run default no longer applies
-        self._fit_grid = False          # L: whole grid, no camera movement
-        self._focus_slot: Optional[int] = None  # keys 1-9: follow a race position (0 = leader), not a fixed car
-        # The track never changes during an episode, so it is drawn once and reused every frame
-        self._track_cache: Optional[Surface] = None
+        self._verbose_touched = False       # set once V was pressed
+
+        # The track is drawn once per grid and reused
+        self._track_cache: Surface | None = None
         self._track_sig = None
 
     def initialize(self) -> None:
@@ -81,38 +89,37 @@ class Window:
         if self.cinematic:
             current = pygame.display.get_surface()
             if self.config.resizable and current is not None:
-                self._canvas = current.get_size()           # keep whatever size the user dragged it to
+                self._canvas = current.get_size()           # keep the size the user dragged to
             elif self._canvas is None:
-                self._canvas = self._initial_canvas()       # decided once; never recomputed on reset
+                self._canvas = self._initial_canvas()
             flags = pygame.RESIZABLE if self.config.resizable else 0
             self.screen = pygame.display.set_mode(self._canvas, flags)
-            self.width, self.height = self.screen.get_size()   # canvas size (e.g. for screen recording)
+            self.width, self.height = self.screen.get_size()
             self.world = Surface(self.world_size).convert()
         else:
-            self.screen = pygame.display.set_mode((self.width+self.offset, self.height+self.offset))
+            self.screen = pygame.display.set_mode((self.width + self.offset, self.height + self.offset))
         self.clock = pygame.time.Clock()
         clear_text_cache()
         self.font = pygame.font.Font(None, self.font_size)
-        self.cars.font = pygame.font.Font(None, self.font_size)
-        self.cars.label_font = pygame.font.Font(None, max(8, self.font_size - 2))
+        self.car_renderer.set_fonts(self.font_size)
         self.running = True
 
     def show_message(self, text: str) -> None:
-        """Paint a centred message right away, so the window is not black during slow setup (track generation)."""
+        """Paint a centered message so the window is not black during slow setup."""
         if self.screen is None or self.font is None:
             return
-        pygame.event.pump()                                  # keeps the OS from marking the window as frozen
+        pygame.event.pump()
         self.screen.fill(self.bg_color)
         txt = pygame.font.Font(None, max(24, int(self.screen.get_height() * 0.06))).render(text, True, (200, 200, 200))
         self.screen.blit(txt, txt.get_rect(center=self.screen.get_rect().center))
         pygame.display.flip()
 
     def _initial_canvas(self) -> tuple[int, int]:
-        """cinematic_size as configured, only shrunk when it would not fit on the desktop."""
+        """`cinematic_size`, shrunk when it does not fit on the desktop."""
         w, h = self.config.cinematic_size
         try:
-            dw, dh = pygame.display.get_desktop_sizes()[0]    # the real desktop, not the current window
-            w, h = min(w, dw), min(h, max(240, dh - 90))      # leave room for the title bar and taskbar
+            dw, dh = pygame.display.get_desktop_sizes()[0]
+            w, h = min(w, dw), min(h, max(240, dh - 90))    # room for the title bar and taskbar
         except (pygame.error, AttributeError, IndexError):
             pass
         return max(320, int(w)), max(240, int(h))
@@ -120,10 +127,8 @@ class Window:
     def close(self) -> None:
         self.running = False
         clear_text_cache()
-        self.font = None # NOTE: Not resetting/closing the font and surfaces leads to segmentation error/ PyGame window freezing
-        self.cars.font = None
-        self.cars.label_font = None
-        self.cars._label_cache.clear()
+        self.font = None                    # fonts must be released before pygame.quit()
+        self.car_renderer.close()
         pygame.quit()
 
     def render(self, verbose: bool | int = False) -> None:
@@ -134,14 +139,14 @@ class Window:
         pygame.display.flip()
 
         if self.clock is None:
-            self.clock = pygame.time.Clock()         # also used to measure the real frame rate
+            self.clock = pygame.time.Clock()
         if self.config.precise_fps:
-            self.clock.tick_busy_loop(self.fps or 0)  # exact cap, but keeps one CPU core busy while waiting
+            self.clock.tick_busy_loop(self.fps or 0)    # exact cap, busy-waits on one core
         else:
-            self.clock.tick(self.fps or 0)           # 0 = uncapped
+            self.clock.tick(self.fps or 0)              # 0 = uncapped
 
     def _track_surface(self) -> Surface:
-        """The drawn track, rebuilt only when the grid has been regenerated."""
+        """The drawn track, rebuilt when the grid changes."""
         sig = (self.world_size, tuple(id(seg) for row in self.grid.cells for seg in row))
         if self._track_cache is None or sig != self._track_sig:
             surf = Surface(self.world_size)
@@ -151,59 +156,52 @@ class Window:
         return self._track_cache
 
     def _compose(self, verbose: bool | int = False, hud: bool = True, paused_overlay: bool = True) -> None:
-        """Draw one full frame onto the screen (no flip, no clock tick)."""
-        # A caller asking for verbose=True/int can only raise the level the V key chose
+        """Draw one frame onto the screen (no flip, no clock tick)."""
         level = max(self.verbose_level, 3 if verbose is True else int(verbose or 0))
         self.cars.debug_car = self.focus if self.cinematic else None
         verbose = level
-        pixel = self._pixel_active() and level < 2     # LiDAR / arrow debug views use the normal renderer
+        pixel = self._pixel_active() and level < 2      # debug views use the normal renderer
         if not self.cinematic:
             if pixel:
-                self._pixel.draw(self, level, 0.0, 0.0, 1.0)     # separate low-res renderer; HUD stays sharp
+                self._pixel.draw(self, level, 0.0, 0.0, 1.0)
                 if hud:
-                    self.cars.render_debug(self.screen)
-                    self.cars.render_hud(self.screen)
+                    self.car_renderer.render_debug(self.screen)
+                    self.car_renderer.render_hud(self.screen)
             else:
                 self.screen.blit(self._track_surface(), (0, 0))
-                self.cars.render(self.screen, verbose=verbose, hud=hud)  # (debug_panel drawn inline here)
+                self.car_renderer.render(self.screen, verbose=verbose, hud=hud)
             if hud:
                 self._draw_stats()
             if self.paused and paused_overlay:
                 self._draw_paused()
             return
 
-        self.screen = pygame.display.get_surface() or self.screen   # follows a resized window
+        self.screen = pygame.display.get_surface() or self.screen   # follow a resized window
         self.width, self.height = self.screen.get_size()
         self._update_camera()
         left, top, vw, vh = self._view_rect()
         if pixel:
             self._pixel.draw(self, level, left, top, self.scale)
         else:
-            # Only the part of the track the camera can see is redrawn (everything else is never shown
-            # before it gets refreshed), which matters on large grids
+            # Redraw only the visible part of the track
             crop = pygame.Rect(int(left) - 2, int(top) - 2, int(vw) + 6, int(vh) + 6).clip(self.world.get_rect())
             self.world.blit(self._track_surface(), crop.topleft, crop)
-            self.cars.render(self.world, verbose=verbose, hud=False, debug_panel=False)
+            self.car_renderer.render(self.world, verbose=verbose, hud=False, debug_panel=False)
             self._blit_camera()
         if hud:
-            self.cars.render_debug(self.screen)
-            self.cars.render_hud(self.screen)
+            self.car_renderer.render_debug(self.screen)
+            self.car_renderer.render_hud(self.screen)
             self._draw_stats()
             self._draw_hint()
         if self.paused and paused_overlay:
             self._draw_paused()
 
-    # ------------------------------------------------------------------
-    # Keyboard / run control
-    # ------------------------------------------------------------------
+    # Keyboard and run control
 
     def poll_events(self) -> list:
-        """
-        Handle the window's keyboard shortcuts and return every pygame event that was waiting, so
-        callers can still look at their own keys. Blocks (while keeping the window alive) when paused.
+        """Handle the window shortcuts and return all pending pygame events. Blocks while paused.
 
-        Sets `quit_requested` (window closed) and `end_requested` (Esc); the loop that owns the episode
-        reads them with `consume_stop()`.
+        Sets `quit_requested` (window closed) and `end_requested` (Esc), read with `consume_stop()`.
         """
         if self.screen is None:
             return []
@@ -219,7 +217,7 @@ class Window:
         return events
 
     def consume_stop(self) -> bool:
-        """True once if the window was closed or Esc was pressed (and clears the request)."""
+        """True once after the window was closed or Esc was pressed. Clears the request."""
         stop = self.quit_requested or self.end_requested
         self.quit_requested = self.end_requested = False
         self.paused = False
@@ -243,7 +241,7 @@ class Window:
                     and getattr(event, "mod", 0) & pygame.KMOD_SHIFT:
                 self._change_fps(-1 if key in (pygame.K_MINUS, pygame.K_KP_MINUS) else +1)
             elif not self.cinematic:
-                return                                      # camera keys need the cinematic window
+                return                                      # camera keys need cinematic mode
             elif key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                 self._zoom(1.0 / self.config.zoom_step)
             elif key in (pygame.K_PLUS, pygame.K_EQUALS, pygame.K_KP_PLUS):
@@ -259,10 +257,8 @@ class Window:
             elif pygame.K_KP1 <= key <= pygame.K_KP9:
                 self._focus_position(key - pygame.K_KP1)
 
-    FPS_STEPS = (5, 10, 15, 20, 30, 45, 60, 90, 120, 144, 240, None)   # None = uncapped
-
     def _change_fps(self, direction: int) -> None:
-        """Move the frame rate cap one step down (-1) or up (+1) the FPS_STEPS ladder."""
+        """Move the frame rate cap one step down (-1) or up (+1) on `FPS_STEPS`."""
         steps = self.FPS_STEPS
         if self.fps is None:
             i = len(steps) - 1
@@ -271,7 +267,7 @@ class Window:
         self.fps = steps[min(max(i + direction, 0), len(steps) - 1)]
 
     def _zoom(self, factor: float) -> None:
-        if self._fit_grid:                                  # leave the fixed view, zooming from where it is
+        if self._fit_grid:
             self._fit_grid, self._free_scale = False, self.scale
         if self.auto_fit or self.focus is not None:
             self._zoom_bias *= factor
@@ -280,19 +276,19 @@ class Window:
 
     def _toggle_auto_fit(self) -> None:
         self._fit_grid = False
-        if self.auto_fit:                                   # freeze the camera where it is
+        if self.auto_fit:                                   # freeze the camera
             self.auto_fit = False
             self._free_scale = self.scale
         else:
             self.auto_fit, self.focus, self._zoom_bias, self._focus_slot = True, None, 1.0, None
 
     def _focus_position(self, position: int) -> None:
-        """Focus the car in race position `position` (0 = leader), the same order as the leaderboard."""
+        """Follow the car in race position `position` (0 = leader)."""
         alive = self._alive()
         order = [i for i in self._order() if alive[i]]
         if position < len(order):
             self._focus_car(order[position])
-            self._focus_slot = position                    # keep following that position as it changes hands
+            self._focus_slot = position
 
     def _focus_car(self, idx: int) -> None:
         if 0 <= idx < self.cars.total and self._alive()[idx]:
@@ -308,27 +304,25 @@ class Window:
             self._focus_car(int(self._rng.choice(choices)))
 
     def reset_camera(self) -> None:
-        """New episode: follow P1 (key 1), or lock on the human car in a manual run. Clears stale requests."""
+        """New episode: follow P1, or the human car in a manual run. Clears stale requests."""
         self.paused = self.quit_requested = self.end_requested = False
         self._zoom_bias = 1.0
         self._fit_grid = False
         self._focus_slot = None
         self._track_cache = None
         if self.screen is not None and pygame.display.get_init() and pygame.display.get_surface() is not None:
-            self._track_surface()                           # draw the new track now, not on the first frame
+            self._track_surface()
         self._snap = True
         if self.cars.usr_engaged and self.cars.total > 0:
             if not self._verbose_touched:
-                self.verbose_level = max(self.verbose_level, 1)   # manual runs show the car stats
+                self.verbose_level = max(self.verbose_level, 1)
             self.focus, self.auto_fit = self.cars.total - 1, False
             self._focus_rank = self._rank_of(self.focus)
-        else:                                               # default: follow P1 at a constant zoom (key 1)
+        else:
             self.focus, self.auto_fit = None, False
             self._focus_slot = 0
 
-    # ------------------------------------------------------------------
     # Camera
-    # ------------------------------------------------------------------
 
     def _alive(self) -> np.ndarray:
         return np.asarray(self.cars.race_active, dtype=bool)
@@ -344,7 +338,7 @@ class Window:
         return order.index(idx) if idx in order else 0
 
     def _fit_scale(self) -> float:
-        """Scale at which the whole grid fits the canvas (the lowest zoom)."""
+        """Scale at which the whole grid fits the canvas (minimum zoom)."""
         w, h = self.screen.get_size()
         return min(w / self.world_size[0], h / self.world_size[1])
 
@@ -356,7 +350,7 @@ class Window:
         car = float(max(self.cars.width, self.cars.height))
         alive = self._alive()
 
-        # Following a race position: whoever holds it now is the focus
+        # Following a race position: the current holder is the focus
         if self._focus_slot is not None:
             order = [i for i in self._order() if alive[i]]
             if order:
@@ -365,7 +359,7 @@ class Window:
             else:
                 self.focus, self._focus_slot, self.auto_fit = None, None, True
 
-        # A followed car that got eliminated hands the camera to the next one in the standings
+        # An eliminated car hands the camera to the next one in the standings
         if self.focus is not None and not alive[self.focus]:
             order = self._order()
             after = [i for i in order[self._focus_rank + 1:] if alive[i]]
@@ -405,7 +399,7 @@ class Window:
             pass
         elif self.focus is not None or self.auto_fit:
             if raw > 0:
-                self._zoom_bias *= ts / raw      # pressing - or + at a limit must not wind the zoom up
+                self._zoom_bias *= ts / raw      # keeps zoom keys from winding up at a limit
         else:
             self._free_scale = ts
 
@@ -416,21 +410,19 @@ class Window:
         self.scale = float(np.exp(np.log(self.scale) + (np.log(ts) - np.log(self.scale)) * k))
         self.scale = min(max(self.scale, lo), hi)
 
-    # ------------------------------------------------------------------
-    # Pixel mode (visual only)
-    # ------------------------------------------------------------------
+    # Pixel mode
 
     def _pixel_active(self) -> bool:
-        """True when the retro look applies to this frame (config.pixel_mode: off / on / race)."""
+        """True when `config.pixel_mode` ("off", "on", "race") applies to this frame."""
         mode = self.config.pixel_mode
         return mode == "on" or (mode == "race" and self.cars.race.enabled)
 
     def _view_rect(self) -> tuple[float, float, float, float]:
-        """World-space rectangle shown on the canvas: (left, top, width, height)."""
+        """World rectangle shown on the canvas: (left, top, width, height)."""
         w, h = self.screen.get_size()
         gw, gh = self.world_size
         vw, vh = w / self.scale, h / self.scale
-        # Keep the view inside the grid; when the grid is smaller than the view, centre it
+        # Clamp the view to the grid, center it when the grid is smaller
         left = (gw - vw) / 2 if vw >= gw else min(max(self.cam_x - vw / 2, 0.0), gw - vw)
         top = (gh - vh) / 2 if vh >= gh else min(max(self.cam_y - vh / 2, 0.0), gh - vh)
         return left, top, vw, vh
@@ -449,22 +441,20 @@ class Window:
         size = (max(1, round((sx1 - sx0) * self.scale)), max(1, round((sy1 - sy0) * self.scale)))
         dest = (round((sx0 - left) * self.scale), round((sy0 - top) * self.scale))
         if dest != (0, 0) or size[0] < self.screen.get_width() or size[1] < self.screen.get_height():
-            self.screen.fill(self.bg_color)           # borders around a grid smaller than the window
+            self.screen.fill(self.bg_color)
         if size == src.get_size():
             self.screen.blit(src, dest)
             return
         scale = pygame.transform.smoothscale if self.config.smooth_scaling else pygame.transform.scale
         if dest == (0, 0) and size == self.screen.get_size():
             try:
-                scale(src, size, self.screen)               # straight into the window: no temporary surface, no extra blit
+                scale(src, size, self.screen)
                 return
             except (ValueError, pygame.error):
-                pass                                        # pixel formats differ: take the generic path
+                pass                                        # pixel formats differ
         self.screen.blit(scale(src, size), dest)
 
-    # ------------------------------------------------------------------
     # Overlays
-    # ------------------------------------------------------------------
 
     def _panel_text(self, text: str, anchor: str, y_pad: int = 4) -> None:
         if self.font is None:
@@ -481,7 +471,7 @@ class Window:
         self.screen.blit(txt, (rect.x + 6, rect.y + 4))
 
     def _draw_stats(self) -> None:
-        """Top-centre: measured frame rate against the cap, and the episode frame count."""
+        """Top center: measured frame rate against the cap, and the episode frame count."""
         if self.font is None:
             return
         measured = self.clock.get_fps() if self.clock is not None else 0.0
@@ -510,7 +500,7 @@ class Window:
         )
 
     def _draw_paused(self) -> None:
-        """PAUSED in the middle of the window, drawn last so nothing covers it."""
+        """PAUSED banner in the middle of the window."""
         w, h = self.screen.get_size()
         big = pygame.font.Font(None, max(32, int(h * 0.14)))
         txt = big.render("PAUSED", True, (255, 255, 255))
@@ -522,15 +512,14 @@ class Window:
         self._compose(False, hud=False, paused_overlay=False)
 
     def countdown(self) -> bool:
-        """
-        Blocking 3-2-1-GO! sequence drawn over the (frozen) starting grid.
-        Returns False if the window was closed meanwhile (the QUIT event is re-posted
-        so the caller's normal event loop still sees it).
+        """Blocking 3-2-1-GO sequence over the frozen starting grid.
+
+        Returns False if the window was closed meanwhile (QUIT is re-posted for the caller).
         """
         cfg = self.race.countdown
         if self.screen is None:
             self.initialize()
-        clock = pygame.time.Clock()          # own clock: self.clock was created before the track was built
+        clock = pygame.time.Clock()
         clock.tick()
         w, h = self.screen.get_size()
         big = pygame.font.Font(None, int(h * 0.22))
@@ -539,7 +528,7 @@ class Window:
         total_s = steps * cfg.step_seconds + cfg.go_seconds
         light_r = max(8, int(h * 0.035))
 
-        t = 0.0                                             # countdown clock; stands still while paused
+        t = 0.0                                             # stands still while paused
         while True:
             if t >= total_s:
                 return True
@@ -550,7 +539,7 @@ class Window:
                 self.running = False
                 return False
             if self.end_requested:
-                return True                                 # skip the rest; the episode loop sees Esc
+                return True
 
             self._draw_scene()
             go = t >= steps * cfg.step_seconds
@@ -559,12 +548,12 @@ class Window:
                 cfg.go_seconds if go else cfg.step_seconds
             )
 
-            # dim backdrop, fading out during GO!
+            # Dim backdrop, fades out during GO
             veil = pygame.Surface((w, h), pygame.SRCALPHA)
             veil.fill((0, 0, 0, int(cfg.dim * (1.0 - local) if go else cfg.dim)))
             self.screen.blit(veil, (0, 0))
 
-            # start lights: one more red each step, all green on GO!
+            # Start lights
             gap = light_r * 3
             x0 = w // 2 - gap * (steps - 1) // 2
             for i in range(steps):
@@ -574,7 +563,7 @@ class Window:
                 pygame.draw.circle(self.screen, (15, 15, 15), pos, light_r + 4)
                 pygame.draw.circle(self.screen, color, pos, light_r)
 
-            # big number with a punchy "pop" (starts large, settles)
+            # Big number that starts large and settles
             label = cfg.text_go if go else str(steps - step)
             color = (60, 235, 100) if go else (255, 255, 255)
             scale = 1.0 + 0.35 * (1.0 - min(local * 4.0, 1.0)) ** 2
@@ -588,7 +577,7 @@ class Window:
                 self.screen.blit(hint, hint.get_rect(center=(w // 2, int(h * 0.40))))
 
             if self.paused:
-                self._draw_paused()                          # above the veil, lights and numbers
+                self._draw_paused()
             pygame.display.flip()
             dt = min(clock.tick(60) / 1000.0, 0.1)
             if not self.paused:

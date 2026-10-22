@@ -1,49 +1,33 @@
-"""
-Race-mode helpers (CPU friendly, numpy only).
-
-* TrackGeometry  - centre-line of every tile, used to place the grid and measure progress
-* StartingGrid   - staggered grid laid out *backwards* from the start tile
-* slipstream()   - pairwise cone test -> per-car draft level in [0, 1]
-* collide()      - two-circle car bodies, positional + impulse response
-
-Angle convention (matches Cars): heading vector = (-sin a, -cos a), a in degrees,
-increasing `a` turns the car left on screen.
-"""
+"""Race helpers: track center lines, starting grid layout and a demo autopilot."""
 from __future__ import annotations
 
 import math
 import warnings
-import numpy as np
 
-from numba import njit, prange
+import numpy as np
 from numpy import ndarray as Array
 
-from .config import StartGridConfig, SlipstreamConfig, CollisionConfig
+from . import kernels
+from .config import SlipstreamConfig, StartGridConfig
+from .constants import DRAFT_TREND_EPS, TRAIL_RESET_CARS
 from .functional import Type
 from .grid import Grid
 from .tile import Tile
-from .util import grid
+from .util import wrap180
+
+__all__ = [
+    "TrackGeometry", "StartingGrid", "RaceControl", "Slipstream", "RandomSlipstream",
+    "Autopilot", "heading_to_angle",
+]
 
 
 def heading_to_angle(dx: float, dy: float) -> float:
-    """World direction (dx, dy) -> car angle in degrees."""
+    """World direction (dx, dy) to car angle in degrees."""
     return math.degrees(math.atan2(-dx, -dy)) % 360
 
 
-def wrap180(a):
-    return (a + 180.0) % 360.0 - 180.0
-
-
-# ======================================================================
-# Track geometry
-# ======================================================================
-
 class TrackGeometry:
-    """
-    Every tile's driving line is the polyline entry-mid -> centre -> exit-mid, which is
-    exactly the shape of the L-shaped road on corner tiles (a straight tile is the
-    degenerate case).  Length of every tile line == tile size.
-    """
+    """Driving line of every tile: entry midpoint -> center -> exit midpoint (length = tile size)."""
 
     def __init__(self, grid: Grid):
         self.grid = grid
@@ -51,7 +35,7 @@ class TrackGeometry:
         self.next: dict[Tile, Tile] = dict(grid.continuity)
         self.prev: dict[Tile, Tile] = {b: a for a, b in self.next.items()}
 
-        # lap index of every tile: start = 0, its successor = 1, ...
+        # Lap index of every tile: start = 0, its successor = 1, ...
         self.lap_index: dict[Tile, int] = {}
         t = grid.start_cell
         for i in range(len(self.next)):
@@ -59,17 +43,18 @@ class TrackGeometry:
             t = self.next[t]
         self.n_tiles = len(self.next)
 
-        # (entry, centre, exit) per tile
+        # (entry, center, exit) per tile
         self.lines: dict[Tile, tuple[Array, Array, Array]] = {}
         for t in self.next:
             exit_ = np.array(t.center_check_abs, dtype=float)
-            entry = np.array(self.prev[t].center_check_abs, dtype=float)  # exit of the tile before
+            entry = np.array(self.prev[t].center_check_abs, dtype=float)
             self.lines[t] = (entry, np.array(t.center_abs, dtype=float), exit_)
 
-    # ---- queries --------------------------------------------------------
     def point(self, tile: Tile, dist: float, lateral: float = 0.0) -> tuple[float, float, float]:
-        """(x, y, angle) at `dist` px from the tile entry; lateral > 0 is to the car's left.
-        `dist` may exceed the tile size, in which case it continues into the next tile(s)."""
+        """(x, y, angle) at `dist` px from the tile entry, `lateral` > 0 is to the left of travel.
+
+        `dist` may run into the next tiles (or the previous ones when negative).
+        """
         while dist > self.size:
             dist -= self.size
             tile = self.next[tile]
@@ -81,10 +66,10 @@ class TrackGeometry:
         a, b, d = (e, c, dist) if dist <= half else (c, x, dist - half)
         v = b - a
         u = v / (np.hypot(*v) or 1.0)
-        left = np.array([u[1], -u[0]])           # screen coords (y down): left of travel
+        left = np.array([u[1], -u[0]])           # screen coordinates, y down
         p = a + u * d + left * lateral
         ang = heading_to_angle(*u)
-        # smooth the heading across the corner so cars on corner tiles are not stiffly square
+        # Blend the heading across corner tiles
         if tile.type in (Type.LEFT, Type.RIGHT):
             u1 = (c - e) / (np.hypot(*(c - e)) or 1.0)
             u2 = (x - c) / (np.hypot(*(x - c)) or 1.0)
@@ -111,12 +96,8 @@ class TrackGeometry:
         return (laps * self.n_tiles + self.lap_index[tile]) * self.size + self.dist_in_tile(tile, x, y)
 
 
-# ======================================================================
-# Starting grid
-# ======================================================================
-
 class StartingGrid:
-    """Places racers in staggered rows, start tile first, then the tiles behind it."""
+    """Places racers in staggered rows on the start tile, then on the tiles behind it."""
 
     def __init__(self, track: TrackGeometry, cfg: StartGridConfig, car_w: float, car_h: float,
                  max_racers: int):
@@ -124,7 +105,6 @@ class StartingGrid:
         self.car_w, self.car_h = car_w, car_h
         self.max_racers = max_racers
 
-    # ---- capacity -------------------------------------------------------
     def lanes(self, tile: Tile) -> int:
         if self.cfg.lanes is not None:
             return max(1, int(self.cfg.lanes))
@@ -133,8 +113,9 @@ class StartingGrid:
 
     def span(self, tile: Tile) -> tuple[float, float]:
         """(front, rear) distances back from the tile exit that cars may occupy.
-        On the start tile the rear limit sits in front of the finish line, so the
-        pole group lines up just past it and the next tile's group is behind it."""
+
+        On the start tile the rear limit stays in front of the finish line.
+        """
         edge = self.track.size * self.cfg.edge_margin
         rear = self.track.size - edge
         if tile is self.track.grid.start_cell:
@@ -149,7 +130,6 @@ class StartingGrid:
         rows = int(self.usable_length(tile) // (self.car_h * self.cfg.row_gap))
         return self.lanes(tile) * max(rows, 0)
 
-    # ---- layout ---------------------------------------------------------
     def plan(self, total: int) -> list[int]:
         """Cars per tile (start tile first) for `total` racers."""
         if total > self.max_racers:
@@ -195,366 +175,159 @@ class StartingGrid:
             lat = np.linspace(spread / 2, -spread / 2, lanes) if lanes > 1 else np.zeros(1)
             for i in range(n):
                 row, lane = divmod(i, lanes)
-                # distance back from the tile exit, odd lanes staggered further back
+                # Distance back from the tile exit, odd lanes staggered further back
                 back = front + (row + 0.5) * band + (self.cfg.stagger * band if lane % 2 else 0.0)
                 back = min(back, rear)
                 x, y, ang = self.track.point(tile, self.track.size - back, float(lat[lane]))
                 slots.append(dict(x=x, y=y, angle=ang, tile=tile, lap_offset=lap_offset))
             tile = self.track.prev[tile]
-            lap_offset -= 1   # the tile behind the start must cross the line once before lap 1
+            lap_offset -= 1                             # cars behind the start cross the line once before lap 1
         return slots
 
 
-# ======================================================================
-# Numba-accelerated helpers (same structure as backtest.trader / agent)
-# ======================================================================
+class RaceControl:
+    """Race order and finishing. Reads and writes the race arrays stored on `Cars`."""
 
-@njit(parallel=True, fastmath=True, cache=True)
-def _slipstream(
-    x: Array, y: Array, angle: Array, vel_norm: Array, active: Array, level: Array,
-    out: Array,
-    car_len: float, rng: float, cone: float, max_heading_diff: float, min_leader_speed: float,
-    distance_falloff: float, angle_falloff: float, ramp: float, decay: float,
-):
-    """
-    Per-follower draft update.  Every follower is independent, so numba
-    parallelises across followers; the leader scan is a serial inner loop.
-    """
-    total, indices = grid((x.shape[0],))
-    for i in prange(total):
-        f = indices[i]
-        target = 0.0
-        if active[f]:
-            rad = angle[f] * math.pi / 180.0
-            fx = -math.sin(rad)
-            fy = -math.cos(rad)
-            for j in range(total):
-                if j != f and active[j] and vel_norm[j] > min_leader_speed:
-                    ddx = x[j] - x[f]
-                    ddy = y[j] - y[f]
-                    ahead = ddx * fx + ddy * fy
-                    side  = ddx * fy - ddy * fx
-                    dist  = math.hypot(ddx, ddy)
-                    theta = abs(math.atan2(side, max(ahead, 1e-6)))
-                    d_ang = abs((angle[j] - angle[f] + 180.0) % 360.0 - 180.0)
-                    if ahead > 0.5 * car_len and dist < rng and theta < cone and d_ang < max_heading_diff:
-                        s = (
-                            min(max(1.0 - dist / rng, 0.0), 1.0) ** distance_falloff
-                            * min(max(1.0 - theta / cone, 0.0), 1.0) ** angle_falloff
-                            * min(max(vel_norm[j], 0.0), 1.0)
-                        )
-                        if s > target: target = s
-        rate = ramp if target > level[f] else decay
-        out[f] = min(max(level[f] + rate * (target - level[f]), 0.0), 1.0)
+    def update_order(self, cars, recompute: bool = True) -> None:
+        """Live positions from the distance driven; finishers keep their finishing order."""
+        if recompute:
+            cars._compute_progress()
+        key = np.where(cars.race_active, cars.progress, -np.inf)
+        for rank, i in enumerate(cars.finish_order):
+            if key[i] > -np.inf:
+                key[i] = 1.0e15 - rank
+        cars.race_order = np.argsort(-key, kind="stable")
+        cars.ranking = cars.race_order
+
+    def update_ranking(self, cars) -> None:
+        """Per-frame ranking: race order in race mode, otherwise by score until most cars have lapped."""
+        if cars.race_on:
+            self.update_order(cars, recompute=False)
+        elif np.count_nonzero(cars.laps_done >= 1) <= 3:
+            cars.ranking = np.argsort(-cars.players.scores)
+
+    def mark_finished(self, cars, laps_target: float) -> int:
+        """Flag cars that completed `laps_target` laps. Returns how many cars have finished."""
+        newly = (cars.laps_done >= laps_target) & ~cars.race_done & cars.race_active
+        if newly.any():
+            for i in sorted(np.flatnonzero(newly), key=lambda j: -cars.progress[j]):
+                cars.race_done[i] = True
+                cars.finish_frame[i] = cars.race_frame
+                cars.finish_order.append(int(i))
+        return len(cars.finish_order)
 
 
-@njit(parallel=True, fastmath=True, cache=True)
-def _collide_near(x: Array, y: Array, active: Array, nearest: Array):
-    """Broad phase: distance from every active car to its nearest active neighbour."""
-    total, indices = grid((x.shape[0],))
-    for i in prange(total):
-        c = indices[i]
-        best = np.inf
-        if active[c]:
-            for j in range(total):
-                if j != c and active[j]:
-                    d = math.hypot(x[c] - x[j], y[c] - y[j])
-                    if d < best: best = d
-        nearest[c] = best
+class Slipstream:
+    """Drafting behind other cars: tow level, wear-off flag and the pose trails drawn as streaks."""
 
+    def __init__(self, config: SlipstreamConfig):
+        self.config = config
 
-@njit(parallel=True, fastmath=True, cache=True)
-def _collide_forces(
-    x: Array, y: Array, angle: Array, vel_lin: Array, active: Array,
-    push_x: Array, push_y: Array, dv_x: Array, dv_y: Array, dang: Array, touched: Array,
-    car_w: float, car_h: float, radius_scale: float, restitution: float, separation: float,
-    max_shove: float, spin: float, max_spin: float,
-):
-    """
-    Per-car contact response.  Each car accumulates the push-out, impulse and yaw
-    torque from every neighbour (2 circles per car -> up to 4 circle pairs per
-    neighbour), reading only pre-collision state so iterations stay independent.
-    """
-    total, indices = grid((x.shape[0],))
-    r   = car_w * radius_scale
-    off = max(car_h / 2.0 - r, 0.0)
-    for i in prange(total):
-        c = indices[i]
-        px = 0.0; py = 0.0; vx = 0.0; vy = 0.0; torque = 0.0
-        hit = False
-        if active[c]:
-            rad_c = angle[c] * math.pi / 180.0
-            fcx = -math.sin(rad_c); fcy = -math.cos(rad_c)
-            for j in range(total):
-                if j != c and active[j]:
-                    rad_j = angle[j] * math.pi / 180.0
-                    fjx = -math.sin(rad_j); fjy = -math.cos(rad_j)
-
-                    # How many of the 4 circle pairs overlap (impulse is shared between them)
-                    cnt = 0
-                    for a in range(2):
-                        sa = 1.0 - 2.0 * a
-                        ax = x[c] + sa * fcx * off; ay = y[c] + sa * fcy * off
-                        for b in range(2):
-                            sb = 1.0 - 2.0 * b
-                            bx = x[j] + sb * fjx * off; by = y[j] + sb * fjy * off
-                            if max(math.hypot(ax - bx, ay - by), 1e-6) < 2.0 * r: cnt += 1
-
-                    if cnt > 0:
-                        hit = True
-                        w = 1.0 / cnt
-                        for a in range(2):
-                            sa = 1.0 - 2.0 * a
-                            ax = x[c] + sa * fcx * off; ay = y[c] + sa * fcy * off
-                            for b in range(2):
-                                sb = 1.0 - 2.0 * b
-                                bx = x[j] + sb * fjx * off; by = y[j] + sb * fjy * off
-                                dx = ax - bx; dy = ay - by
-                                dist = max(math.hypot(dx, dy), 1e-6)
-                                if dist < 2.0 * r:
-                                    nx = dx / dist; ny = dy / dist
-                                    pen = 2.0 * r - dist
-                                    ux = fcx * vel_lin[c] - fjx * vel_lin[j]
-                                    uy = fcy * vel_lin[c] - fjy * vel_lin[j]
-                                    closing = max(-(ux * nx + uy * ny), 0.0)
-                                    J = (1.0 + restitution) * 0.5 * closing * w
-                                    k = pen * w * 0.5 * separation
-                                    px += nx * k;  py += ny * k
-                                    vx += nx * J;  vy += ny * J
-                                    lx = 0.5 * (ax + bx) - x[c]
-                                    ly = 0.5 * (ay + by) - y[c]
-                                    torque += lx * (ny * J) - ly * (nx * J)
-
-            mag = math.hypot(px, py)
-            cap = car_w * max_shove
-            if mag > cap:
-                sc = cap / max(mag, 1e-9)
-                px *= sc; py *= sc
-
-        push_x[c] = px; push_y[c] = py
-        dv_x[c] = vx;   dv_y[c] = vy
-        dang[c] = min(max(-spin * torque / max(car_h / 2.0, 1e-6), -max_spin), max_spin)
-        touched[c] = hit
-
-
-@njit(parallel=True, fastmath=True, cache=True)
-def _collide_apply(
-    x: Array, y: Array, angle: Array, vel_lin: Array, vel_ang: Array, disp_x: Array, disp_y: Array,
-    push_x: Array, push_y: Array, dv_x: Array, dv_y: Array, dang: Array, touched: Array,
-    min_speed_abs: float, lateral_transfer: float,
-):
-    total, indices = grid((x.shape[0],))
-    for i in prange(total):
-        c = indices[i]
-        rad = angle[c] * math.pi / 180.0
-        fx = -math.sin(rad); fy = -math.cos(rad)
-        x[c] += push_x[c]
-        y[c] += push_y[c]
-        forward = dv_x[c] * fx + dv_y[c] * fy
-        lat_x = dv_x[c] - fx * forward
-        lat_y = dv_y[c] - fy * forward
-        if touched[c] and vel_lin[c] > 0:
-            vel_lin[c] = max(vel_lin[c] + forward, min_speed_abs)
-        # disp_* hold the *negated* displacement of the car (position -= disp)
-        disp_x[c] -= lat_x * lateral_transfer
-        disp_y[c] -= lat_y * lateral_transfer
-        if touched[c]:
-            vel_ang[c] += dang[c]
-
-
-# ======================================================================
-# Slipstream
-# ======================================================================
-
-def slipstream(
-    x: Array, y: Array, angle: Array, vel_norm: Array, active: Array,
-    level: Array, car_len: float, cfg: SlipstreamConfig,
-) -> Array:
-    """
-    Returns the new draft level (N,) in [0, 1].
-
-    For every follower i and leader j:
-        ahead  = (pos_j - pos_i) . heading_i            (leader must be in front)
-        theta  = angle between heading_i and the line to the leader
-        s      = (1 - dist/range)^a * (1 - theta/cone)^b * leader_speed
-    The strongest wake wins, then the level eases towards it (ramp up / decay).
-    """
-    if x.shape[0] < 2:
-        return np.zeros_like(level)
-
-    out = np.empty_like(level)
-    _slipstream(
-        x, y, angle, vel_norm, active, level, out,
-        float(car_len), float(cfg.range_cars * car_len), math.radians(cfg.cone_deg),
-        float(cfg.max_heading_diff_deg), float(cfg.min_leader_speed),
-        float(cfg.distance_falloff), float(cfg.angle_falloff), float(cfg.ramp), float(cfg.decay),
-    )
-    return out
-
-
-# ======================================================================
-# Slipstream trail (render helpers)
-# ======================================================================
-
-# Slipstream-trail constants. Module-level on purpose: numba freezes them at compile time (free
-# at runtime), and they stay in this file so cache=True invalidates correctly when they change.
-# Large primes used to mix (car, trail age, time) into a cheap, deterministic jitter hash.
-# Same idea as spatial-hash primes; no RNG state, so it is safe inside prange and allocation free.
-_HASH_CAR  = 73856093
-_HASH_AGE  = 19349663
-_HASH_TIME = 83492791
-_HASH_MIX  = 40503        # odd 16-bit multiplier: decorrelates the 2nd jitter axis from the 1st
-_HASH_MASK = 0xFFFF       # keep 16 bits -> value in [0, 65535]
-_HASH_HALF = 32768.0      # 2**15: maps [0, 65535] to [-1, 1) after "/ _HASH_HALF - 1"
-_JITTER_HOLD_FRAMES = 3   # particle jitter changes every N frames (shimmer, not per-frame noise)
-_MIN_SPAN = 1             # guards the age division when only one point is drawn
-
-
-@njit(parallel=True, fastmath=True, cache=True)
-def _trail_push(
-    tx: Array, ty: Array, ta: Array, head: Array, count: Array,
-    x: Array, y: Array, angle: Array, active: Array, jump: float,
-):
-    """Append the current pose of every car to its ring buffer (O(N)).
-    A teleport (respawn / reset) larger than `jump` px clears that car's history."""
-    total, indices = grid((x.shape[0],))
-    cap = tx.shape[1]
-    for i in prange(total):
-        c = indices[i]
-        if not active[c]:
-            count[c] = 0
-            continue
-        h = head[c]
-        if count[c] > 0 and math.hypot(x[c] - tx[c, h], y[c] - ty[c, h]) > jump:
-            count[c] = 0
-        h = (h + 1) % cap
-        tx[c, h] = x[c]
-        ty[c, h] = y[c]
-        ta[c, h] = angle[c]
-        head[c] = h
-        if count[c] < cap:
-            count[c] += 1
-
-
-@njit(cache=True, fastmath=True)
-def _trail_points(
-    tx: Array, ty: Array, ta: Array, head: Array, count: Array, c: int,
-    n: int, rear: float, side: float, step: int, spread: float, frame: int, out: Array,
-) -> int:
-    """Fill `out` (>= n, 2) with the streak polyline of car `c` (newest -> oldest), offset
-    sideways by `side` px and behind the car by `rear` px along each stored heading.
-    With spread > 0 points get a cheap hash jitter growing with age (particles).
-    Returns the number of points written."""
-    cap = tx.shape[1]
-    n = min(n, count[c])
-    m = 0
-    k = 0
-    while k < n:
-        idx = (head[c] - k) % cap
-        rad = ta[c, idx] * math.pi / 180.0
-        fx = -math.sin(rad)
-        fy = -math.cos(rad)
-        px = tx[c, idx] - fx * rear - fy * side
-        py = ty[c, idx] - fy * rear + fx * side
-        if spread > 0.0:
-            hsh = ((c * _HASH_CAR) ^ (k * _HASH_AGE) ^ ((frame // _JITTER_HOLD_FRAMES) * _HASH_TIME)) & _HASH_MASK
-            r1 = hsh / _HASH_HALF - 1.0
-            r2 = ((hsh * _HASH_MIX) & _HASH_MASK) / _HASH_HALF - 1.0
-            age = k / max(n - 1, _MIN_SPAN)   # 0 at the car, 1 at the tail: jitter grows with age
-            px += r1 * spread * age
-            py += r2 * spread * age
-        out[m, 0] = px
-        out[m, 1] = py
-        m += 1
-        k += step
-    return m
-
-
-def trail_push(tx, ty, ta, head, count, x, y, angle, active, jump: float) -> None:
-    _trail_push(tx, ty, ta, head, count, x, y, angle, active, float(jump))
-
-
-def trail_points(tx, ty, ta, head, count, c, n, rear, side, step, spread, frame, out) -> int:
-    return int(_trail_points(
-        tx, ty, ta, head, count, int(c), int(n), float(rear), float(side), int(step),
-        float(spread), int(frame), out,
-    ))
-
-
-# ======================================================================
-# Collisions
-# ======================================================================
-
-def collide(
-    x: Array, y: Array, angle: Array, vel_lin: Array, vel_ang: Array,
-    disp_x: Array, disp_y: Array, active: Array,
-    car_w: float, car_h: float, max_vel: float, cfg: CollisionConfig,
-) -> Array:
-    """
-    Resolves overlaps in place; returns a bool (N,) mask of cars that were hit this frame.
-
-    Each car = 2 circles (front / rear).  Response (equal masses):
-      * positional push-out along the contact normal
-      * impulse along the normal  -> change of forward speed + a sideways slide (disp_x/y)
-      * off-centre contact        -> small yaw kick on vel_ang
-    """
-    N = x.shape[0]
-    touched = np.zeros(N, dtype=np.bool_)
-    if N < 2:
-        return touched
-
-    # Broad phase: two cars can only touch when their centres are closer than one car length
-    nearest = np.empty(N, dtype=np.float64)
-    _collide_near(x, y, active, nearest)
-    if nearest.min() >= car_h:
-        return touched
-
-    push_x, push_y, dv_x, dv_y, dang = (np.zeros(N, dtype=np.float64) for _ in range(5))
-    _collide_forces(
-        x, y, angle, vel_lin, active, push_x, push_y, dv_x, dv_y, dang, touched,
-        float(car_w), float(car_h), float(cfg.radius_scale), float(cfg.restitution),
-        float(cfg.separation), float(cfg.max_shove), float(cfg.spin), float(cfg.max_spin),
-    )
-    if touched.any():
-        _collide_apply(
-            x, y, angle, vel_lin, vel_ang, disp_x, disp_y,
-            push_x, push_y, dv_x, dv_y, dang, touched,
-            float(cfg.min_speed * max_vel), float(cfg.lateral_transfer),
+    def update(self, cars) -> bool:
+        """Advance the draft level of every car. Returns True when drafting is active this frame."""
+        ss = self.config
+        cone = bool(cars.race_on and ss.enabled)
+        drafting = bool(cone or ss.random_enabled)
+        if not drafting:
+            return False
+        prev_level = cars.draft_level
+        if cone:
+            cars._draft_natural = kernels.slipstream(
+                cars.x, cars.y, cars.angle, np.clip(cars.vel_lin / cars.max_vel_lin, 0.0, 1.0),
+                cars.race_active, cars._draft_natural, cars.height, ss,
+            )
+        if ss.random_enabled:
+            cars.random_ss.step(cars)
+            cars.draft_level = np.maximum(cars._draft_natural, cars.random_ss.level)
+        else:
+            cars.draft_level = cars._draft_natural
+        # True while the tow wears off, unchanged inside the dead band
+        cars.draft_decay = np.where(
+            cars.draft_level < prev_level - DRAFT_TREND_EPS, True,
+            np.where(cars.draft_level > prev_level + DRAFT_TREND_EPS, False, cars.draft_decay),
         )
-    return touched
+        return True
+
+    def record_trail(self, cars) -> None:
+        """Push the current poses into the trail ring buffers."""
+        if cars.race_on and self.config.enabled:
+            kernels.trail_push(
+                cars.trail_x, cars.trail_y, cars.trail_a, cars.trail_head, cars.trail_count,
+                cars.x, cars.y, cars.angle, cars.race_active, cars.height * TRAIL_RESET_CARS,
+            )
 
 
-# ======================================================================
-# Demo / manual-test driver
-# ======================================================================
+class RandomSlipstream:
+    """Random training tows: each car gets `random_events` tows per life, starting when it
+    reaches a tile `random_min_tiles` to `random_max_tiles` ahead. Works outside race mode."""
+
+    def __init__(self, config: SlipstreamConfig):
+        self.config = config
+        self.allocate(1)
+
+    def allocate(self, total: int) -> None:
+        self.tile = np.full(total, -1, dtype=np.int64)      # tile index that triggers the next tow
+        self.left = np.zeros(total, dtype=np.int64)         # frames left in the current tow
+        self.events = np.zeros(total, dtype=np.int64)       # tows already given this life
+        self.level = np.zeros(total, dtype=np.float64)      # current draft level, 0..1
+
+    def schedule(self, cars, idx: Array, reset_events: bool = False) -> None:
+        """Pick the next trigger tile for the cars in `idx`."""
+        ss = self.config
+        if not ss.random_enabled or idx.size == 0 or not hasattr(cars, "t_next"):
+            return
+        if reset_events:
+            self.events[idx] = 0
+            self.left[idx] = 0
+            self.level[idx] = 0.0
+        ahead = cars.rng.integers(ss.random_min_tiles, ss.random_max_tiles + 1, size=idx.size)
+        tid = cars.tile_idx[idx].copy()
+        for step in range(ss.random_max_tiles):
+            tid = np.where(step < ahead, cars.t_next[tid], tid)
+        self.tile[idx] = np.where(self.events[idx] < ss.random_events, tid, -1)
+
+    def step(self, cars) -> None:
+        """Advance the tows by one frame."""
+        ss = self.config
+        active = self.left > 0
+        hit = (~active) & (self.tile >= 0) & (cars.tile_idx == self.tile)
+        if hit.any():
+            idx = np.flatnonzero(hit)
+            self.left[idx] = ss.random_frames
+            self.events[idx] += 1
+            self.schedule(cars, idx)
+        target = np.where(self.left > 0, ss.random_level, 0.0)
+        rate = np.where(target > self.level, ss.ramp, ss.decay)
+        self.level += (target - self.level) * rate
+        self.left = np.maximum(self.left - 1, 0)
+
 
 class Autopilot:
-    """Tiny pure-pursuit driver: aim a little way down the centre line, slow for corners."""
+    """Pure-pursuit driver for demos: aims down the center line and slows for corners."""
 
     def __init__(self, cars, seed: int | None = None):
         rng = np.random.default_rng(seed)
         self.cars = cars
         n = cars.total
-        self.skill = rng.uniform(0.86, 0.98, n)                    # fraction of top speed it aims for
+        self.skill = rng.uniform(0.86, 0.98, n)                     # target fraction of top speed
         self.lane = rng.uniform(-0.20, 0.20, n) * cars.grid.cell_size * 0.5
         self.closing = np.zeros(n, dtype=bool)
 
     def _pass_offset(self, i: int) -> float:
-        """Pull out sideways when a slower car is right ahead (so a tow can become an overtake),
-        and lift a little when closing in too fast."""
+        """Sideways offset around a slower car ahead. Sets `closing` when it is near."""
         c = self.cars
         rad = np.radians(c.angle[i])
         fx, fy = -np.sin(rad), -np.cos(rad)
         dx, dy = c.x - c.x[i], c.y - c.y[i]
         ahead = dx * fx + dy * fy
-        lat = dx * fy - dy * fx                      # > 0: other car is to my left
+        lat = dx * fy - dy * fx                      # > 0: other car on the left
         near = (ahead > 0) & (ahead < 3.0 * c.height) & (np.abs(lat) < 1.3 * c.width) & c.players.active
         near[i] = False
         self.closing[i] = near.any() and ahead[near].min() < 1.6 * c.height
         if not near.any():
             return 0.0
         j = np.flatnonzero(near)[np.argmin(ahead[near])]
-        side = -1.0 if lat[j] > 0 else 1.0           # go round the other side
+        side = -1.0 if lat[j] > 0 else 1.0
         return side * 0.30 * c.grid.cell_size * 0.5 * 0.9
 
     def act(self) -> np.ndarray:
@@ -570,17 +343,17 @@ class Autopilot:
             err = wrap180(heading_to_angle(tx - c.x[i], ty - c.y[i]) - c.angle[i])
             out[i, 1] = np.clip(0.05 * err - 0.35 * c.vel_ang[i], -1, 1)
 
-            # Corner ahead within the braking window?
+            # Slow down for corners
             nxt = tr.next[tile]
             corner_here = tile.type.name in ('LEFT', 'RIGHT')
             corner_next = nxt.type.name in ('LEFT', 'RIGHT')
             target = self.skill[i]
             if corner_here or (corner_next and d > 0.35 * tr.size):
                 target = min(target, 0.52)
-            # never lift while in a tow
+            # Never lift while in a tow
             if c.draft_level[i] > 0.1:
                 target = 1.0 + 0.12
-            if self.closing[i] and speed > 0.4 * c.max_vel_lin:   # (never at a standstill: that costs lives)
-                target = min(target, speed / c.max_vel_lin - 0.02)   # feather the throttle
+            if self.closing[i] and speed > 0.4 * c.max_vel_lin:     # never at a standstill, that costs lives
+                target = min(target, speed / c.max_vel_lin - 0.02)
             out[i, 0] = np.clip((target - speed / c.max_vel_lin) * 6.0, -1, 1)
         return out

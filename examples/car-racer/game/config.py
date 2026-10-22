@@ -1,13 +1,31 @@
+from __future__ import annotations
+
 import os
 import json
 import warnings
 
 from typing import Any
 
-from .constants import (
-    COLOR_ROAD, COLOR_GRASS, COLOR_CURB_PRI, COLOR_CURB_SEC, COLOR_START_SEC, 
-    COLOR_START_PRI, COLOR_GRAVEL, COLOR_EMPTY
-)
+from .constants import COLOR_CURB_PRI, COLOR_CURB_SEC, COLOR_GRASS, COLOR_GRAVEL, COLOR_ROAD
+
+__all__ = [
+    "Configuration",
+    "TileConfig",
+    "GridConfig",
+    "CarConfig",
+    "StartGridConfig",
+    "SlipstreamConfig",
+    "CollisionConfig",
+    "CountdownConfig",
+    "RaceConfig",
+    "RewardConfig",
+    "WindowConfig",
+    "GenConfig",
+    "PlayerConfig",
+    "EnvironmentConfig",
+    "overwrite_config",
+    "normalize_restrict_movement",
+]
 
 MULTIPLIER = 3.0
 RESTRICT_DEFAULT = 2
@@ -23,7 +41,7 @@ def normalize_restrict_movement(value: "bool | int | None") -> int:
 
 class Configuration:
     """Base configuration class for loading parameters from file or dict."""
-    
+
     def __init__(self, *, params: dict[str, Any] | None = None, file: str = None) -> None:
         # Load from json file provided or parameter dictionary
         if file is not None:
@@ -33,10 +51,10 @@ class Configuration:
                     "File input takes precedence over provided params."
                 )
             params = self.load(file)
-        
+
         if params is None:
             params = dict()
-        
+
         self.params = params
 
     def load(self, file: str) -> dict[str, Any]:
@@ -44,22 +62,43 @@ class Configuration:
         # Check if file exists
         if not os.path.isfile(file):
             raise FileNotFoundError(f"{config_type} parameter file not found: {file}")
-        
+
         with open(file, 'r') as f:
             print(f"Loaded {config_type} parameters from file: {file}")
             return json.load(f)
-        
+
+    def to_dict(self) -> dict[str, Any]:
+        """Current settings as a JSON-serializable dict; nested configs become nested dicts."""
+        out: dict[str, Any] = {}
+        for key, value in vars(self).items():
+            if key == "params" or key.startswith("_"):
+                continue
+            if isinstance(value, Configuration):
+                out[key] = value.to_dict()
+                continue
+            try:
+                json.dumps(value)
+            except (TypeError, ValueError):
+                continue
+            out[key] = value
+        return out
+
     def save(self, file: str) -> bool:
-        # TODO: Implement
-        pass
+        """Write the current settings to a JSON file. Returns True on success."""
+        directory = os.path.dirname(os.path.abspath(file))
+        os.makedirs(directory, exist_ok=True)
+        with open(file, "w") as f:
+            json.dump(self.to_dict(), f, indent=4)
+        print(f"Saved parameters to file: {file}")
+        return True
 
 
 class TileConfig(Configuration):
     """Tile rendering configuration."""
-    
+
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
-        
+
         # Width of each surface band as a share of the tile size, measured from the road edge outwards.
         # Each is clamped to 0-0.20. gravel = 1.0 makes the tile empty (all gravel, no road).
         self.gravel: float = self.params.get("gravel", 0.100)  # outermost band, slows and unsettles the car
@@ -83,10 +122,10 @@ class TileConfig(Configuration):
 
 class GridConfig(Configuration):
     """Grid configuration for track layout."""
-    
+
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
-        
+
         # Track area as (columns, rows) of tiles. Normally set through the top-level grid_size.
         self.grid_size: tuple[int, int] = tuple(self.params.get("grid_size", (5, 5)))
         # Side length of one tile in pixels. Normally set through the top-level cell_size.
@@ -94,16 +133,16 @@ class GridConfig(Configuration):
         # Resolution of the surface lookups: 'pixels' reads the exact drawn masks (accurate),
         # 'cell' uses one value per tile (coarser, cheaper)
         self.granularity: str = self.params.get("granularity", "pixels")
-        
+
         self.tile: TileConfig = TileConfig(params=self.params.get("tile", {}))  # band widths, curb and start line (TileConfig)
 
 
 class CarConfig(Configuration):
     """Car/Vehicle physics and control configuration."""
-    
+
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
-        
+
         # Movement physics (px per frame; car scale and tile size decide how fast that feels)
         self.max_linear_velocity: float  = self.params.get("max_linear_velocity", 5.5 * MULTIPLIER)  # top speed on a perfect road
         self.max_angular_velocity: float = self.params.get("max_angular_velocity", 5.0)              # top turn rate (deg/frame)
@@ -202,11 +241,11 @@ class CarConfig(Configuration):
         self.lidar_angles: int = self.params.get("lidar_angles", 8)                  # number of beams, evenly spread around the car
         self.lidar_max_dist: float | None = self.params.get("lidar_max_dist", None)  # beam length in pixels. None = 2.5 tiles
         self.lidar_step: int = self.params.get("lidar_step", 4)                      # ray-march step in pixels: larger is faster but can miss thin walls
-        
+
         # Verbose overlay panels (debug text / race tower): translucent backdrop
         self.overlay_color: tuple[int, int, int] = tuple(self.params.get("overlay_color", (0, 0, 0)))
         self.overlay_alpha: int = int(self.params.get("overlay_alpha", 120))  # 0 = none, 255 = opaque
-        
+
         # Lap counting outside race mode. False: a lap counts when the car enters the start tile (cheap
         # checkpoint rule). True: it only counts when the car overlaps the finish line itself.
         # Race mode uses race.finish_line_laps instead.
@@ -588,10 +627,10 @@ class WindowConfig(Configuration):
 
 class GenConfig(Configuration):
     """Track generation configuration."""
-    
+
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
-        
+
         self.seed: int | None = self.params.get("seed", None)           # None = random track every run, an integer repeats the sequence
         self.max_attempts: int = self.params.get("max_attempts", 1000)  # random tracks tried before giving up
         self.min_tiles: int = self.params.get("min_tiles", 0)           # minimum tiles in the loop (0 = rows + columns)
@@ -599,10 +638,10 @@ class GenConfig(Configuration):
 
 class PlayerConfig(Configuration):
     """Player initialization and behavior configuration."""
-    
+
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
-        
+
         self.lives: int = self.params.get("lives", 10)              # restarts a car gets before it is out for the episode
         self.max_hiatus: int = self.params.get("max_hiatus", 100)   # frames without progress (or on one tile) before a restart
         self.max_frames: int = self.params.get("max_frames", 1000)  # episode length in frames
@@ -660,6 +699,8 @@ class EnvironmentConfig(Configuration):
         self.max_frames: int = self.params.get("max_frames", 1000)
         # Episode ends when any car has completed this many laps.
         self.min_laps: int = self.params.get("min_laps", 3)
+        # Multiplier applied to the state returned by reset() and step().
+        self.state_scale: float = self.params.get("state_scale", 1.0)
         # The episode also ends when every car is out of lives.
 
         # ---- Nested sections ----

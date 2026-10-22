@@ -6,10 +6,15 @@ rainbow and the top 3 are marked with a halo ring instead of a different colour.
 Sprites face up (angle 0 = north), exactly like the old PNGs, and keep the same footprint
 (BASE_SIZE * car_scale) so the physics masks / LiDAR geometry are unchanged.
 """
+from __future__ import annotations
+
 import colorsys
 import pygame
 
 from pygame import Surface
+
+__all__ = ["rainbow", "make_car", "make_halo", "export_car_images", "CAR_COLORS", "HALO_COLORS", "BASE_SIZE"]
+
 
 BASE_SIZE = (38, 76)        # footprint of the original PNGs (w, h) before car_scale
 SUPERSAMPLE = 8             # drawn big, then smooth-scaled down for clean edges at tiny sizes

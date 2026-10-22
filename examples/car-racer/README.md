@@ -32,11 +32,17 @@ while not done:
 - **State** per car: distances and phase to the next tiles, speed, surface under the car, lidar beams. The layout is documented in `Cars.get_state()`.
 - `info` has `completed`, `disqualified` and `time_out`.
 
-Other entry points: `test.py` (race with default config), `race_demo.py` (race with autopilot bots, `--human` to drive with WASD, `--headless` for a benchmark).
+Other entry points: `test.py` (manual drive in race mode), `race_demo.py` (race with autopilot bots, `--human` to drive with WASD, `--headless` for a benchmark).
+
+## Training scripts
+
+`main.py` (feed-forward policy) and `sequential.py` (transformer policy) train with NEAT and then test the best genomes in race mode. Every setting is a module-level global grouped by purpose: run options, environment, population, model, trainer, evaluation, test and files. Edit the globals instead of the code. `--render_mode`, `--load` (`true` for the latest checkpoint, or a file number) and `--train` override the matching globals.
 
 ## Configuration
 
 Every key is optional and every default is described in `game/config.py`. Settings are nested JSON sections: `tile`, `grid`, `car`, `window`, `generation`, `player`, `race`, `reward`. Two ready-made files are in `.config/`: `main.json` (time trial) and `race.json` (race mode).
+
+`state_scale` (top level, default 1.0) multiplies the state returned by `reset()` and `step()`. `config.save("file.json")` writes the current settings, including defaults, to a JSON file.
 
 ### Movement restriction (`car.restrict_movement`)
 
@@ -65,6 +71,8 @@ Each car gets a dense per-frame reward (`reward` section, see `RewardConfig`). I
 2. **Then go fast.** Progress along the centre line is credited up to a target speed. The target looks `lookahead_tiles` ahead, grades each corner and follows a braking profile, so it falls gradually towards a corner and rises again after the apex (`exit_gain`). Going over it costs little at first (`overspeed_tolerance`, quadratic) and more the further over you are. Being far below it costs a little, so crawling does not pay.
 
 Surfaces: the curb is expensive on straights (`curb_straight_mult`) but cheap in corners, where the target speed is raised to what the curb's better handling allows. Grass and gravel cost more the closer a corner is (`offroad_corner_mult`).
+
+The shaping and the curriculum live in `game/reward.py` (`RewardShaper`). Lives, scores and the per-frame fitness live in `game/player.py`.
 
 The phase is controlled by `skill` (0 to 1), measured at every `reset()` from the previous episode: clean tiles per crash, smoothed with `skill_rate`. Set `reward.curriculum` to `false` to use the full reward from the first episode, or `reward.shaping` to `false` for the old flat reward.
 
@@ -106,14 +114,36 @@ If the frame rate is low, set `window.fps` to `null`, keep `window.smooth_scalin
 
 ```
 game/
-  env.py        Game: reset / step / render
-  tile.py       Tile drawing (road, curb, grass, gravel)
-  grid.py       Track generation and surface masks
-  car.py        Physics, sensors, walls, signals, reward shaping (Numba kernels)
-  player.py     Lives, hiatus and per-frame fitness
-  race.py       Starting grid, slipstream, collisions
-  window.py     Window, camera, overlays
-  pixel.py      Pixelization
-  config.py     All settings and their defaults
-.config/        Example JSON configs
+  env.py          Game: Gymnasium reset / step / render, race mode switch
+  config.py       All settings and their defaults (Configuration, to_dict, save)
+  constants.py    Shared constants: colours, dtypes, image path, surface and layer codes
+  functional.py   Enums, type aliases and track-direction helpers
+  util.py         Drawing helpers and small Numba helpers (grid, sign, wrap180)
+  tile.py         Tile drawing (road, curb, grass, gravel)
+  grid.py         Track generation and surface masks
+  car.py          Car state arrays, movement, walls and boundaries, sensors, lap tracking
+  player.py       Lives, hiatus, score and per-frame fitness
+  reward.py       RewardShaper: dense shaping terms and the skill curriculum
+  race.py         Track geometry, starting grid, RaceControl, Slipstream, RandomSlipstream, Autopilot
+  sprite.py       Procedural car sprites and rank halos
+  window.py       Window, camera, input, overlays
+  renderer.py     Drawing of cars, trails, lidar and the HUD
+  pixel.py        Pixelization
+  kernels/        Numba kernels by concern: physics, sensors, tracking, reward, race
+.config/          Example JSON configs
+main.py           NEAT training and testing, feed-forward policy
+sequential.py     NEAT training and testing, transformer policy
+test.py           Manual drive in race mode
+race_demo.py      Race with autopilot bots
 ```
+
+### Reusing the structure in another environment
+
+| Replace | With |
+|---------|------|
+| `car.py` | Your entity state and update loop |
+| `kernels/` | Your Numba or NumPy step functions |
+| `reward.py`, `player.py` | Your reward terms and per-player bookkeeping |
+| `grid.py`, `tile.py`, `race.py` | Your world generation and game-mode rules |
+
+`env.py`, `config.py`, `constants.py`, `util.py`, `window.py` and `renderer.py` keep their roles.

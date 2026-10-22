@@ -1,6 +1,6 @@
 # https://neat-python.readthedocs.io/en/latest/xor_example.html
 
-from SnakeGame import Game
+from game import Game
 from ModifiedNEAT.util.datetime import unix_to_datetime_file
 
 import ModifiedNEAT as neat
