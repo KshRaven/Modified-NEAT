@@ -1,4 +1,3 @@
-
 import pygame
 import math
 
@@ -170,57 +169,76 @@ class Tile:
         
         return base
 
-    def _draw_turn_layer(self, layer: str) -> Surface:
-        """
-        Draw only specified layer for turn segment.
-        """
+    def _arc_ring(self, surface: Surface, color, center: Position, r_in: float, r_out: float,
+                  t0: float = 0.0, t1: float = 90.0) -> None:
+        """Fill a ring segment between two radii. Angle 0 points right, 90 points up (screen space)."""
+        if r_out <= r_in or r_out <= 0:
+            return
+        n = max(8, int(math.radians(t1 - t0) * r_out / 3))
+        ts = [math.radians(t0 + (t1 - t0) * i / n) for i in range(n + 1)]
+        outer = [(center[0] + r_out * math.cos(t), center[1] - r_out * math.sin(t)) for t in ts]
+        inner = [(center[0] + r_in * math.cos(t), center[1] - r_in * math.sin(t)) for t in reversed(ts)]
+        pygame.draw.polygon(surface, color, outer + inner)
+
+    def _pocket(self, color, radius: float) -> Surface:
+        """Inner-corner square (pivot = bottom-left tile corner) filled with `color` except a quarter disc of `radius`."""
+        side = int(math.ceil(self.road_offset))
+        pocket = Surface((self.size, self.size), pygame.SRCALPHA)
+        pygame.draw.rect(pocket, color, pygame.Rect(0, self.size - side, side, side))
+        pygame.draw.circle(pocket, (0, 0, 0, 0), (0, self.size), radius)
+        return pocket
+
+    def _turn_curb_stripes(self, base: Surface) -> None:
+        """Red/white kerb on a turn: straight stripes on the outer arms, radial stripes on both bends."""
+        r, c, ro = self.road_px_half, self.curb_px, self.road_offset
+        h, size, split = self.half_size, self.size, self.curb_px_split
+        if c <= 0:
+            return
+        # Straight stretches (outer side only; the inner side is the bend)
+        for i in range(0, self.curb_pattern_splits_curve, 2):
+            pygame.draw.rect(base, self.curb_white, pygame.Rect(size - ro, h + split * i, c, split))
+            pygame.draw.rect(base, self.curb_white, pygame.Rect(split * i, ro - c, split, c))
+        # Outer bend (pivot: tile centre) and inner bend (pivot: bottom-left tile corner)
+        for pivot, r0, r1, first in (
+            (self.center, r, r + c, 1),
+            ((0, size), ro - c, ro, 0),
+        ):
+            n = max(2, round((math.pi / 2) * (r0 + r1) / 2 / split))
+            for i in range(first, n, 2):
+                self._arc_ring(base, self.curb_white, pivot, r0, r1, 90 * i / n, 90 * (i + 1) / n)
+
+    def _turn_layer_surface(self, layer: str) -> Surface:
+        """One layer of a turn tile, unrotated. Road/curb are real bends; grass/gravel stay square."""
         base = Surface((self.size, self.size), pygame.SRCALPHA)
-        
-        if self.gravel != 1.0:
-            if layer == 'gravel' and self.gravel_px > 0:
+        size, h, ro, c, r = self.size, self.half_size, self.road_offset, self.curb_px, self.road_px_half
+        if self.gravel == 1.0:
+            return base
+        if layer == 'gravel':
+            if self.gravel_px > 0:
                 base.fill(self.gravel_color)
-            elif layer == 'grass':
-                grass_up = pygame.Rect(self.grass_offset, self.grass_offset, self.grass_px_fill, self.grass_curve_offset)
-                grass_left = pygame.Rect(0, self.grass_offset, self.grass_curve_offset, self.grass_px_fill)
-                pygame.draw.rect(base, self.grass_color, grass_up)
-                pygame.draw.rect(base, self.grass_color, grass_left)
-            elif layer == 'curb':
-                curb_main_up = pygame.Rect(self.curb_offset, self.curb_offset, self.curb_px_fill, self.curb_curve_offset)
-                curb_main_left = pygame.Rect(0, self.curb_offset, self.curb_curve_offset, self.curb_px_fill)
-                curb_fill_up = [
-                    pygame.Rect(self.curb_offset, self.half_size + (self.curb_px_split * i), self.curb_px_fill, self.curb_px_split)
-                    for i in range(0, self.curb_pattern_splits_curve, 2)
-                ]
-                curb_fill_left = [
-                    pygame.Rect(self.curb_px_split * i, self.curb_offset, self.curb_px_split, self.curb_px_fill)
-                    for i in range(0, self.curb_pattern_splits_curve, 2)
-                ]
-                curb_fill_arc = [
-                    (self.curb_px_split * i / self.curb_pattern_splits_curve,
-                     self.curb_px_split * (i + 1) / self.curb_pattern_splits_curve)
-                    for i in range(1, self.curb_pattern_splits_curve, 2)
-                ]
-                pygame.draw.rect(base, self.curb_red, curb_main_up)
-                pygame.draw.rect(base, self.curb_red, curb_main_left)
-                for fill in curb_fill_up:
-                    pygame.draw.rect(base, self.curb_white, fill)
-                for fill in curb_fill_left:
-                    pygame.draw.rect(base, self.curb_white, fill)
-                for i, angles in enumerate(curb_fill_arc):
-                    start_angle = -math.radians(90 * i / self.curb_pattern_splits_curve)
-                    end_angle = -math.radians(90 * (i + 1) / self.curb_pattern_splits_curve)
-                    self.draw_sector(base, self.curb_white, self.center, self.road_px_half + self.curb_px, start_angle, end_angle)
-            elif layer == 'road':
-                road_up = pygame.Rect(self.road_offset, self.half_size, self.road_px, self.half_size)
-                road_left = pygame.Rect(0, self.road_offset, self.half_size, self.road_px)
-                pygame.draw.rect(base, self.road_color, road_up)
-                pygame.draw.rect(base, self.road_color, road_left)
-                pygame.draw.circle(base, self.road_color, self.center, self.road_px // 2)
-        
+        elif layer == 'grass':
+            grass_up = pygame.Rect(self.grass_offset, self.grass_offset, self.grass_px_fill, self.grass_curve_offset)
+            grass_left = pygame.Rect(0, self.grass_offset, self.grass_curve_offset, self.grass_px_fill)
+            pygame.draw.rect(base, self.grass_color, grass_up)
+            pygame.draw.rect(base, self.grass_color, grass_left)
+        elif layer == 'curb':
+            pygame.draw.rect(base, self.curb_red, pygame.Rect(ro, h, size - 2 * ro + c, h))              # entry arm, outer side
+            pygame.draw.rect(base, self.curb_red, pygame.Rect(0, ro - c, h, size - 2 * ro + c))          # exit arm, outer side
+            pygame.draw.circle(base, self.curb_red, self.center, r + c)                                  # outer bend
+            base.blit(self._pocket(self.curb_red, ro - c), (0, 0))                                       # inner bend
+            self._turn_curb_stripes(base)
+        elif layer == 'road':
+            pygame.draw.rect(base, self.road_color, pygame.Rect(ro, h, self.road_px, h))
+            pygame.draw.rect(base, self.road_color, pygame.Rect(0, ro, h, self.road_px))
+            pygame.draw.circle(base, self.road_color, self.center, self.road_px // 2)
+            base.blit(self._pocket(self.road_color, ro), (0, 0))                                         # fills the inner corner out to the bend
         if self._horizontal_invert and layer != 'gravel':
             base = pygame.transform.flip(base, True, False)
-        
         return base
+
+    def _draw_turn_layer(self, layer: str) -> Surface:
+        """Draw only the specified layer for a turn segment (used for the surface masks)."""
+        return self._turn_layer_surface(layer)
 
     # ------------------------------------------------------------------
     # Rendering
@@ -373,53 +391,12 @@ class Tile:
         base.fill(self.gravel_color)
 
         if self.gravel != 1.0:
-            road_up = pygame.Rect(self.road_offset, self.half_size, self.road_px, self.half_size)
-            road_left = pygame.Rect(0, self.road_offset, self.half_size, self.road_px)
-            curb_main_up = pygame.Rect(self.curb_offset, self.curb_offset, self.curb_px_fill, self.curb_curve_offset)
-            curb_main_left = pygame.Rect(0, self.curb_offset, self.curb_curve_offset, self.curb_px_fill)
-            curb_fill_up = [
-                pygame.Rect(
-                    self.curb_offset, self.half_size + (self.curb_px_split * i), self.curb_px_fill, self.curb_px_split
-                )
-                for i in range(0, self.curb_pattern_splits_curve, 2)
-            ]
-            curb_fill_left = [
-                pygame.Rect(
-                    self.curb_px_split * i, self.curb_offset, self.curb_px_split, self.curb_px_fill
-                )
-                for i in range(0, self.curb_pattern_splits_curve, 2)
-            ]
-            curb_fill_arc = [
-                (
-                    -math.radians(90 * i / self.curb_pattern_splits_curve),
-                    -math.radians(90 * (i + 1) / self.curb_pattern_splits_curve)
-                )
-                for i in range(1, self.curb_pattern_splits_curve, 2)
-            ]
-            grass_up = pygame.Rect(self.grass_offset, self.grass_offset, self.grass_px_fill, self.grass_curve_offset)
-            grass_left = pygame.Rect(0, self.grass_offset, self.grass_curve_offset, self.grass_px_fill)
-
-            pygame.draw.rect(base, self.grass_color, grass_up)
-            pygame.draw.rect(base, self.grass_color, grass_left)
-            pygame.draw.rect(base, self.curb_red, curb_main_up)
-            pygame.draw.rect(base, self.curb_red, curb_main_left)
-            # pygame.draw.circle(tile, self.curb_red, self.centre, self.road_px // 2 + self.curb_px + 1)
-            for fill in curb_fill_up: pygame.draw.rect(base, self.curb_white, fill)
-            for fill in curb_fill_left: pygame.draw.rect(base, self.curb_white, fill)
-            for angles in curb_fill_arc: self.draw_sector(
-                base, self.curb_white, self.center, self.road_px_half + self.curb_px, *angles
-            )
-            pygame.draw.rect(base, self.road_color, road_up)
-            pygame.draw.rect(base, self.road_color, road_left)
-            pygame.draw.circle(base, self.road_color, self.center, self.road_px // 2)
-
-            if self._horizontal_invert:
-                base = pygame.transform.flip(base, True, False)
-
+            for layer in ('grass', 'curb', 'road'):
+                base.blit(self._turn_layer_surface(layer), (0, 0))
             tile.blit(base, self.position_abs)
 
         return base
-    
+
     def _render_boundary_mask(self) -> Surface:
         """
         Render only the thin 1-pixel boundary to a mask surface (white pixels).

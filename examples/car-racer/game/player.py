@@ -22,10 +22,10 @@ def _update(
     checked: Array, finished: Array, out_of_bounds: Array, hiatus: Array,
     moved_forward: Array, tile_stag: Array, vel_norm: Array, shape_pos: Array, shape_neg: Array,
     corner_tile_curr: Array, straight_tile_curr: Array,
-    on_road: Array, turn_steps: Array, straight_steps: Array,
+    on_road: Array,
     # scalars
-    lives_total: int, max_hiatus: int, min_turn_steps: int, min_straight_steps: int,
-    shaping: bool, crash_penalty: float, reward_offset: float,
+    lives_total: int, max_hiatus: int,
+    shaping: bool, crash_penalty: float, crash_speed_k: float, crash_scale: float, reward_offset: float,
 ):
     """
     Per-player lifecycle / fitness update.
@@ -104,15 +104,8 @@ def _update(
             if on_road[t]: fitness[t] += 5.0 * _lives
             else:          fitness[t] -= 2.0 * _deaths
 
-        # -- 4e. Turning into corners ----------------------------------------
-        if corner_tile_curr[t]:
-            if turn_steps[t] == 1:              fitness[t] += 300.0 * _lives
-            if turn_steps[t] == min_turn_steps: fitness[t] += 300.0 * _lives
-
-        # -- 4.  Straight tile alignment reward ------------------------------
-        if straight_tile_curr[t]:
-            if straight_steps[t] == 1:                  fitness[t] += 400.0 * _lives
-            if straight_steps[t] == min_straight_steps: fitness[t] += 400.0 * _lives
+        # (Removed: fixed one-off bonuses for "turn steps" / "straight steps". They paid out regardless of
+        #  speed, which pushed cars to crawl through corners; the dense shaping now covers all of it.)
 
         # -- 4g. Checkpoint and lap rewards ----------------------------------
         #   Corner checkpoints are worth 20% more than straight ones.
@@ -124,8 +117,9 @@ def _update(
         # -- 4h. Elimination (death) one-off penalty -------------------------
         if elim:
             if shaping:
-                # Heavier the faster the car was going: botching a corner must never beat slowing down
-                fitness[t] -= crash_penalty * (1.0 + abs(vel_norm[t])) * _deaths
+                # Heavier the faster the car was going (mildly, so it does not teach crawling); crash_scale is
+                # boosted by the curriculum while the population is still learning to stay on the track
+                fitness[t] -= crash_penalty * crash_scale * (1.0 + crash_speed_k * abs(vel_norm[t])) * _deaths
             else:
                 if straight_tile_curr[t]: fitness[t] -= 30.0 * _deaths
                 if corner_tile_curr[t]:   fitness[t] -= 30.0 * _deaths
@@ -247,6 +241,7 @@ class Players:
         verbose=False,
         shape_pos: Array | None = None,   # float (N,) dense positive shaping (weights, pre-scaling)
         shape_neg: Array | None = None,   # float (N,) dense negative shaping
+        crash_scale: float = 1.0,         # curriculum multiplier on the crash penalty
     ):
         # NOTE: ``corner_tile_next, vel_norm, phase_align, turning, braking, brake_steps,
         #       min_brake_steps, brake_check, straight_aligned, turn_align,
@@ -263,9 +258,10 @@ class Players:
             checked, finished, out_of_bounds, hiatus, moved_forward, tile_stag,
             vel_norm, shape_pos, shape_neg,
             corner_tile_curr, straight_tile_curr,
-            on_road, turn_steps, straight_steps,
-            self.lives_total, self.max_hiatus, int(min_turn_steps), int(min_straight_steps),
-            bool(self.reward.shaping), float(self.reward.crash_penalty), float(self.reward_offset),
+            on_road,
+            self.lives_total, self.max_hiatus,
+            bool(self.reward.shaping), float(self.reward.crash_penalty), float(self.reward.crash_speed_k),
+            float(crash_scale), float(self.reward_offset),
         )
 
         # # ------------------------------------------------------------------

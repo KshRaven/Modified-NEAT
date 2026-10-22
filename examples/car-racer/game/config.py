@@ -10,6 +10,15 @@ from .constants import (
 )
 
 MULTIPLIER = 3.0
+RESTRICT_DEFAULT = 2
+RESTRICT_MAX = 5
+
+
+def normalize_restrict_movement(value: "bool | int | None") -> int:
+    """True -> default level (2), False -> 0 (free movement), ints are clamped to [0, 5]."""
+    if value is None: return RESTRICT_DEFAULT
+    if isinstance(value, bool): return RESTRICT_DEFAULT if value else 0
+    return min(max(int(value), 0), RESTRICT_MAX)
 
 
 class Configuration:
@@ -51,20 +60,25 @@ class TileConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
         
-        # Surface ratios
-        self.gravel: float = self.params.get("gravel", 0.100)
-        self.grass: float = self.params.get("grass", 0.100)
-        self.curb: float = self.params.get("curb", 0.075)
+        # Width of each surface band as a share of the tile size, measured from the road edge outwards.
+        # Each is clamped to 0-0.20. gravel = 1.0 makes the tile empty (all gravel, no road).
+        self.gravel: float = self.params.get("gravel", 0.100)  # outermost band, slows and unsettles the car
+        self.grass: float  = self.params.get("grass",  0.100)  # band between curb and gravel
+        self.curb: float   = self.params.get("curb",   0.075)  # red/white band right next to the road
+
+        # Number of red/white stripes along one tile edge (rounded up to an even number)
         self.curb_pattern_splits: int = abs(int(self.params.get("curb_pattern_splits", 8)))
+        # Side of one checker square on the start line, in pixels. None = road width / 8 (at least 3)
         self.start_checker_size: int | None = self.params.get("start_checker_size", None)
+        # Distance of the finish line from the tile edge, as a share of the tile size
         self.finish_line_back_offset_ratio: float = self.params.get("finish_line_back_offset_ratio", 0.10)
-        
-        # Surface colors
-        self.road_color: tuple[int, int, int] = tuple(self.params.get("road_color", COLOR_ROAD))
-        self.grass_color: tuple[int, int, int] = tuple(self.params.get("grass_color", COLOR_GRASS))
-        self.curb_red: tuple[int, int, int] = tuple(self.params.get("curb_red", COLOR_CURB_PRI))
-        self.curb_white: tuple[int, int, int] = tuple(self.params.get("curb_white", COLOR_CURB_SEC))
-        self.gravel_color: tuple[int, int, int] = tuple(self.params.get("gravel_color", COLOR_GRAVEL))
+
+        # Surface colours as (R, G, B)
+        self.road_color: tuple[int, int, int]   = tuple(self.params.get("road_color",   COLOR_ROAD))
+        self.grass_color: tuple[int, int, int]  = tuple(self.params.get("grass_color",  COLOR_GRASS))     # grass band
+        self.curb_red: tuple[int, int, int]     = tuple(self.params.get("curb_red",     COLOR_CURB_PRI))  # curb stripe 1
+        self.curb_white: tuple[int, int, int]   = tuple(self.params.get("curb_white",   COLOR_CURB_SEC))  # curb stripe 2
+        self.gravel_color: tuple[int, int, int] = tuple(self.params.get("gravel_color", COLOR_GRAVEL))    # gravel band
 
 
 class GridConfig(Configuration):
@@ -73,11 +87,15 @@ class GridConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
         
+        # Track area as (columns, rows) of tiles. Normally set through the top-level grid_size.
         self.grid_size: tuple[int, int] = tuple(self.params.get("grid_size", (5, 5)))
+        # Side length of one tile in pixels. Normally set through the top-level cell_size.
         self.cell_size: int = self.params.get("cell_size", 100 * MULTIPLIER)
-        self.granularity: str = self.params.get("granularity", "pixels")  # 'pixels' or 'cell'
+        # Resolution of the surface lookups: 'pixels' reads the exact drawn masks (accurate),
+        # 'cell' uses one value per tile (coarser, cheaper)
+        self.granularity: str = self.params.get("granularity", "pixels")
         
-        self.tile: TileConfig = TileConfig(params=self.params.get("tile", {}))
+        self.tile: TileConfig = TileConfig(params=self.params.get("tile", {}))  # band widths, curb and start line (TileConfig)
 
 
 class CarConfig(Configuration):
@@ -86,65 +104,87 @@ class CarConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
         
-        # Movement physics
-        self.max_linear_velocity: float  = self.params.get("max_linear_velocity", 5.5 * MULTIPLIER)
-        self.max_angular_velocity: float = self.params.get("max_angular_velocity", 5.0)
-        self.linear_acceleration: float  = self.params.get("linear_acceleration", 0.1 * MULTIPLIER)
-        self.angular_acceleration: float = self.params.get("angular_acceleration", 1.0)
-        
-        # Control coefficients
-        self.reverse_coeff: float = self.params.get("reverse_coeff", 0.50) # TODO: Label these
-        self.brake_coeff: float   = self.params.get("brake_coeff",   1.50)
-        self.checker_coeff: float = self.params.get("checker_coeff", 1.00)
-        
-        # Visual/behavioral
-        self.scale: float = self.params.get("car_scale", 0.20 * MULTIPLIER)
-        # Visual front-wheel steering (degrees): full lock at standstill, smaller lock at top speed,
-        # rendered in steps of wheel_angle_step (sprite cache granularity)
+        # Movement physics (px per frame; car scale and tile size decide how fast that feels)
+        self.max_linear_velocity: float  = self.params.get("max_linear_velocity", 5.5 * MULTIPLIER)  # top speed on a perfect road
+        self.max_angular_velocity: float = self.params.get("max_angular_velocity", 5.0)              # top turn rate (deg/frame)
+        self.linear_acceleration: float  = self.params.get("linear_acceleration", 0.1 * MULTIPLIER)  # speed gained per frame at full throttle
+        self.angular_acceleration: float = self.params.get("angular_acceleration", 1.0)              # turn rate gained per frame at full lock
+
+        # Control coefficients (multiples of linear_acceleration)
+        self.reverse_coeff: float = self.params.get("reverse_coeff", 0.50)  # reverse gear strength, also scales reverse speed
+        self.brake_coeff: float   = self.params.get("brake_coeff",   1.50)  # braking strength while moving forward
+        self.checker_coeff: float = self.params.get("checker_coeff", 1.00)  # extra steering bite when counter-steering against the current turn
+
+        # Visuals
+        self.scale: float = self.params.get("car_scale", 0.20 * MULTIPLIER)  # sprite size multiplier, also sets the collision footprint
+        # Front-wheel steering angle (deg): full lock at standstill, smaller lock at top speed. Visual only.
         self.wheel_lock_low_speed: float = self.params.get("wheel_lock_low_speed", 50.0)
-        self.wheel_lock_top_speed: float = self.params.get("wheel_lock_top_speed", 30.0)
-        self.wheel_angle_step: float = self.params.get("wheel_angle_step", 5.0)
-        self.state_tiles: int = self.params.get("state_tiles", 1) # 3)  # Tiles used in state distance/phase features (min 1)
-        self.use_surface: bool = self.params.get("use_surface", True)  # Surface code under the car centre
-        self.use_lidar: bool = self.params.get("use_lidar", True)
-        self.use_tile_lidar: bool = self.params.get("use_tile_lidar", True)  # 4 beams (every 90 deg) to the current tile boundary # TODO: Add to rendering for verbose debugging but differentiate from other lidar
-        
+        self.wheel_lock_top_speed: float = self.params.get("wheel_lock_top_speed", 30.0)  # lock at top speed
+        self.wheel_angle_step: float = self.params.get("wheel_angle_step", 5.0)           # wheel angles are drawn in steps of this size (sprite cache)
+
+        # Observation / sensors
+        self.state_tiles: int = self.params.get("state_tiles", 3)            # tiles ahead used by the distance/phase features (min 1)
+        self.use_surface: bool = self.params.get("use_surface", True)        # include the surface code under the car centre
+        self.use_lidar: bool = self.params.get("use_lidar", True)            # include the lidar beams
+        self.use_tile_lidar: bool = self.params.get("use_tile_lidar", True)  # include 4 beams (every 90 deg) to the current tile boundary
+
         # Control settings
-        self.toggle_reverse: bool = self.params.get("toggle_reverse", False)
-        self.restrict_movement: bool | int = self.params.get("restrict_movement", True)
-        self.discrete: bool = self.params.get("discrete", False)
+        self.toggle_reverse: bool = self.params.get("toggle_reverse", True)  # allow reversing (always on in race mode)
+        # Movement restriction (bool | int; True -> 2, False -> 0):
+        #   0  free movement, no restarts for position (testing and sensor checks only)
+        #   1  solid walls at the track edge and around non-adjacent tiles; the previous tile stays open, so
+        #      a car may reverse into it but is restarted once max_hiatus runs out
+        #   2  as 1, and the previous tile is walled off too (default)
+        #   3  no walls: leaving the track or entering a wrong tile restarts the car
+        #   4  as 3, plus approach-angle limit (max_approach_angle) and no reversing
+        #   5  as 4, plus leaving road and curb (gravel or grass) restarts the car
+        self.restrict_movement: int = normalize_restrict_movement(self.params.get("restrict_movement", RESTRICT_DEFAULT))
+        # Level 4+: max angle (deg) between the car heading and the tile direction before it counts as not moving forward
+        self.max_approach_angle: float = float(self.params.get("max_approach_angle", 135.0))
+        # Level 1-2 walls: a hit slides the car along the wall in the direction it was heading (a glancing hit
+        # keeps most of its speed, a head-on hit stops it). wall_damping is the share of speed kept each frame
+        # on top of that while scraping (1 = no scrape friction, 0 = a dead stop on contact).
+        self.wall_damping: float = min(max(float(self.params.get("wall_damping", 0.9)), 0.0), 1.0)
+        # While sliding, the nose turns towards the wall direction by this share of the angle error per frame
+        # (0 = heading untouched, 1 = snaps parallel). Lets a car that hit the wall point along it and steer back.
+        self.wall_align: float = min(max(float(self.params.get("wall_align", 0.25)), 0.0), 1.0)
+        self.discrete: bool = self.params.get("discrete", False)  # discrete actions: not implemented, True raises NotImplementedError
+        # True: a restarted car goes back to the start tile. False: it respawns on the tile it was on.
         self.full_restart: bool = self.params.get("full_restart", False)
-        
-        # Thresholds and limits
-        self.min_brake_steps: int = self.params.get("min_brake_steps", 3) # TODO: Could move some of these to reward config
-        self.min_straight_steps: int = self.params.get("min_straight_steps", 5)
-        self.straight_alignment_tolerance: float = self.params.get("straight_alignment_tolerance", 10.0)
-        self.cutoff: float = self.params.get("cutoff", 0.5)
-        self.frames_per_tile: int = self.params.get("frames_per_tile", 100)
-        
+
+        # Unused here: the race starting grid reads race.start_grid.max_grid_tiles instead
+        self.max_grid_tiles: int = self.params.get("max_grid_tiles", 3)
+
+        # Legacy thresholds. The time-trial reward (RewardConfig) no longer pays for turn / straight / brake steps
+        self.min_brake_steps: int = self.params.get("min_brake_steps", 3)                                 # unused by the reward now (kept for old configs)
+        self.min_straight_steps: int = self.params.get("min_straight_steps", 5)                           # unused by the reward now (kept for old configs)
+        self.straight_alignment_tolerance: float = self.params.get("straight_alignment_tolerance", 10.0)  # angle (deg) off the track direction that counts as aligned (signal only, not rewarded)
+        self.cutoff: float = self.params.get("cutoff", 0.5)                                               # reserved, currently not read by the physics or reward code
+        self.frames_per_tile: int = self.params.get("frames_per_tile", 100)                               # reserved, currently not read by the physics or reward code
+
         # Surface traction: scales the engine / brake force AND the top speed reachable on that surface
         # (1.0 = full). It never decays the velocity itself: a car that is over the surface's top speed
         # sheds the excess at engine-brake rate, and a coasting car keeps its momentum.
-        self.friction_road:   float = self.params.get("friction_road",   1.00)
-        self.friction_curb:   float = self.params.get("friction_curb",   0.98)
-        self.friction_grass:  float = self.params.get("friction_grass",  0.96)
-        self.friction_gravel: float = self.params.get("friction_gravel", 0.94)
+        self.friction_road:   float = self.params.get("friction_road",   1.00)  # road: the reference
+        self.friction_curb:   float = self.params.get("friction_curb",   0.98)  # curb traction
+        self.friction_grass:  float = self.params.get("friction_grass",  0.96)  # grass traction
+        self.friction_gravel: float = self.params.get("friction_gravel", 0.94)  # gravel traction
 
         # Surface handling: steering authority (yaw acceleration AND max yaw rate). > 1 = the body rotates
         # more eagerly. Rotation is not the same as turning: how much the car's path follows its nose is
         # decided by slip below.
-        self.handling_road:   float = self.params.get("handling_road",   1.00)
-        self.handling_curb:   float = self.params.get("handling_curb",   1.25)
-        self.handling_grass:  float = self.params.get("handling_grass",  1.50)
-        self.handling_gravel: float = self.params.get("handling_gravel", 1.50)
+        self.handling_road:   float = self.params.get("handling_road",   1.00)  # road: the reference
+        self.handling_curb:   float = self.params.get("handling_curb",   1.25)  # curb: sharper than road, the reason to clip an apex
+        self.handling_grass:  float = self.params.get("handling_grass",  1.50)  # grass: eager nose, but see slip
+        self.handling_gravel: float = self.params.get("handling_gravel", 1.50)  # gravel: eager nose, but see slip
 
         # Surface slip: how much of last frame's velocity vector survives into this frame (0 = the path
         # follows the nose instantly, 1 = it ignores the nose). It is a blend, never an addition, so it
         # cannot add speed. The effect is scaled by speed, so it vanishes when the car is nearly stopped.
-        self.slip_road:   float = self.params.get("slip_road",   0.05)
-        self.slip_curb:   float = self.params.get("slip_curb",   0.10)
-        self.slip_grass:  float = self.params.get("slip_grass",  0.45)
-        self.slip_gravel: float = self.params.get("slip_gravel", 0.50)
+        self.slip_road:   float = self.params.get("slip_road",   0.05)  # road: tightest grip
+        self.slip_curb:   float = self.params.get("slip_curb",   0.10)  # curb: slightly looser than road
+        self.slip_grass:  float = self.params.get("slip_grass",  0.45)  # grass: the path barely follows the nose
+        self.slip_gravel: float = self.params.get("slip_gravel", 0.50)  # gravel: worst grip
 
         # Lateral grip: the sideways acceleration (px/frame^2) the tyres hold on a perfect road, reduced by the
         # surface's slip. The car's PATH can only turn towards its nose at grip / speed radians per frame, so
@@ -159,9 +199,9 @@ class CarConfig(Configuration):
         self.gravel_noise: float = self.params.get("gravel_noise", 2.0)
 
         # LiDAR configuration
-        self.lidar_angles: int = self.params.get("lidar_angles", 4) # TODO: describe these
-        self.lidar_max_dist: float | None = self.params.get("lidar_max_dist", None)  # If None, uses grid.cell_size * 2.5
-        self.lidar_step: int = self.params.get("lidar_step", 4)
+        self.lidar_angles: int = self.params.get("lidar_angles", 8)                  # number of beams, evenly spread around the car
+        self.lidar_max_dist: float | None = self.params.get("lidar_max_dist", None)  # beam length in pixels. None = 2.5 tiles
+        self.lidar_step: int = self.params.get("lidar_step", 4)                      # ray-march step in pixels: larger is faster but can miss thin walls
         
         # Verbose overlay panels (debug text / race tower): translucent backdrop
         self.overlay_color: tuple[int, int, int] = tuple(self.params.get("overlay_color", (0, 0, 0)))
@@ -172,7 +212,7 @@ class CarConfig(Configuration):
         # Race mode uses race.finish_line_laps instead.
         self.finish_line_laps: bool = self.params.get("finish_line_laps", False)
 
-        # Additional behavior flags
+        # True: finished cars keep driving and only crashed cars restart. False: finished cars restart too.
         self.endless: bool = self.params.get("endless", True)
 
 
@@ -211,7 +251,7 @@ class SlipstreamConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
 
-        self.enabled: bool = self.params.get("enabled", True)
+        self.enabled: bool = self.params.get("enabled", True)  # cone-based drafting between cars in race mode
         # Wake length in car lengths (distance from the leader's centre)
         self.range_cars: float = self.params.get("range_cars", 8.0)
         # Half-angle (deg) of the wake cone seen from the follower; the closer to the
@@ -223,46 +263,56 @@ class SlipstreamConfig(Configuration):
         self.min_leader_speed: float = self.params.get("min_leader_speed", 0.30)
         # Falloff exponents (1 = linear)
         self.distance_falloff: float = self.params.get("distance_falloff", 1.0)
-        self.angle_falloff: float = self.params.get("angle_falloff", 1.5)
+        self.angle_falloff: float = self.params.get("angle_falloff", 1.5)  # weight across the cone (1 = linear, higher = only dead-ahead counts)
         # Extra acceleration at full draft, as a multiple of linear_acceleration (throttle on)
         self.push: float = self.params.get("push", 0.40)
         # Extra top speed at full draft, as a fraction of max_linear_velocity
         self.top_speed_bonus: float = self.params.get("top_speed_bonus", 0.25)
         # Per-frame blend rates: the tow builds up gradually and bleeds away once you leave it
         self.ramp: float = self.params.get("ramp", 0.12)
-        self.decay: float = self.params.get("decay", 0.04)
+        self.decay: float = self.params.get("decay", 0.02)  # rate at which the tow fades after leaving the wake
+        # --- Random training slipstream (works in and out of race mode) ---
+        # Each car gets `random_events` tows per life: when it reaches a randomly chosen tile (random_min_tiles..
+        # random_max_tiles ahead) it is towed for `random_frames` frames. The draft is blended with ramp/decay and
+        # max_linear_velocity itself never changes, so observed speed goes above 1.0 (up to 1 + top_speed_bonus).
+        self.random_enabled: bool = self.params.get("random_enabled", False)
+        self.random_frames: int = max(1, int(self.params.get("random_frames", 60)))                 # frames one random tow lasts
+        self.random_events: int = max(1, int(self.params.get("random_events", 5)))                  # random tows per life
+        self.random_min_tiles: int = max(1, int(self.params.get("random_min_tiles", 2)))            # earliest tow start, tiles ahead
+        self.random_max_tiles: int = max(self.random_min_tiles, int(self.params.get("random_max_tiles", 8)))  # latest tow start, tiles ahead
+        self.random_level: float = min(max(float(self.params.get("random_level", 1.0)), 0.0), 1.0)  # tow strength 0-1 (1 = full draft)
         # --- Rendering ---
         # Draw particles/dots (True) instead of a continuous curved line (False)
         # Trail style: "line" (continuous curved streak), "particles" (dots) or "flame" (layered glow)
-        legacy = "particles" if self.params.get("particles", False) else ("flame" if self.params.get("flame", False) else "line")
-        self.trail_type: str = str(self.params.get("trail_type", legacy)).lower()
+        legacy = "particles" if self.params.get("particles", False) else ("flame" if self.params.get("flame", True) else "line")
+        self.trail_type: str = str(self.params.get("trail_type", legacy)).lower()  # "line", "particles" or "flame"
         if self.trail_type not in ("line", "particles", "flame"):
             raise ValueError(f"slipstream.trail_type must be 'line', 'particles' or 'flame', got {self.trail_type!r}")
-        self.particles: bool = self.trail_type == "particles"   # kept for existing call sites
+        self.particles: bool = self.trail_type == "particles"  # kept for existing call sites
         self.flame: bool = self.trail_type == "flame"
         # Number of past frames remembered per car; the drawn streak is (draft level * this) long
-        self.trail_length: int = max(2, int(self.params.get("trail_length", 20)))
+        self.trail_length: int = max(2, int(self.params.get("trail_length", 20 * MULTIPLIER)))
         # Colour while the tow is building up / holding, and while it is wearing off
         self.color_gain: tuple[int, int, int] = tuple(self.params.get("color_gain", (140, 215, 255)))
-        self.color_decay: tuple[int, int, int] = tuple(self.params.get("color_decay", (255, 140, 40)))
+        self.color_decay: tuple[int, int, int] = tuple(self.params.get("color_decay", (255, 140, 40)))  # streak colour while the tow fades
         # Streak lateral offset from the car centre, as a fraction of the car width
         self.side_offset: float = self.params.get("side_offset", 0.35)
         # Particle spacing in trail frames, and random sideways spread (px) at the tail end
         self.particle_step: int = max(1, int(self.params.get("particle_step", 2)))
-        self.particle_spread: float = self.params.get("particle_spread", 3.0)
+        self.particle_spread: float = self.params.get("particle_spread", 3.0)  # sideways scatter at the tail, px
         # --- Trail opacity (every trail_type) ---
         # Opacity is alpha_head at the car and fades linearly to a tail opacity at the far end. That tail
         # opacity depends on how long the streak currently is relative to trail_length: a short streak
         # ends at alpha_tail_short, a streak of maximum length ends at alpha_tail_long.
         self.alpha_head: float = min(max(self.params.get("alpha_head", 1.0), 0.0), 1.0)
-        self.alpha_tail_short: float = min(max(self.params.get("alpha_tail_short", 0.80), 0.0), 1.0)
-        self.alpha_tail_long: float = min(max(self.params.get("alpha_tail_long", 0.05), 0.0), 1.0)
+        self.alpha_tail_short: float = min(max(self.params.get("alpha_tail_short", 0.80), 0.0), 1.0)  # tail opacity of a short streak
+        self.alpha_tail_long: float = min(max(self.params.get("alpha_tail_long", 0.05), 0.0), 1.0)    # tail opacity of a full-length streak
         # --- Flame trail (trail_type = "flame"): layered ribbons, hot core -> cooler glow ---
         self.flame_layers: int = max(1, int(self.params.get("flame_layers", 3)))
-        self.flame_width: float = max(1.0, self.params.get("flame_width", 6.0))    # outer layer width (px) at the car
-        self.flame_taper: float = min(max(self.params.get("flame_taper", 0.6), 0.0), 0.95)  # width lost by the tail
-        self.flame_flicker: float = min(max(self.params.get("flame_flicker", 0.25), 0.0), 1.0)
-        self.flame_hot: tuple[int, int, int] = tuple(self.params.get("flame_hot", (255, 245, 210)))
+        self.flame_width: float = max(1.0, self.params.get("flame_width", 4.0 * MULTIPLIER))         # outer layer width (px) at the car
+        self.flame_taper: float = min(max(self.params.get("flame_taper", 0.6), 0.0), 0.95)           # width lost by the tail
+        self.flame_flicker: float = min(max(self.params.get("flame_flicker", 0.25), 0.0), 1.0)       # random width / brightness jitter, 0-1
+        self.flame_hot: tuple[int, int, int] = tuple(self.params.get("flame_hot", (255, 245, 210)))  # core colour of the flame
 
 
 class CollisionConfig(Configuration):
@@ -271,7 +321,7 @@ class CollisionConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
 
-        self.enabled: bool = self.params.get("enabled", True)
+        self.enabled: bool = self.params.get("enabled", True)  # car-to-car contact in race mode
         # Circle radius as a fraction of the car width
         self.radius_scale: float = self.params.get("radius_scale", 0.55)
         # Bounciness along the contact normal (0 = no rebound)
@@ -284,7 +334,7 @@ class CollisionConfig(Configuration):
         self.lateral_transfer: float = self.params.get("lateral_transfer", 0.6)
         # Yaw kick from off-centre hits (deg/frame per unit of impulse) and its cap
         self.spin: float = self.params.get("spin", 0.8)
-        self.max_spin: float = self.params.get("max_spin", 2.0)
+        self.max_spin: float = self.params.get("max_spin", 2.0)  # cap on the yaw kick, deg/frame
         # A hit never slows a moving car below this fraction of max speed. Players.update()
         # costs a life for every standstill frame, so races must not stall on contact.
         self.min_speed: float = self.params.get("min_speed", 0.08)
@@ -296,12 +346,12 @@ class CountdownConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
 
-        self.enabled: bool = self.params.get("enabled", True)
-        self.steps: int = max(1, int(self.params.get("steps", 3)))
-        self.step_seconds: float = self.params.get("step_seconds", 0.9)
-        self.go_seconds: float = self.params.get("go_seconds", 0.7)
-        self.text_go: str = self.params.get("text_go", "GO!")
-        self.dim: int = self.params.get("dim", 110)  # backdrop darkness 0-255
+        self.enabled: bool = self.params.get("enabled", True)            # show the countdown before the race
+        self.steps: int = max(1, int(self.params.get("steps", 3)))       # numbers counted down (3 -> 3, 2, 1, GO!)
+        self.step_seconds: float = self.params.get("step_seconds", 0.9)  # seconds per number
+        self.go_seconds: float = self.params.get("go_seconds", 0.7)      # seconds the GO! text stays up
+        self.text_go: str = self.params.get("text_go", "GO!")            # text shown at the start
+        self.dim: int = self.params.get("dim", 110)                      # backdrop darkness, 0-255
 
 
 class RaceConfig(Configuration):
@@ -310,14 +360,14 @@ class RaceConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
 
-        self.enabled: bool = self.params.get("enabled", False)
+        self.enabled: bool = self.params.get("enabled", False)  # race mode on/off (also Game.race_mode())
         # Default number of racers when reset() is not given an explicit count
         self.racers: int | None = self.params.get("racers", None)
         # Realistic cap so the grid is never wall-to-wall cars
         self.max_racers: int = self.params.get("max_racers", 12)
         # When True (and race mode is on) LiDAR beams also detect other active cars, treated
         # like the curb / boundaries: a beam stops at the first car it hits.
-        self.lidar_detect_cars: bool = self.params.get("lidar_detect_cars", False)
+        self.lidar_detect_cars: bool = self.params.get("lidar_detect_cars", True)
         # True: in a race a lap only counts when the car crosses the finish line. False: it counts as soon
         # as the car enters the start tile (the cheaper checkpoint rule used in time-trial training).
         self.finish_line_laps: bool = self.params.get("finish_line_laps", True)
@@ -325,19 +375,26 @@ class RaceConfig(Configuration):
         # after the last lap (or earlier if no car is still racing). Cars that finish stop accelerating
         # (they can still steer) and roll at a crawl. The number of laps is env `min_laps`.
         self.finish_top_n: int = max(1, int(self.params.get("finish_top_n", 3)))
-        self.finish_grace_seconds: float = max(0.0, self.params.get("finish_grace_seconds", 10.0))
+        self.finish_grace_seconds: float = max(0.0, self.params.get("finish_grace_seconds", 10.0))  # seconds the race stays open after the leaders finish
         # Frames per second of race time. Only used to turn finish_grace_seconds into simulation frames,
         # so the grace period does not depend on how fast the window actually runs.
         self.sim_fps: int = max(1, int(self.params.get("sim_fps", 60)))
 
-        self.start_grid: StartGridConfig = StartGridConfig(params=self.params.get("start_grid", {}))
-        self.slipstream: SlipstreamConfig = SlipstreamConfig(params=self.params.get("slipstream", {}))
-        self.collision: CollisionConfig = CollisionConfig(params=self.params.get("collision", {}))
-        self.countdown: CountdownConfig = CountdownConfig(params=self.params.get("countdown", {}))
+        self.start_grid: StartGridConfig = StartGridConfig(params=self.params.get("start_grid", {}))    # starting-grid layout (StartGridConfig)
+        self.slipstream: SlipstreamConfig = SlipstreamConfig(params=self.params.get("slipstream", {}))  # drafting and trails (SlipstreamConfig)
+        self.collision: CollisionConfig = CollisionConfig(params=self.params.get("collision", {}))      # car-to-car contact (CollisionConfig)
+        self.countdown: CountdownConfig = CountdownConfig(params=self.params.get("countdown", {}))      # start lights and numbers (CountdownConfig)
 
 
 class RewardConfig(Configuration):
-    """Time-trial reward shaping (all weights are per frame unless stated, before the lives/deaths scaling)."""
+    """
+    Time-trial reward shaping. All weights are per frame unless stated, before the lives / deaths scaling.
+
+    The reward has two phases, blended by a `skill` value measured from the previous episode:
+      * survive first: stay on the track, loose surfaces and crashes are expensive, speed is not regulated
+      * then go fast: progress is credited up to a look-ahead target speed that falls smoothly towards
+        corners (road and curb), with soft overspeed and anti-crawl terms.
+    """
 
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
@@ -346,13 +403,13 @@ class RewardConfig(Configuration):
         self.shaping: bool = self.params.get("shaping", True)
 
         # --- Progress / time ---
-        # Reward for driving along the centre line: a full tile of progress is worth this much.
         # Final scaling of the per-frame reward handed to the learner (Players.get_reward). The raw fitness
         # keeps the big weights below; this keeps what the learner sees (and its sum) at a sane size.
         self.reward_scale: float = self.params.get("reward_scale", 1.0e-3)
         # Flat amount added to every living player's raw reward each frame (raw units, before the scale).
         # Negative = a standing cost, positive = a survival bonus, 0 = off.
         self.reward_offset: float = self.params.get("reward_offset", 200.0)
+        # Reward for driving along the centre line: a full tile of progress is worth this much
         self.progress_weight: float = self.params.get("progress_weight", 2000.0)
         # Constant cost per frame so standing still / crawling is never neutral
         self.time_penalty: float = self.params.get("time_penalty", 4.0)
@@ -361,21 +418,21 @@ class RewardConfig(Configuration):
 
         # --- Look-ahead target speed (corner anticipation) ---
         # Tiles ahead inspected for corners. Keep it in line with how far the observation sees.
-        self.lookahead_tiles: int = max(1, min(int(self.params.get("lookahead_tiles", 2)), 8))
+        self.lookahead_tiles: int = max(1, min(int(self.params.get("lookahead_tiles", 3)), 8))
         # Tiles grouped into one corner. 2 lets a pair of opposite bends (S) cancel out into a
         # diagonal, while two same-direction bends read as a U-turn.
         self.corner_window: int = max(1, min(int(self.params.get("corner_window", 2)), 4))
         # Speed (fraction of max speed) a 90 degree corner can be taken at. None = derived from the
         # physics: corner_safety * max_angular_velocity * (corner_line_radius * tile_size / 2)
         self.corner_speed_ratio: float | None = self.params.get("corner_speed_ratio", None)
-        self.corner_line_radius: float = self.params.get("corner_line_radius", 1.3)  # racing line vs centre line
-        self.corner_safety: float = self.params.get("corner_safety", 0.85)
+        self.corner_line_radius: float = self.params.get("corner_line_radius", 1.3)  # racing line radius vs the centre line
+        self.corner_safety: float = self.params.get("corner_safety", 0.95)           # safety factor on the physics-derived corner speed
         # A U-turn (two same-direction bends) is taken this much slower than a single 90 degree bend
-        self.uturn_ratio: float = self.params.get("uturn_ratio", 0.85)
+        self.uturn_ratio: float = self.params.get("uturn_ratio", 0.9)
         # Share of the car's full braking power assumed when planning the slow-down
-        self.braking_margin: float = self.params.get("braking_margin", 0.8)
+        self.braking_margin: float = self.params.get("braking_margin", 0.85)
         # Progress is only credited up to the target speed; beyond it this is charged per unit of excess
-        self.overspeed_weight: float = self.params.get("overspeed_weight", 600.0)
+        self.overspeed_weight: float = self.params.get("overspeed_weight", 500.0)
 
         # --- Smoothness on straights ---
         self.steer_weight: float = self.params.get("steer_weight", 40.0)    # |steering| while no corner is near
@@ -383,18 +440,51 @@ class RewardConfig(Configuration):
 
         # --- Surfaces ---
         # Curbs are cheap (cheaper still on corner tiles) so clipping an apex can pay off
-        self.curb_weight: float = self.params.get("curb_weight", 12.0)
-        self.curb_corner_discount: float = self.params.get("curb_corner_discount", 0.7)
-        self.grass_weight: float = self.params.get("grass_weight", 250.0)
-        self.gravel_weight: float = self.params.get("gravel_weight", 300.0)
+        self.curb_weight: float = self.params.get("curb_weight", 10.0)
+        self.curb_corner_discount: float = self.params.get("curb_corner_discount", 0.7)  # share of the curb cost removed on corner tiles
+        self.grass_weight: float = self.params.get("grass_weight", 250.0)                # per-frame cost on grass
+        self.gravel_weight: float = self.params.get("gravel_weight", 300.0)              # per-frame cost on gravel
         # Progress made on grass / gravel is credited at only this fraction, and the first contact costs a
         # one-off, so recovering from a mistake never pays as well as never leaving the road
-        self.offroad_progress: float = self.params.get("offroad_progress", 0.85) # 0.2)
-        self.offroad_entry_penalty: float = self.params.get("offroad_entry_penalty", 500) # 1500.0)
+        self.offroad_progress: float = self.params.get("offroad_progress", 0.85)
+        self.offroad_entry_penalty: float = self.params.get("offroad_entry_penalty", 500)  # one-off cost the first frame on grass or gravel
+
+        # Curb: on open straights it only costs speed/grip for nothing, so it is charged this many times
+        # the base weight; near / inside a corner it is cheap and the target speed is raised to what the
+        # curb's better handling allows (see Cars._setup_reward), so using it is a real option.
+        self.curb_straight_mult: float = self.params.get("curb_straight_mult", 3.0)
+        # Grass / gravel cost grows up to (1 + this) times as a corner gets close (bad handling + turn ahead)
+        self.offroad_corner_mult: float = self.params.get("offroad_corner_mult", 1.5)
+
+        # --- Smooth speed regulation ---
+        # Overspeed is only charged beyond target * (1 + tolerance), and quadratically at first, so a small
+        # excess barely matters and the car brakes progressively instead of snapping to a crawl.
+        self.overspeed_tolerance: float = self.params.get("overspeed_tolerance", 0.08)
+        # Mild pull towards the target when well below it (fights crawling); 0 = off
+        self.underspeed_weight: float = self.params.get("underspeed_weight", 150.0)
+        # Inside a corner the allowed speed ramps back up from the apex (half a tile) to the exit,
+        # by up to this share of the gap to full speed (rewards early throttle on exit)
+        self.exit_gain: float = self.params.get("exit_gain", 0.6)
+
+        # --- Curriculum (survive first, then go fast) ---
+        # `skill` in [0, 1] is measured from the previous episode (clean tiles per crash) and smoothed.
+        # Low skill: speed-target terms are off, surface and crash penalties are boosted, so a fresh
+        # population learns "stay on the track" quickly. High skill: full time-trial shaping.
+        self.curriculum: bool = self.params.get("curriculum", True)
+        self.skill_start: float = self.params.get("skill_start", 0.0)                      # skill of the very first episode (0 = survival-first phase)
+        self.skill_tiles_per_crash: float = self.params.get("skill_tiles_per_crash", 3.0)  # one crash per this many tiles = 50% quality
+        self.skill_lo: float = self.params.get("skill_lo", 0.5)                            # quality at which skill starts to rise
+        self.skill_hi: float = self.params.get("skill_hi", 0.9)                            # quality at which skill is 1
+        self.skill_rate: float = self.params.get("skill_rate", 0.3)                        # smoothing between episodes
+        # Extra weight on crashes / loose surfaces at skill 0 (fades out as skill rises)
+        self.early_crash_mult: float = self.params.get("early_crash_mult", 1.0)
+        self.early_surface_mult: float = self.params.get("early_surface_mult", 2.0)  # extra grass / gravel cost at skill 0, as (1 + this)x
+        # Crash penalty grows by this share of the speed at the crash (1 + k * |v|)
+        self.crash_speed_k: float = self.params.get("crash_speed_k", 0.5)
 
         # --- One-offs ---
         # Charged on elimination, scaled by (1 + speed at the crash), so failing a corner never pays
-        self.crash_penalty: float = self.params.get("crash_penalty", 3000.0)
+        self.crash_penalty: float = self.params.get("crash_penalty", 1500.0)
         # Race mode only: per frame in car-to-car contact (cars then learn to go around each other)
         self.bump_weight: float = self.params.get("bump_weight", 400.0)
 
@@ -405,7 +495,7 @@ class RewardConfig(Configuration):
         # the grid is, and they push the car to go round on the road instead of leaving it.
         # How far ahead (in car lengths) and how wide (in car widths) a car counts as "in my way"
         self.traffic_range: float = self.params.get("traffic_range", 6.0)
-        self.traffic_gate: float = self.params.get("traffic_gate", 1.6)
+        self.traffic_gate: float = self.params.get("traffic_gate", 1.6)  # lane width that counts as "in my way", in car widths
         # Off-road / curb cost is multiplied up to this much when a car is right ahead (no wall-style swerve)
         self.edge_guard: float = self.params.get("edge_guard", 2.5)
         # Charged for turning away from the track direction on a straight while blocked
@@ -428,8 +518,8 @@ class WindowConfig(Configuration):
                   shows a part of the track. Use it when the grid is larger than your screen.
 
     Keyboard (cinematic mode for the camera keys; Space and Esc work in every mode):
-      - / +   zoom out / in          0       toggle auto-fit of the top 3 cars
-      1 ... 9 focus the car in that race position (1 = leader)   Tab  focus a random car
+      - / +   zoom out / in          0       toggle auto-fit of the top fit_cars cars (zoom follows the pack)
+      1 ... 9 focus the car in that race position (1 = leader, the default view)   Tab  focus a random car
       L       fit the whole grid in the window (static)          V    cycle verbose level
       Space   pause / resume         Esc     end the episode
       Shift + - / +   lower / raise the frame rate cap (the + key is Shift + = on most keyboards)
@@ -438,11 +528,12 @@ class WindowConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
 
-        self.title: str = self.params.get("title", "Car Racer")
+        self.title: str = self.params.get("title", "Car Racer")  # window caption
         # Frame rate cap of the window. None = no cap (run as fast as possible, e.g. for training).
         self.fps: int | None = self.params.get("fps", 60)
+        # Colour shown around the track when the grid is smaller than the window
         self.background_color: tuple[int, int, int] = tuple(self.params.get("background_color", (20, 20, 20)))
-        self.font_size: int = self.params.get("font_size", 24)
+        self.font_size: int = self.params.get("font_size", 24)  # base font size for overlay text
         # Overlay text (HUD, leaderboard, labels, countdown) is drawn at font_size * font_scale
         self.font_scale: float = self.params.get("font_scale", 0.7)
 
@@ -460,7 +551,7 @@ class WindowConfig(Configuration):
         self.zoom_max: float = max(0.1, self.params.get("zoom_max", 3.0))
         # Factor applied by one press of - or + (and one mouse-wheel notch)
         self.zoom_step: float = max(1.01, self.params.get("zoom_step", 1.2))
-        # Auto-fit camera: how many of the leading cars it tries to keep in view
+        # Auto-fit camera (key 0, off by default): how many of the leading cars it tries to keep in view
         self.fit_cars: int = max(1, int(self.params.get("fit_cars", 3)))
         # Empty space kept around those cars, in car lengths (bigger = looser framing)
         self.fit_margin_cars: float = max(0.0, self.params.get("fit_margin_cars", 5.0))
@@ -484,6 +575,16 @@ class WindowConfig(Configuration):
         # Show the camera mode and key list at the bottom of the window (cinematic mode only)
         self.show_controls_hint: bool = self.params.get("show_controls_hint", True)
 
+        # --- Pixel mode (visual only, never changes the simulation) ---
+        # Retro 8/16-bit look for the track, cars and effects: the frame is shrunk, its colours are reduced
+        # and it is scaled back up with hard square pixels. HUD and text stay sharp.
+        #   "off"  = normal rendering      "on" = always      "race" = only while race mode is on
+        self.pixel_mode: str = str(self.params.get("pixel_mode", "race")).lower()
+        # Screen pixels per art pixel. 3-5 looks right at 600 px; larger is blockier and faster.
+        self.pixel_size: int = max(1, int(self.params.get("pixel_size", 3)))
+        # Bits per colour channel (1-7). 3 gives 512 colours (NES-like), 4 gives 4096. 0 or 8 = no reduction.
+        self.pixel_color_bits: int = int(self.params.get("pixel_color_bits", 4))
+
 
 class GenConfig(Configuration):
     """Track generation configuration."""
@@ -491,10 +592,9 @@ class GenConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
         
-        # Generation parameters
-        self.seed: int | None = self.params.get("seed", None)
-        self.max_attempts: int = self.params.get("max_attempts", 1000)
-        self.min_tiles: int = self.params.get("min_tiles", 0)
+        self.seed: int | None = self.params.get("seed", None)           # None = random track every run, an integer repeats the sequence
+        self.max_attempts: int = self.params.get("max_attempts", 1000)  # random tracks tried before giving up
+        self.min_tiles: int = self.params.get("min_tiles", 0)           # minimum tiles in the loop (0 = rows + columns)
 
 
 class PlayerConfig(Configuration):
@@ -503,9 +603,9 @@ class PlayerConfig(Configuration):
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
         
-        self.lives: int = self.params.get("lives", 10)
-        self.max_hiatus: int = self.params.get("max_hiatus", 100)
-        self.max_frames: int = self.params.get("max_frames", 1000)
+        self.lives: int = self.params.get("lives", 10)              # restarts a car gets before it is out for the episode
+        self.max_hiatus: int = self.params.get("max_hiatus", 100)   # frames without progress (or on one tile) before a restart
+        self.max_frames: int = self.params.get("max_frames", 1000)  # episode length in frames
 
 
 class EnvironmentConfig(Configuration):

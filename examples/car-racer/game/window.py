@@ -11,7 +11,8 @@ from .tile import Tile
 from .grid import Grid
 from .car import Cars
 from .player import Players
-from .util import draw_panel
+from .util import draw_panel, render_text, clear_text_cache
+from .pixel import PixelRenderer
 
 
 class Window:
@@ -37,6 +38,7 @@ class Window:
         self.offset = 0
         self.title = config.title
         self.screen: Optional[Surface] = None
+        self._pixel = PixelRenderer(config)         # optional retro renderer (visual only)
         self.clock: Optional[pygame.time.Clock] = None
         self.running = False
         self.fps = config.fps
@@ -89,6 +91,7 @@ class Window:
         else:
             self.screen = pygame.display.set_mode((self.width+self.offset, self.height+self.offset))
         self.clock = pygame.time.Clock()
+        clear_text_cache()
         self.font = pygame.font.Font(None, self.font_size)
         self.cars.font = pygame.font.Font(None, self.font_size)
         self.cars.label_font = pygame.font.Font(None, max(8, self.font_size - 2))
@@ -116,6 +119,7 @@ class Window:
 
     def close(self) -> None:
         self.running = False
+        clear_text_cache()
         self.font = None # NOTE: Not resetting/closing the font and surfaces leads to segmentation error/ PyGame window freezing
         self.cars.font = None
         self.cars.label_font = None
@@ -152,9 +156,16 @@ class Window:
         level = max(self.verbose_level, 3 if verbose is True else int(verbose or 0))
         self.cars.debug_car = self.focus if self.cinematic else None
         verbose = level
+        pixel = self._pixel_active() and level < 2     # LiDAR / arrow debug views use the normal renderer
         if not self.cinematic:
-            self.screen.blit(self._track_surface(), (0, 0))
-            self.cars.render(self.screen, verbose=verbose, hud=hud)  # (debug_panel drawn inline here)
+            if pixel:
+                self._pixel.draw(self, level, 0.0, 0.0, 1.0)     # separate low-res renderer; HUD stays sharp
+                if hud:
+                    self.cars.render_debug(self.screen)
+                    self.cars.render_hud(self.screen)
+            else:
+                self.screen.blit(self._track_surface(), (0, 0))
+                self.cars.render(self.screen, verbose=verbose, hud=hud)  # (debug_panel drawn inline here)
             if hud:
                 self._draw_stats()
             if self.paused and paused_overlay:
@@ -164,13 +175,16 @@ class Window:
         self.screen = pygame.display.get_surface() or self.screen   # follows a resized window
         self.width, self.height = self.screen.get_size()
         self._update_camera()
-        # Only the part of the track the camera can see is redrawn (everything else is never shown
-        # before it gets refreshed), which matters on large grids
         left, top, vw, vh = self._view_rect()
-        crop = pygame.Rect(int(left) - 2, int(top) - 2, int(vw) + 6, int(vh) + 6).clip(self.world.get_rect())
-        self.world.blit(self._track_surface(), crop.topleft, crop)
-        self.cars.render(self.world, verbose=verbose, hud=False, debug_panel=False)
-        self._blit_camera()
+        if pixel:
+            self._pixel.draw(self, level, left, top, self.scale)
+        else:
+            # Only the part of the track the camera can see is redrawn (everything else is never shown
+            # before it gets refreshed), which matters on large grids
+            crop = pygame.Rect(int(left) - 2, int(top) - 2, int(vw) + 6, int(vh) + 6).clip(self.world.get_rect())
+            self.world.blit(self._track_surface(), crop.topleft, crop)
+            self.cars.render(self.world, verbose=verbose, hud=False, debug_panel=False)
+            self._blit_camera()
         if hud:
             self.cars.render_debug(self.screen)
             self.cars.render_hud(self.screen)
@@ -294,7 +308,7 @@ class Window:
             self._focus_car(int(self._rng.choice(choices)))
 
     def reset_camera(self) -> None:
-        """New episode: top-3 framing, or locked on the human car in a manual run. Clears stale requests."""
+        """New episode: follow P1 (key 1), or lock on the human car in a manual run. Clears stale requests."""
         self.paused = self.quit_requested = self.end_requested = False
         self._zoom_bias = 1.0
         self._fit_grid = False
@@ -308,8 +322,9 @@ class Window:
                 self.verbose_level = max(self.verbose_level, 1)   # manual runs show the car stats
             self.focus, self.auto_fit = self.cars.total - 1, False
             self._focus_rank = self._rank_of(self.focus)
-        else:
-            self.focus, self.auto_fit = None, True
+        else:                                               # default: follow P1 at a constant zoom (key 1)
+            self.focus, self.auto_fit = None, False
+            self._focus_slot = 0
 
     # ------------------------------------------------------------------
     # Camera
@@ -401,6 +416,15 @@ class Window:
         self.scale = float(np.exp(np.log(self.scale) + (np.log(ts) - np.log(self.scale)) * k))
         self.scale = min(max(self.scale, lo), hi)
 
+    # ------------------------------------------------------------------
+    # Pixel mode (visual only)
+    # ------------------------------------------------------------------
+
+    def _pixel_active(self) -> bool:
+        """True when the retro look applies to this frame (config.pixel_mode: off / on / race)."""
+        mode = self.config.pixel_mode
+        return mode == "on" or (mode == "race" and self.cars.race.enabled)
+
     def _view_rect(self) -> tuple[float, float, float, float]:
         """World-space rectangle shown on the canvas: (left, top, width, height)."""
         w, h = self.screen.get_size()
@@ -428,10 +452,15 @@ class Window:
             self.screen.fill(self.bg_color)           # borders around a grid smaller than the window
         if size == src.get_size():
             self.screen.blit(src, dest)
-        elif self.config.smooth_scaling:
-            self.screen.blit(pygame.transform.smoothscale(src, size), dest)
-        else:
-            self.screen.blit(pygame.transform.scale(src, size), dest)
+            return
+        scale = pygame.transform.smoothscale if self.config.smooth_scaling else pygame.transform.scale
+        if dest == (0, 0) and size == self.screen.get_size():
+            try:
+                scale(src, size, self.screen)               # straight into the window: no temporary surface, no extra blit
+                return
+            except (ValueError, pygame.error):
+                pass                                        # pixel formats differ: take the generic path
+        self.screen.blit(scale(src, size), dest)
 
     # ------------------------------------------------------------------
     # Overlays
@@ -440,7 +469,7 @@ class Window:
     def _panel_text(self, text: str, anchor: str, y_pad: int = 4) -> None:
         if self.font is None:
             return
-        txt = self.font.render(text, True, (230, 230, 230))
+        txt = render_text(self.font, text, True, (230, 230, 230))
         rect = pygame.Rect(0, 0, txt.get_width() + 12, txt.get_height() + 8)
         sw, sh = self.screen.get_size()
         rect.bottom = sh - y_pad
@@ -458,7 +487,7 @@ class Window:
         measured = self.clock.get_fps() if self.clock is not None else 0.0
         cap = f"{self.fps}" if self.fps else "max"
         frames = int(np.max(self.players.frames_done)) if len(self.players.frames_done) else 0
-        txt = self.font.render(f"FPS {measured:.0f}/{cap}   Frame {frames}", True, (230, 230, 230))
+        txt = render_text(self.font, f"FPS {measured:.0f}/{cap}   Frame {frames}", True, (230, 230, 230))
         rect = pygame.Rect(0, 4, txt.get_width() + 12, txt.get_height() + 8)
         rect.centerx = self.screen.get_width() // 2
         draw_panel(self.screen, rect, self.cars.config.overlay_color, self.cars.config.overlay_alpha)

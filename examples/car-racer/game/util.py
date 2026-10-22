@@ -218,3 +218,22 @@ def draw_panel(
         draw.rect(panel, (*color, int(alpha)), panel.get_rect(), border_radius=radius)
         _PANEL_CACHE[key] = panel
     surface.blit(panel, rect.topleft)
+
+
+_TEXT_CACHE: dict[tuple, Surface] = {}
+
+
+def render_text(font: pygame.font.Font, text: str, antialias: bool, color: tuple) -> Surface:
+    """font.render with a small cache: HUD strings rarely change from one frame to the next, and
+    rasterising text is one of the slower pygame calls. Call clear_text_cache() when fonts are recreated."""
+    key = (id(font), text, bool(antialias), tuple(color))
+    surf = _TEXT_CACHE.get(key)
+    if surf is None:
+        if len(_TEXT_CACHE) > 512:
+            _TEXT_CACHE.clear()
+        surf = _TEXT_CACHE[key] = font.render(text, antialias, color)
+    return surf
+
+
+def clear_text_cache() -> None:
+    _TEXT_CACHE.clear()

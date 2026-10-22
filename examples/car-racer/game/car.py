@@ -9,10 +9,10 @@ from pygame import Surface, Mask
 from pygame.font import Font
 from typing import Optional, Any
 
-from .config import CarConfig, RaceConfig, RewardConfig, overwrite_config
+from .config import CarConfig, RaceConfig, RewardConfig, overwrite_config, normalize_restrict_movement
 from .functional import Type, Position
 from .constants import NP_INT, NP_FLOAT, IMAGE_DIR, COLOR_LIDAR, COLOR_CURB_PRI, COLOR_CURB_SEC
-from .util import scale_image, draw_arrow, grid, draw_panel
+from .util import scale_image, draw_arrow, grid, draw_panel, render_text
 from .grid import Grid
 from .tile import Tile
 from .player import Players
@@ -259,7 +259,7 @@ def _update_location(
     x: Array, y: Array, on_track: Array, tile_idx: Array,
     started: Array, finished: Array, crashed: Array, tile_crash: Array,
     laps_done: Array, checks_done: Array, tile_stag_steps: Array,
-    lap_pending: Array, on_finish: Array, strict: bool,
+    lap_pending: Array, on_finish: Array, strict: bool, restrict_movement: int,
 ):
     """Tile transition tracking (checkpoints / laps / wrong-tile crashes).
 
@@ -300,8 +300,10 @@ def _update_location(
                         else:
                             tile_stag_steps[c] += 1
                         tile_idx[c] = new
+                    elif restrict_movement >= 3:
+                        crashed[c] = True              # wrong tile, barriers open -> restart
                     else:
-                        crashed[c] = True
+                        tile_stag_steps[c] += 1        # levels 0-2: no crash, the stagnation counter punishes it
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -385,7 +387,7 @@ def _drive(
         if reverse_enabled and v < 0.0: v *= coeff_reverse
         vel_lin[c] = v
 
-        vn = min(max(v / max_vel_lin, -1.0), 1.0)
+        vn = max(v / max_vel_lin, -1.0)    # not clipped above: slipstream can push it over 1.0
         vel_norm[c] = vn
         avn = abs(vn)
 
@@ -424,6 +426,143 @@ def _drive(
         y[c] -= dy
 
 
+@njit(cache=True)
+def _violations(
+    layers: Array, tile_map: Array, t_next: Array, t_prev: Array, cell_size: float, cur: int,
+    x: float, y: float, ang: float, hw: float, hl: float, block_prev: bool,
+) -> int:
+    """Body probes (3x3 grid over the car footprint) outside the track + 100 if the centre is in a blocked tile.
+    Only the current and next tile are open (and the previous one when `block_prev` is False), so the
+    layout can never be skipped or crossed into a neighbouring stretch of track."""
+    gw, gh = layers.shape
+    a  = ang * math.pi / 180.0
+    fx = -math.sin(a); fy = -math.cos(a)
+    rx = -fy;          ry = fx
+    bad = 0
+    for sl in range(-1, 2):
+        for sf in range(-1, 2):
+            px = x + sl * hw * rx + sf * hl * fx
+            py = y + sl * hw * ry + sf * hl * fy
+            xi = int(px); yi = int(py)
+            if px < 0.0 or py < 0.0 or xi >= gw or yi >= gh:
+                bad += 1
+            elif not (layers[xi, yi] & L_TRACK):
+                bad += 1
+    kx = int(abs(x) / cell_size)
+    ky = int(abs(y) / cell_size)
+    if kx < tile_map.shape[0] and ky < tile_map.shape[1]:
+        t = tile_map[kx, ky]
+        if t >= 0 and t != cur and t != t_next[cur] and (block_prev or t != t_prev[cur]):
+            bad += 100
+    return bad
+
+
+@njit(cache=True)
+def _blocked(
+    layers: Array, tile_map: Array, t_next: Array, t_prev: Array, cell_size: float, cur: int,
+    block_prev: bool, px: float, py: float,
+) -> bool:
+    """True if the point is outside the track, or inside a tile the car may not enter (same rule as _violations)."""
+    gw, gh = layers.shape
+    xi = int(px); yi = int(py)
+    if px < 0.0 or py < 0.0 or xi >= gw or yi >= gh:
+        return True
+    if not (layers[xi, yi] & L_TRACK):
+        return True
+    kx = int(abs(px) / cell_size)
+    ky = int(abs(py) / cell_size)
+    if kx < tile_map.shape[0] and ky < tile_map.shape[1]:
+        t = tile_map[kx, ky]
+        if t >= 0 and t != cur and t != t_next[cur] and (block_prev or t != t_prev[cur]):
+            return True
+    return False
+
+
+@njit(parallel=True, fastmath=True, cache=True)
+def _walls(
+    layers: Array, tile_map: Array, t_next: Array, t_prev: Array, cell_size: float,
+    x: Array, y: Array, angle: Array, prev_x: Array, prev_y: Array, prev_angle: Array,
+    vel_lin: Array, vel_ang: Array, disp_x: Array, disp_y: Array, tile_idx: Array,
+    hw: float, hl: float, block_prev: bool, damping: float, align: float,
+):
+    """
+    Solid walls (restrict_movement 1-2): the track edge and an invisible barrier around every tile except the
+    current and next one (level 1 also leaves the previous one open so the car may reverse into it and be
+    restarted by the stagnation counter; level 2, `block_prev`, closes it as well).
+
+    A move that would put the car into a wall is not cancelled: the wall's normal is estimated from a ring of
+    probes around the car and the motion is projected onto the wall, so the car slides along it in the
+    direction it was already heading (a glancing hit keeps most of its speed, a head-on hit stops it).
+    While it scrapes, the nose is turned towards the sliding direction (`align`, 0-1 of the angle error per
+    frame) and speed is scaled by the share of the motion that survived and by `damping` (the scrape
+    friction), which leaves the car pointing along the wall and free to steer back onto the track.
+    """
+    total, indices = grid((x.shape[0],))
+    ring = 12
+    for i in prange(total):
+        c   = indices[i]
+        cur = tile_idx[c]
+        base = _violations(layers, tile_map, t_next, t_prev, cell_size, cur, prev_x[c], prev_y[c], prev_angle[c], hw, hl, block_prev)
+        v0 = _violations(layers, tile_map, t_next, t_prev, cell_size, cur, x[c], y[c], angle[c], hw, hl, block_prev)
+        if v0 == 0 or v0 <= base:
+            continue                                            # free move
+
+        mx = x[c] - prev_x[c]; my = y[c] - prev_y[c]
+        mlen = math.sqrt(mx * mx + my * my)
+
+        # Wall normal (pointing back into free space): opposite to the blocked share of a ring of probes
+        sx = 0.0; sy = 0.0
+        r = max(hw, hl)
+        for k in range(ring):
+            th = 2.0 * math.pi * k / ring
+            ox = math.cos(th); oy = math.sin(th)
+            if _blocked(layers, tile_map, t_next, t_prev, cell_size, cur, block_prev, x[c] + r * ox, y[c] + r * oy):
+                sx += ox; sy += oy
+        nl = math.sqrt(sx * sx + sy * sy)
+        if nl > 1.0e-6:
+            nx = -sx / nl; ny = -sy / nl
+        elif mlen > 1.0e-9:
+            nx = -mx / mlen; ny = -my / mlen                    # nothing to measure: treat as head-on
+        else:
+            nx = 0.0; ny = 0.0
+
+        # Keep the part of the motion that runs along the wall, drop the part that goes into it
+        into = mx * nx + my * ny
+        if into < 0.0:
+            tx = mx - into * nx; ty = my - into * ny
+        else:
+            tx = mx; ty = my
+
+        chosen = -1
+        px = prev_x[c]; py = prev_y[c]; pa = angle[c]
+        for k in range(4):
+            f = 1.0 if k < 2 else (0.5 if k == 2 else 0.0)
+            na = angle[c] if k == 0 else prev_angle[c]
+            qx = prev_x[c] + tx * f; qy = prev_y[c] + ty * f
+            v = _violations(layers, tile_map, t_next, t_prev, cell_size, cur, qx, qy, na, hw, hl, block_prev)
+            if v == 0 or v <= base:
+                chosen = k; px = qx; py = qy; pa = na
+                break
+        if chosen < 0:
+            px = prev_x[c]; py = prev_y[c]; pa = prev_angle[c]
+            vel_ang[c] = 0.0
+
+        # Turn the nose to run along the wall (never into a worse pose)
+        slide = math.sqrt((px - prev_x[c]) ** 2 + (py - prev_y[c]) ** 2)
+        if align > 0.0 and slide > 1.0e-3:
+            want = math.atan2(-(px - prev_x[c]), -(py - prev_y[c])) * 180.0 / math.pi
+            if vel_lin[c] < 0.0: want += 180.0
+            na = (pa + align * _wrap180(want - pa)) % 360.0
+            if _violations(layers, tile_map, t_next, t_prev, cell_size, cur, px, py, na, hw, hl, block_prev) <= max(base, 0):
+                pa = na
+
+        x[c] = px; y[c] = py; angle[c] = pa
+        disp_x[c] = prev_x[c] - px
+        disp_y[c] = prev_y[c] - py
+        keep = slide / mlen if mlen > 1.0e-9 else 0.0
+        vel_lin[c] *= min(keep, 1.0) * damping
+
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _signals(
     # outputs (rewritten every call)
@@ -441,7 +580,7 @@ def _signals(
     on_road: Array, on_curb: Array, on_grass: Array, on_gravel: Array, on_track: Array,
     acceleration: Array, rotation: Array,
     t_type: Array, t_orient: Array, t_next: Array,
-    max_hiatus: int, straight_tol: float, restrict_movement: int, race_on: bool,
+    max_hiatus: int, straight_tol: float, restrict_movement: int, race_on: bool, max_angle: float,
 ):
     """Derived reward-shaping signals, step counters and crash flags per car."""
     total, indices = grid((angle.shape[0],))
@@ -464,17 +603,19 @@ def _signals(
         offset = 0.0
         if   typ == T_LEFT:  offset = 45.0
         elif typ == T_RIGHT: offset = -45.0
-        mf = vel_lin[c] > 0.0 and phase_curr < 135.0 + offset and phase_curr > -135.0 + offset
-        moved_forward[c] = mf
+        mf = vel_lin[c] > 0.0 and phase_curr < max_angle + offset and phase_curr > -max_angle + offset
+        moved_forward[c] = mf or restrict_movement < 4      # the angle limit only counts from level 4
 
-        oob = not on_track[c]
-        if restrict_movement >= 2 and not race_on:
-            oob = oob or on_grass[c] or on_gravel[c]
+        oob = False
+        if restrict_movement >= 3:                           # barriers open: leaving the track restarts
+            oob = not on_track[c]
+        if restrict_movement >= 5:                           # also completely off the road + curb
+            oob = oob or not (on_road[c] or on_curb[c])
 
         chk = checks_done[c] > prev_checks[c]
         checked[c]   = chk
         finished[c]  = laps_done[c] > prev_laps[c]
-        tile_stag[c] = tile_stag_steps[c] > max_hiatus
+        tile_stag[c] = restrict_movement >= 1 and tile_stag_steps[c] > max_hiatus
 
         road = on_road[c] and (not on_curb[c]) and (not on_grass[c]) and (not on_gravel[c]) and on_track[c]
         on_road_eff[c] = road
@@ -512,13 +653,13 @@ def _signals(
 
         # Crash / elimination flags
         elim = oob
-        if restrict_movement > 0 and not race_on: elim = elim or (not mf)
+        if restrict_movement >= 4 and not race_on: elim = elim or (not mf)
         if elim:
             crashed[c]    = True
             tile_crash[c] = True
         if crashed[c]: crashes_done[c] += 1
-        if mf: hiatus[c]  = 0
-        else:  hiatus[c] += 1
+        if mf or restrict_movement == 0: hiatus[c]  = 0
+        else:                            hiatus[c] += 1
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -588,6 +729,13 @@ def _traffic_shape(
             extra_neg[c] += w_close * closing * same * tight
 
 
+@njit(fastmath=True, cache=True)
+def _corner_factor(m: float, f1: float, f2: float) -> float:
+    """Corner severity m (0 straight, 1 = 90 degrees, 2 = U-turn) -> safe speed fraction."""
+    if m <= 1.0: return 1.0 - (1.0 - f1) * m * m
+    return f1 - (f1 - f2) * (m - 1.0)
+
+
 @njit(parallel=True, fastmath=True, cache=True)
 def _reward_shape(
     shape_pos: Array, shape_neg: Array, target_norm: Array,
@@ -596,28 +744,36 @@ def _reward_shape(
     rotation: Array, prev_rotation: Array,
     tile_idx: Array, t_turn: Array, t_next: Array, corner_curr: Array,
     on_road: Array, on_curb: Array, on_grass: Array, on_gravel: Array, bumped: Array, prev_off: Array,
-    size: float, max_vel_lin: float, a_dec: float, f1: float, f2: float,
-    lookahead: int, window: int,
-    w_prog: float, w_time: float, w_surv: float, w_over: float, w_steer: float, w_jit: float,
-    w_curb: float, curb_disc: float, w_grass: float, w_gravel: float, w_bump: float,
-    off_progress: float, w_entry: float,
+    size: float, max_vel_lin: float, a_dec: float, f1: float, f2: float, f1c: float,
+    lookahead: int, window: int, skill: float,
+    w_prog: float, w_time: float, w_surv: float, w_over: float, over_tol: float, w_under: float,
+    w_steer: float, w_jit: float,
+    w_curb: float, curb_straight: float, curb_disc: float, w_grass: float, w_gravel: float, w_bump: float,
+    off_progress: float, w_entry: float, off_corner: float, exit_gain: float, early_surface: float,
 ):
     """
-    Dense time-trial shaping.  Looks `lookahead` tiles down the track, grades every corner it
-    finds (net heading change over `window` tiles: a 90 degree bend = 1, a U-turn = 2, an S of two
-    opposite bends = 0.5 because it can be driven as a diagonal), turns that into a safe speed and
-    a braking-distance speed profile, and then
+    Dense time-trial shaping with a survive-first curriculum.
 
-      +  progress along the centre line, credited only up to the target speed
-      -  speed above the target, steering on open straights, steering jitter, surface contact,
-         car-to-car contact and a small constant time cost.
+    Every corner within `lookahead` tiles is graded (net heading change over `window` tiles) and turned
+    into a braking-distance speed profile: the allowed speed at distance d from a corner of safe speed vc
+    is sqrt(vc^2 + 2 a d), so the target falls smoothly as the car approaches, and inside the corner it
+    ramps back up from the apex.  The profile is computed for the road and for the curb (better handling
+    -> higher safe corner speed); a car on the curb near a corner is judged against the curb profile.
+
+      +  progress along the centre line (credit capped at the target speed as `skill` rises)
+      -  speed above target * (1 + tol): soft, quadratic at first, faded in with `skill`
+      -  speed well below target (anti-crawl), steering on open straights, steering jitter
+      -  surfaces: curb costly on straights / cheap in corners; grass & gravel costly, more so with a corner
+         close; all boosted while `skill` is low so the population first learns to stay on the track.
     """
     total, indices = grid((progress.shape[0],))
+    early = 1.0 + early_surface * (1.0 - skill)
     for i in prange(total):
         c  = indices[i]
         t0 = tile_idx[c]
 
         vt = max_vel_lin
+        vtc = max_vel_lin
         d_corner = 1.0e9
         for j in range(lookahead + 1):
             tj = t0
@@ -631,35 +787,51 @@ def _reward_shape(
                 cmin = min(cmin, cum); cmax = max(cmax, cum)
                 tw = t_next[tw]
             m = min(max(abs(cum), 0.5 * (cmax - cmin)), 2.0)
-            if m <= 1.0: f = 1.0 - (1.0 - f1) * m * m
-            else:        f = f1 - (f1 - f2) * (m - 1.0)
-            d = 0.0 if j == 0 else max(j * size - in_tile[c], 0.0)
-            vc = f * max_vel_lin
-            vt = min(vt, math.sqrt(vc * vc + 2.0 * a_dec * d))   # can still brake down to vc by the corner
+            d  = 0.0 if j == 0 else max(j * size - in_tile[c], 0.0)
+            vc  = _corner_factor(m, f1, f2) * max_vel_lin
+            vcc = max(_corner_factor(m, f1c, f2 * f1c / max(f1, 1.0e-6)), _corner_factor(m, f1, f2)) * max_vel_lin
+            if j == 0:
+                # past the apex the car may get back on the power towards the exit
+                ex = min(max((in_tile[c] / size - 0.5) * 2.0, 0.0), 1.0) * exit_gain
+                vc  += ex * (max_vel_lin - vc)
+                vcc += ex * (max_vel_lin - vcc)
+            vt  = min(vt,  math.sqrt(vc  * vc  + 2.0 * a_dec * d))
+            vtc = min(vtc, math.sqrt(vcc * vcc + 2.0 * a_dec * d))
             d_corner = min(d_corner, d)
+        if on_curb[c]: vt = max(vt, vtc)
         tn = vt / max_vel_lin
         target_norm[c] = tn
+
+        # 0 = nothing ahead, 1 = in / at the corner
+        near = 1.0 - min(max((d_corner - 0.3 * size) / (0.7 * size), 0.0), 1.0)
+        open_road = 1.0 - near
 
         pos = 0.0
         neg = w_time
         dp = progress[c] - prev_progress[c]
         if abs(dp) > 0.5 * size: dp = 0.0                 # lap wrap / respawn jump, not driving
         if dp > 0.0:
-            credit = w_prog * dp * min(1.0, vt / max(vel_lin[c], 1.0e-6)) / size
+            cap = min(1.0, vt / max(vel_lin[c], 1.0e-6))
+            credit = w_prog * dp / size * (1.0 - skill * (1.0 - cap))   # full credit while skill is low
             if on_grass[c] or on_gravel[c]: credit *= off_progress
             pos += credit
         else:
             neg += w_prog * (-dp) / size
-        neg += w_over * max(vel_norm[c] - tn, 0.0)
 
-        open_road = min(max((d_corner - 0.3 * size) / (0.7 * size), 0.0), 1.0)
+        vn = vel_norm[c]
+        excess = max(vn - tn * (1.0 + over_tol), 0.0)
+        neg += skill * w_over * excess * min(excess * 4.0, 1.0)              # soft: quadratic, then linear
+        if on_road[c] or on_curb[c]:
+            neg += skill * w_under * max(0.85 * tn - vn, 0.0)               # crawling below the target
+
         neg += w_steer * abs(rotation[c]) * open_road + w_jit * abs(rotation[c] - prev_rotation[c])
 
-        if (on_grass[c] or on_gravel[c]) and not prev_off[c]: neg += w_entry   # first touch of loose surface
+        if (on_grass[c] or on_gravel[c]) and not prev_off[c]: neg += w_entry * early
         em = edge_mult[c]
-        if on_grass[c]:    neg += w_grass * em
-        elif on_gravel[c]: neg += w_gravel * em
-        elif on_curb[c]:   neg += w_curb * em * ((1.0 - curb_disc) if corner_curr[c] else 1.0)
+        loose = early * (1.0 + off_corner * near)
+        if on_grass[c]:    neg += w_grass * em * loose
+        elif on_gravel[c]: neg += w_gravel * em * loose
+        elif on_curb[c]:   neg += w_curb * em * (open_road * curb_straight + near * (1.0 - curb_disc))
         pos += extra_pos[c]
         neg += extra_neg[c]
         if on_road[c]:     pos += w_surv
@@ -773,6 +945,14 @@ def _progress(
 
 
 class Cars:
+    @property
+    def restrict_movement(self) -> int:
+        return self._restrict_movement
+
+    @restrict_movement.setter
+    def restrict_movement(self, value: "bool | int") -> None:
+        self._restrict_movement = normalize_restrict_movement(value)
+
     def __init__(
         self, 
         grid: Grid, players: Players, config: CarConfig | None = None, 
@@ -826,9 +1006,12 @@ class Cars:
         self.min_straight_steps: int = config.min_straight_steps
         self.straight_alignment_tolerance: float = config.straight_alignment_tolerance
         self.cutoff: float          = config.cutoff
-        self.toggle_reverse: bool   = config.toggle_reverse
+        self.toggle_reverse: bool   = config.toggle_reverse   # reversing (default on)
+        self.max_approach_angle: float = config.max_approach_angle
+        self.wall_damping: float    = config.wall_damping
+        self.wall_align: float      = config.wall_align
         self.full_restart: bool     = config.full_restart
-        self.restrict_movement: bool = config.restrict_movement
+        self.restrict_movement = config.restrict_movement      # property: normalised to an int level 0-5
         self.frames_per_tile: int   = config.frames_per_tile
         self.discrete: bool         = config.discrete
         self.endless: bool          = config.endless
@@ -975,6 +1158,7 @@ class Cars:
         self.track: TrackGeometry | None = None
         self.draft_level = np.zeros((self.total,), dtype=NP_FLOAT)   # slipstream strength [0, 1]
         self._init_trail()
+        self._init_random_slipstream()
         self._trail_overlay: Surface | None = None   # SRCALPHA layer for the flame trail
         self.bumped      = np.zeros((self.total,), dtype=bool)       # touched another car this frame
         self.progress    = np.zeros((self.total,), dtype=NP_FLOAT)   # px driven along the track
@@ -1176,6 +1360,8 @@ class Cars:
         self.t_turn   = np.where(self.t_type == Type.LEFT.value, 1.0, np.where(self.t_type == Type.RIGHT.value, -1.0, 0.0)).astype(NP_FLOAT)
         self.t_next   = np.array([self._tile_id.get(cont.get(t), i) for i, t in enumerate(tiles)], dtype=NP_INT)
         self.t_next2  = self.t_next[self.t_next]
+        self.t_prev   = np.arange(len(tiles), dtype=NP_INT)       # inverse of t_next (self if no predecessor)
+        self.t_prev[self.t_next] = np.arange(len(tiles), dtype=NP_INT)
         self.t_center = np.array([t.center_abs for t in tiles], dtype=NP_FLOAT)
         self.t_check  = np.array([t.center_check_abs for t in tiles], dtype=NP_FLOAT)
 
@@ -1306,7 +1492,7 @@ class Cars:
             self.x, self.y, self.on_track, self.tile_idx,
             self.started, self.finished, self.crashed, self.tile_crash,
             self.laps_done, self.checks_done, self.tile_stag_steps,
-            self.lap_pending, self.on_finish, bool(self.finish_line_laps),
+            self.lap_pending, self.on_finish, bool(self.finish_line_laps), int(self.restrict_movement),
         )
         if self.race_done.any():                       # a finished car rolls slowly: that must not cost lives
             self.tile_stag_steps[self.race_done] = 0
@@ -1330,6 +1516,7 @@ class Cars:
         prev_angle  = self.angle.copy()
         prev_tile   = self.tile_idx.copy()
         prev_brake  = self.brake_steps.copy()
+        prev_x, prev_y = self.x.copy(), self.y.copy()
 
         # ------------------------------------------------------------------
         # 0. Inputs  (N, 2) -> acceleration, rotation
@@ -1357,14 +1544,21 @@ class Cars:
         # ------------------------------------------------------------------
         # 4-5. Slipstream (cross-car), accelerate / brake, friction, move
         # ------------------------------------------------------------------
-        drafting = bool(self.race_on and self.race.slipstream.enabled)
         ss = self.race.slipstream
+        cone_drafting = bool(self.race_on and ss.enabled)
+        drafting = bool(cone_drafting or ss.random_enabled)
         if drafting:
             prev_level = self.draft_level
-            self.draft_level = slipstream(
-                self.x, self.y, self.angle, np.clip(self.vel_lin / self.max_vel_lin, 0.0, 1.0),
-                self.race_active, self.draft_level, self.height, ss,
-            )
+            if cone_drafting:
+                self._draft_natural = slipstream(
+                    self.x, self.y, self.angle, np.clip(self.vel_lin / self.max_vel_lin, 0.0, 1.0),
+                    self.race_active, self._draft_natural, self.height, ss,
+                )
+            if ss.random_enabled:
+                self._random_slipstream_step()
+                self.draft_level = np.maximum(self._draft_natural, self._rs_level)
+            else:
+                self.draft_level = self._draft_natural
             # gaining (or holding) -> False, wearing off -> True; unchanged inside the dead band
             self._draft_decay = np.where(
                 self.draft_level < prev_level - DRAFT_TREND_EPS, True,
@@ -1394,6 +1588,16 @@ class Cars:
             self.bumped = collide(
                 self.x, self.y, self.angle, self.vel_lin, self.vel_ang, self.disp_x, self.disp_y,
                 self.race_active, self.width, self.height, self.max_vel_lin, self.race.collision,
+            )
+
+        # Solid walls (restrict_movement 1-2): track edge, and at level 2 the tile behind the car
+        if 1 <= self.restrict_movement <= 2:
+            _walls(
+                self._lidar_layers, self.tile_map, self.t_next, self.t_prev, float(self.grid.cell_size),
+                self.x, self.y, self.angle, prev_x, prev_y, prev_angle,
+                self.vel_lin, self.vel_ang, self.disp_x, self.disp_y, self.tile_idx,
+                float(self.width) * 0.45, float(self.height) * 0.45,
+                bool(self.restrict_movement == 2), float(self.wall_damping), float(self.wall_align),
             )
 
         # Slipstream trail history (final pose of this frame)
@@ -1430,7 +1634,7 @@ class Cars:
             acceleration, rotation,
             self.t_type, self.t_orient, self.t_next,
             int(self.players.max_hiatus), float(self.straight_alignment_tolerance),
-            int(self.restrict_movement), bool(self.race_on),
+            int(self.restrict_movement), bool(self.race_on), float(self.max_approach_angle),
         )
 
         # ------------------------------------------------------------------
@@ -1457,13 +1661,15 @@ class Cars:
                 self.tile_idx, self.t_turn, self.t_next, sg['corner_curr'],
                 sg['on_road'], self.on_curb, self.on_grass, self.on_gravel, self.bumped, self._prev_off,
                 float(self.track.size), float(self.max_vel_lin), float(self._a_dec),
-                float(self._corner_f1), float(self._corner_f2),
-                int(rw.lookahead_tiles), int(rw.corner_window),
+                float(self._corner_f1), float(self._corner_f2), float(self._corner_f1_curb),
+                int(rw.lookahead_tiles), int(rw.corner_window), float(self._skill()),
                 float(rw.progress_weight), float(rw.time_penalty), float(rw.survival_bonus),
-                float(rw.overspeed_weight), float(rw.steer_weight), float(rw.jitter_weight),
-                float(rw.curb_weight), float(rw.curb_corner_discount),
+                float(rw.overspeed_weight), float(rw.overspeed_tolerance), float(rw.underspeed_weight),
+                float(rw.steer_weight), float(rw.jitter_weight),
+                float(rw.curb_weight), float(rw.curb_straight_mult), float(rw.curb_corner_discount),
                 float(rw.grass_weight), float(rw.gravel_weight), float(rw.bump_weight),
                 float(rw.offroad_progress), float(rw.offroad_entry_penalty),
+                float(rw.offroad_corner_mult), float(rw.exit_gain), float(rw.early_surface_mult),
             )
         self._prev_rotation[:] = rotation
         self._prev_off[:] = self.on_grass | self.on_gravel
@@ -1487,6 +1693,7 @@ class Cars:
             self.tile_crash,
             None, verbose,
             shape_pos=self.shape_pos, shape_neg=self.shape_neg,
+            crash_scale=1.0 + rw.early_crash_mult * (1.0 - self._skill()),
         )
 
         if self.race_on:
@@ -1508,10 +1715,11 @@ class Cars:
         """Physics-derived corner speed for the reward (what a 90 degree bend can be taken at)."""
         rw = self.reward
         size = float(self.track.size)
+        radius_ref = rw.corner_line_radius * size / 2.0
         if rw.corner_speed_ratio is not None:
             f1 = float(rw.corner_speed_ratio)
         else:
-            radius = rw.corner_line_radius * size / 2.0
+            radius = radius_ref
             omega  = self.max_vel_ang * self.config.handling_road * math.pi / 180.0       # rad / frame
             v_turn = omega * radius                                                         # yaw-rate limit
             grip   = self.config.lateral_grip * (1.0 - self.config.slip_road)
@@ -1520,6 +1728,36 @@ class Cars:
         self._corner_f1 = min(max(f1, 0.25), 1.0)
         self._corner_f2 = self._corner_f1 * (rw.uturn_ratio if self._corner_f1 < 1.0 else 1.0)
         self._a_dec = self.acc_lin * (1.0 + 0.5 * self.coeff_brake) * rw.braking_margin
+        # Same corner speed on the curb: better handling (yaw rate) but a little less grip
+        omega_c = self.max_vel_ang * self.config.handling_curb * math.pi / 180.0
+        grip_c  = self.config.lateral_grip * (1.0 - self.config.slip_curb)
+        f1c = rw.corner_safety * min(omega_c * radius_ref, math.sqrt(grip_c * radius_ref)) / self.max_vel_lin
+        if rw.corner_speed_ratio is not None:
+            f1c = f1 * self.config.handling_curb / max(self.config.handling_road, 1.0e-6)
+        self._corner_f1_curb = min(max(f1c, self._corner_f1), 1.0)
+        if not hasattr(self, "_skill_value"):
+            self._skill_value = float(rw.skill_start)
+
+    def _skill(self) -> float:
+        """Curriculum progress in [0, 1] (1 when the curriculum is off)."""
+        return float(self._skill_value) if self.reward.curriculum else 1.0
+
+    def _update_skill(self) -> None:
+        """Called on reset, before the stats are wiped: clean tiles per crash of the last episode -> skill."""
+        rw = self.reward
+        if not hasattr(self, "_skill_value"):
+            self._skill_value = float(rw.skill_start)
+        checks = getattr(self, "checks_done", None)
+        deaths = getattr(self.players, "deaths", None)
+        if checks is None or deaths is None or checks.size == 0 or checks.size != deaths.size:
+            return
+        mc = float(np.mean(checks)); md = float(np.mean(deaths))
+        if mc + md <= 0.0:
+            return
+        q = mc / (mc + md * rw.skill_tiles_per_crash)
+        x = min(max((q - rw.skill_lo) / max(rw.skill_hi - rw.skill_lo, 1.0e-6), 0.0), 1.0)
+        x = x * x * (3.0 - 2.0 * x)
+        self._skill_value += rw.skill_rate * (x - self._skill_value)
 
     def _update_race_order(self, recompute: bool = True) -> None:
         """Live race positions from distance driven (laps are offset so the grid starts fair)."""
@@ -1885,12 +2123,12 @@ class Cars:
                 head = f"Laps {done}"
             if self.race_end_in is not None:
                 head += f"  ends {self.race_end_in:.1f}s"
-            rows.append(self.font.render(head, True, (255, 215, 0)))
+            rows.append(render_text(self.font, head, True, (255, 215, 0)))
             for row, idx in enumerate(tower):
                 name = self.label(int(idx))
                 tag = f"{row + 1} {int(idx)}" + (f" {name}" if name is not None else "")
                 tag += " FIN" if self.race_done[idx] else (" *" if self.draft_level[idx] > DRAFT_TOWER_MARK else "")
-                rows.append(self.font.render(tag, True, (230, 230, 230)))
+                rows.append(render_text(self.font, tag, True, (230, 230, 230)))
             if rows:
                 pad = 6
                 w = max(r.get_width() for r in rows) + 2 * pad
@@ -1902,7 +2140,7 @@ class Cars:
                 me = self.total - 1
                 pos = int(np.flatnonzero(self.race_order == me)[0]) + 1
                 col = ss.color_decay if self._draft_decay[me] else ss.color_gain
-                txt = self.font.render(f"P{pos}/{total}  Draft {self.draft_level[me] * 100:3.0f}%", True, col)
+                txt = render_text(self.font, f"P{pos}/{total}  Draft {self.draft_level[me] * 100:3.0f}%", True, col)
                 rect = pygame.Rect(4, surface.get_height() - (txt.get_height() + 12), txt.get_width() + 12, txt.get_height() + 8)
                 draw_panel(surface, rect, self.config.overlay_color, self.config.overlay_alpha)
                 surface.blit(txt, (rect.x + 6, rect.y + 4))
@@ -1946,7 +2184,7 @@ class Cars:
 
         # Text lines are collected first so one translucent panel can sit behind all of them
         lines: list[tuple[Surface, tuple[int, int]]] = []
-        lines.append((self.font.render(status_text, True, status_color), (10, 10)))
+        lines.append((render_text(self.font, status_text, True, status_color), (10, 10)))
         
         # Render position information
         phase_curr = -(angle - tile_curr.orientation)
@@ -1961,7 +2199,7 @@ class Cars:
             f"PhC: {phase_curr:.1f} "
             f"PhN: {phase_next:.1f} "
         )
-        lines.append((self.font.render(pos_text, True, (200, 200, 200)), (10, 28)))
+        lines.append((render_text(self.font, pos_text, True, (200, 200, 200)), (10, 28)))
 
         # Render car status text
         score_text = (
@@ -1969,7 +2207,7 @@ class Cars:
             f"Laps: {self.laps_done[index]} "
             f"Crashes: {self.crashes_done[index]} "
         )
-        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 46)))
+        lines.append((render_text(self.font, score_text, True, (200, 200, 200)), (10, 46)))
 
         # Render player status text
         score_text = (
@@ -1978,14 +2216,14 @@ class Cars:
             f"Lives: {self.players.lives[index]} "
             f"Score: {self.players.true_scores[index]} "
         )
-        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 64)))
+        lines.append((render_text(self.font, score_text, True, (200, 200, 200)), (10, 64)))
 
         # Render player status text
         score_text = (
             f"Brake: {self.brake_steps[index]} "
             f"Turn: {self.turn_steps[index]} "
         )
-        lines.append((self.font.render(score_text, True, (200, 200, 200)), (10, 82)))
+        lines.append((render_text(self.font, score_text, True, (200, 200, 200)), (10, 82)))
 
         # Translucent backdrop (cars on the track stay visible), then the text
         pad = 6
@@ -2069,6 +2307,8 @@ class Cars:
         if not self.grid.initialized:
             raise RuntimeError("Grid must be initialized.")
 
+        self._update_skill()   # grade the episode that just ended before its stats are wiped
+
         self.grid_mapping    = {tile.position: tile for tile in self.grid._cells.flatten()}
         self.reverse_mapping = {tile: position for position, tile in self.grid_mapping.items()}
 
@@ -2137,6 +2377,7 @@ class Cars:
         # Race mode: reverse-layout starting grid behind / on the start tile
         self.draft_level = np.zeros((self.total,), dtype=NP_FLOAT)
         self._init_trail()
+        self._init_random_slipstream()
         self.bumped      = np.zeros((self.total,), dtype=bool)
         self.progress    = np.zeros((self.total,), dtype=NP_FLOAT)
         self.in_tile     = np.zeros((self.total,), dtype=NP_FLOAT)
@@ -2168,8 +2409,50 @@ class Cars:
 
         self._setup_reward()
         self.players.reset(total)
+        self._schedule_random_slipstream(np.arange(self.total), reset_events=True)
         if self.race.enabled:
             self._update_race_order()   # needs players.active, so after the players reset
+
+    # ======================================================================
+    # Random training slipstream
+    # ======================================================================
+
+    def _init_random_slipstream(self) -> None:
+        n = self.total
+        self._rs_tile   = np.full((n,), -1, dtype=NP_INT)      # tile id that triggers the next tow (-1 = none left)
+        self._rs_left   = np.zeros((n,), dtype=NP_INT)         # frames of tow remaining
+        self._rs_events = np.zeros((n,), dtype=NP_INT)         # tows used this life
+        self._rs_level  = np.zeros((n,), dtype=NP_FLOAT)       # blended tow strength [0, 1]
+        self._draft_natural = np.zeros((n,), dtype=NP_FLOAT)   # cone-based draft (race mode), without the random tow
+
+    def _schedule_random_slipstream(self, idx: Array, reset_events: bool = False) -> None:
+        """Pick the next trigger tile for the given cars: random_min..random_max tiles ahead of their tile."""
+        ss = self.race.slipstream
+        if not ss.random_enabled or idx.size == 0 or not hasattr(self, 't_next'):
+            return
+        if reset_events:
+            self._rs_events[idx] = 0
+            self._rs_left[idx]   = 0
+            self._rs_level[idx]  = 0.0
+        ahead = self.rng.integers(ss.random_min_tiles, ss.random_max_tiles + 1, size=idx.size)
+        tid = self.tile_idx[idx].copy()
+        for step in range(ss.random_max_tiles):
+            tid = np.where(step < ahead, self.t_next[tid], tid)
+        self._rs_tile[idx] = np.where(self._rs_events[idx] < ss.random_events, tid, -1)
+
+    def _random_slipstream_step(self) -> None:
+        ss = self.race.slipstream
+        active = self._rs_left > 0
+        hit = (~active) & (self._rs_tile >= 0) & (self.tile_idx == self._rs_tile)
+        if hit.any():
+            idx = np.flatnonzero(hit)
+            self._rs_left[idx] = ss.random_frames
+            self._rs_events[idx] += 1
+            self._schedule_random_slipstream(idx)
+        target = np.where(self._rs_left > 0, ss.random_level, 0.0)
+        rate = np.where(target > self._rs_level, ss.ramp, ss.decay)
+        self._rs_level += (target - self._rs_level) * rate
+        self._rs_left = np.maximum(self._rs_left - 1, 0)
 
     def restart(self):
         # TODO: Maybe handle this under Numba wrapper
@@ -2206,6 +2489,7 @@ class Cars:
             self.brake_steps[restart_part] = 0
             self.turn_steps [restart_part] = 0
             self.straight_steps[restart_part] = 0
+            self._schedule_random_slipstream(np.flatnonzero(restart_part), reset_events=True)
             self.crashed    [restart_all]  = False
             self.started    [self.finished] = False
             self.finished   [restart_all]  = False

@@ -258,7 +258,7 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
     ENV.render_mode             = 'human'
     ENV.window.fps              = 60
     ENV.cars.usr_enganged       = False
-    ENV.cars.restrict_movement  = False
+    ENV.cars.restrict_movement  = 2
     ENV.min_laps                = 5
     ENV.max_frames              = 3000
     ENV.cars.race.enabled       = True

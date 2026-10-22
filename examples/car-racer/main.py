@@ -214,7 +214,7 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
     ENV.render_mode             = 'human'
     ENV.window.fps              = 30
     ENV.cars.usr_enganged       = False
-    ENV.cars.restrict_movement  = False
+    ENV.cars.restrict_movement  = 2
     ENV.min_laps                = 3
     ENV.max_frames              = 10000
     ENV.cars.race.enabled       = True
@@ -231,7 +231,7 @@ def _test_best_network(*, count: int = 10, set_keys: list[int] = None, record: b
         print(f"Recording @ {RECORD_DIR}")
     
     try:
-        for i in range(10):
+        for i in range(20):
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-loglevel", "quiet",
@@ -385,7 +385,7 @@ def run():
     # print(ENV.action_space.sample().shape)
     # sys.exit()
 
-    MULTIPLIER = 0.25
+    MULTIPLIER = 0.33
     CONFIG = neat.Config('racer', '../../storage/configs')
     CONFIG.genome.init_type                 = 'normal'
     CONFIG.genome.weight_init_mean          = 0.0
@@ -419,8 +419,8 @@ def run():
     DISCRETE        = False
     INPUTS          = ENV.observation_space.shape[-1]
     OUTPUTS         = 2
-    EMBED_SIZE      = 64
-    LAYERS          = 2
+    EMBED_SIZE      = 96
+    LAYERS          = 3
     FWD_EXP         = 1
     BIAS            = True
     ACTIVATION      = nn.Tanh() # nn.SiLU()
@@ -434,11 +434,11 @@ def run():
         f"R{int(CLIP_MIN)}~{int(CLIP_MAX)}"
     )
 
-    MEMORY_SIZE     = 3
+    MEMORY_SIZE     = 2
     GAMMA           = np.exp(np.log(0.1) / 256)
     KAPPA           = 0.0 # np.exp(np.log(0.01) / 256)
-    ALPHA           = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
-    ALPHA_ORDER     = 2
+    ALPHA           = 1.0 # fix(np.exp(np.log(2.0) / (MEMORY_SIZE - 1)), 1.0)
+    ALPHA_ORDER     = 0
     REW_NORM        = 3
     POL_REG         = 0.00
     STD_REG         = 0.00

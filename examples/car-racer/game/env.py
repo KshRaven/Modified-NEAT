@@ -148,8 +148,9 @@ class Game(Env):
         """Upper observation bound. Slipstream lets speed exceed max_linear_velocity, so the
         normalised velocity feature can reach 1 + top_speed_bonus (it is never clipped)."""
         race = self.config.race
-        if race.enabled and race.slipstream.enabled:
-            return 1.0 + max(race.slipstream.top_speed_bonus, 0.0)
+        ss = race.slipstream
+        if (race.enabled and ss.enabled) or ss.random_enabled:
+            return 1.0 + max(ss.top_speed_bonus, 0.0)
         return 1.0
 
     def reset(self, **params) -> tuple[Array, dict[str, Any]]:
@@ -249,7 +250,7 @@ class Game(Env):
 
             # Get the next state to be used
             states = self.cars.get_state() # shape(players, features=5)
-            states = states * 10.0 # TODO: Add configuration for this just like reward scaling
+            states = states * 1.0 # 10.0 # TODO: Add configuration for this just like reward scaling
 
             # Get the rewards
             self.previous_rewards = self.rewards.copy()
