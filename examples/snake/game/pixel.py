@@ -33,8 +33,8 @@ class PixelRenderer:
         px = self.px
         return max(2 * px, (int(self.config.cell_size) // px) * px)
 
-    def draw(self, win, index: int, level: int, top: int) -> None:
-        """Draw the board of snake `index` onto `win.screen`, its area starting `top` pixels from the top."""
+    def draw(self, win, index: int, level: int, left: int, top: int) -> None:
+        """Draw the board of snake `index` onto `win.screen`, its area starting at (`left`, `top`)."""
         px, cell = self.px, win.cell
         cp = max(1, cell // px)                                     # canvas pixels per cell
         g, m = win.grid, win.margin
@@ -49,4 +49,4 @@ class PixelRenderer:
         if self._up is None or self._up.get_size() != size:
             self._up = Surface(size).convert()
         pygame.transform.scale(self._small, size, self._up)         # single hard upscale
-        win.screen.blit(self._up, (0, top))
+        win.screen.blit(self._up, (left, top))

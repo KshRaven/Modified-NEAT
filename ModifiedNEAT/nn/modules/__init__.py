@@ -18,10 +18,9 @@ from .main import Transformer, Conver, Reformer
 
 from .base.util import get_tensor_info, model_size, model_params
 
-from . import base, sub, main
+from . import base, sub, main, reporting
 
 __all__ = [
-    # "base", "sub", "main",
     "Sequential", "Linear", "Polynomial", "Embedding",
     "LayerNorm", "RMSNorm", "GroupNorm", "BatchNorm",
     'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d',
@@ -35,5 +34,5 @@ __all__ = [
     "ConvSelfAttention", "ConvCrossAttention", "ConverBase", "ConvSwiGLU",
     "Transformer", "Conver", "Reformer",
     "get_tensor_info", "model_size", "model_params",
-    "base", "sub", "main",
+    "base", "sub", "main", "reporting",
 ]

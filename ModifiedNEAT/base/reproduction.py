@@ -405,6 +405,7 @@ def update_children(
     fallback_runs = 0
     # NOTE: Parameters are handled one at a time on purpose, so that a single parameter can be as large as the
     #       device's dedicated memory allows.
+    parameter_updates = {}
     for genus_param, param_group in zip(modules[genus].neat_parameters(), pgs):
         dtype = parameter_dtype(genus_param.data.dtype)
         eps_eff = effective_epsilon(config, dtype)
@@ -488,13 +489,14 @@ def update_children(
             genus_param.md = backend.to_host(array_update.copy()) - genus_param.cd
         # ------------------------------ Update parameters ------------------------------ #
         update = array_update.reshape(*original_shape)
-        genus_param.update(new_population, update, True)
+        parameter_updates[genus_param.param_index] = update
         # ------------------------------ Remove data from the device ------------------------------ #
         del probabilities, rng_planes, normals, array_update, update, filled, zero_values
 
     # Free memory
     del sources, child_filter
     backend.release()
+    return parameter_updates
 
 
 def reproduce(
@@ -514,8 +516,8 @@ def reproduce(
     modules_genera: list[NeatModule] = [modules[genus] for genus in genera]
     new_population: dict[int, Genome] = Dict.empty(INT, GENOME)
     new_genomes: dict[int, dict[int, Genome]] = {}
+    parameter_updates = {}
     for genomes, module, genus in zip(population_genera, modules_genera, genera):
-        assert module.genus == genus
 
         remaining_species: list[Species] = List.empty_list(SPECIES)
         all_fitnesses: list[float]       = List.empty_list(FLOAT)
@@ -558,7 +560,7 @@ def reproduce(
         # TODO: document.
         min_species_size = max(min_species_size, max([np.ceil(config.reproduction.elitism * len(s.members)) for s in remaining_species]))
         # TODO: add pop size to arguments or just get from current population?
-        pop_size = math.ceil(len(population) / len(genera))
+        pop_size = len(genomes)
 
         spawn_amounts = compute_spawn(adjusted_fitnesses, previous_sizes, pop_size, min_species_size,
                                       config.reproduction.purge, generation)
@@ -578,7 +580,7 @@ def reproduce(
             config.general.fitness_criterion, ancestors, False, config.reproduction.preserve_elite,
             seeding.numba_seed()
         )
-        update_children(
+        parameter_updates[genus] = update_children(
             backend, config, genus, modules, population, genus_population, ancestors, tpb, config.general.seed, verbose
         )
         if verbose and verbose >= 2:
@@ -591,9 +593,22 @@ def reproduce(
 
         pass
 
-    # Update modules
+    # Commit each module's parameter batch once, including all genera sharing it.
+    module_genera = {}
     for genus, module in modules.items():
-        module.update(new_genomes[genus], None, True)
+        module_genera.setdefault(id(module), (module, []))[1].append(genus)
+    for module, genera_group in module_genera.values():
+        module_genomes = Dict.empty(INT, GENOME)
+        for genus in genera_group:
+            for genome in new_genomes[genus].values():
+                module_genomes[genome.key] = genome
+        merged_updates = {
+            parameter.param_index: backend.xp.concatenate(
+                [parameter_updates[genus][parameter.param_index] for genus in genera_group], axis=0
+            )
+            for parameter in module.neat_parameters()
+        }
+        module.update(module_genomes, merged_updates, True)
         module.update_limit()
         for m in module.neat_modules():
             m.update_limit()

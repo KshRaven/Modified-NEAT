@@ -1,17 +1,39 @@
 from __future__ import annotations
 
-from ..base import NeatModule, NeatParameter
-from .base import *
-from ...util.fancy_text import CM, Fore
-from ...util.qol import manage_params
-
-from torch import Tensor, device as DEVICE, dtype as DTYPE
-from typing import Union, Iterable
+import math
+from typing import Any, Callable, Iterable, Union
 
 import torch
 import torch.nn as nn
-# import torch.nn.functional as F
-import math
+from torch import Tensor, device as DEVICE, dtype as DTYPE
+
+from ...util.fancy_text import CM, Fore
+from ...util.qol import manage_params
+from ..base import NeatModule, NeatParameter
+from .base import *
+
+__all__ = [
+    'InvalidValueError',
+    'ResidualBlock',
+    'TokenEmbedding',
+    'SinusoidalEncoding',
+    'MultiLayerPerceptron',
+    'BufferEmbedding',
+    'BufferEncoding',
+    'SequenceEncoding',
+    'RoPE',
+    'Repositioning',
+    'AttentionLambda',
+    'Attention',
+    'ConvSelfAttention',
+    'ConvCrossAttention',
+    'SwiGLU',
+    'ConvSwiGLU',
+    'TransformerBlock',
+    'TransformerBase',
+    'ConverBlock',
+    'ConverBase',
+]
 
 
 class InvalidValueError(ValueError):
@@ -515,12 +537,17 @@ class Repositioning(NeatModule):
     def __init__(
             self, max_seq_len: int, embed_size: int, layer_idx: int = None, bias: bool = True,
             rope: RoPE | None = None, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32,
-            **options
+            coefficients: int = 1, **options
     ):
+        # TODO: Is the the normalization even necessary. I don't think encoded tensors could have considerable
+        #       value ranges beyond what is returned from QKV projection. The hope should just be that the 
+        #       shift + converter can predict something close to the expected encoded tensors. Make it optional
+        #       for now with default = False.
         super().__init__()
 
         self.max_seq_len = max_seq_len
         self.embed_size  = embed_size
+        self.coefficients = coefficients
         self.layer_idx   = layer_idx if layer_idx is not None else 1
         self.bias        = bias
         self.rope        = rope
@@ -531,7 +558,9 @@ class Repositioning(NeatModule):
 
         self.embedder   = Embedding(max_seq_len, embed_size, None, device, dtype)
         self.norm       = RMSNorm(embed_size, self.epsilon, self.affine, device, dtype)
-        self.converter  = Linear(embed_size, embed_size, bias, device, dtype)
+        # coefficients > 1: Polynomial converter (only used by the learned path: layer_idx > 0, or no RoPE)
+        self.converter  = Linear(embed_size, embed_size, bias, device, dtype) if coefficients <= 1 else \
+            Polynomial(embed_size, embed_size, coefficients, bias, device, dtype)
 
 
     def forward(self, tensor: Tensor, offset: int, keys: int | Iterable[int] = None, verbose: int = None):
@@ -544,15 +573,24 @@ class Repositioning(NeatModule):
         """
         if tensor.numel() == 0 or offset == 0: # No need for model to learn to guess the same values
             return tensor
+        if self.layer_idx == 0 and self.rope is None:
+            # Layer-0 values carry no RoPE and no positional info, so a shift leaves them unchanged (exact)
+            return tensor
 
         if self.layer_idx == 0 and self.rope is not None:
             # NOTE: This assumes input is most probably idx(1:max_seq_len-1) being shifted to idx(0:max_seq_len-2)
             #       that was being cached somewhere
             # TODO: Decode RoPE then get the next ascending positions' encoding
+            shape = tensor.shape
+            fold = max(1, shape[-1] // self.rope.head_dim)   # per-branch RoPE: (.., kv_heads, head_dim*mult) -> (.., kv_heads*mult, head_dim)
+            if fold > 1:
+                tensor = tensor.reshape(*shape[:-2], shape[-2] * fold, shape[-1] // fold)
             raw_tensor = self.rope.decode(tensor, pos_idx=offset, verbose=verbose) # This should have no RoPE
             if verbose: #  and verbose >= 3:
                 print(get_tensor_info(raw_tensor, 'Raw Tensor', verbose))
             repo_tensor = self.rope(raw_tensor, pos_idx=0)
+            if fold > 1:
+                repo_tensor = repo_tensor.reshape(shape)
         else:
             # NOTE: Guess possible future tensors with current tensor and offset, since with different positional
             #       embeddings the subsequent layer would have different tensors for queries keys and values
@@ -562,7 +600,7 @@ class Repositioning(NeatModule):
             # shift(genomes, dim_size) -> tensor(genomes, ..., dim_size)
             while shift.ndim < tensor.ndim:
                 shift = shift.unsqueeze(1)
-            repo_tensor = self.converter(self.norm(tensor + shift))
+            repo_tensor = self.converter(self.norm(tensor + shift, keys=keys), keys=keys)
         if verbose: #  and verbose >= 3:
             print(get_tensor_info(repo_tensor, 'Repositioned Tensor', verbose))
         return repo_tensor
@@ -574,6 +612,17 @@ class AttentionLambda(NeatModule):
 
     Produces a tensor shaped (genomes, batch_size, heads, lambdas, 1, 1) that is
     broadcast over the (..., query_len, key_len) attention map.
+
+    The attention energy is combined as  e_0 + sum_k lambda_k * e_k  (k = 1..lambdas).
+
+    mode='simplex' (default in Attention):
+        lambda_k = -beta * w_k,   w = softmax(s_1..s_L),   beta = sigmoid(b + beta_bias)
+        => every extra branch is subtracted, sum(lambda) = -beta in [-1, 0], so the common-mode gain
+           1 + sum(lambda) = 1 - beta is in [0, 1] for ANY parameter values (saturation cannot break it).
+           beta -> 1 gives exact common-mode rejection; beta -> 0 degrades to plain attention.
+        scalars: (heads, lambdas + 1); the last column is the beta logit.
+    mode='legacy':
+        lambda_k = (-1)^k * gain_k^k, gain_k = 1 + mean_d(tanh(s)) in [0, max_gain]; scalars: (heads, head_dim, lambdas).
     """
 
     u_lim = 0.8
@@ -583,6 +632,7 @@ class AttentionLambda(NeatModule):
         self, heads: int, head_dim: int, layer_idx: int = None,
         lambdas: int = 1, init_mean: float = 0., init_std: float = 0.5,
         max_gain: float = 2.0, affine: bool = True, epsilon: float = 1e-8,
+        mode: str = 'legacy', beta_bias: float = 3.0,
         device: DEVICE = 'cpu', dtype: DTYPE = torch.float32
     ):
         super().__init__(
@@ -608,7 +658,12 @@ class AttentionLambda(NeatModule):
         #     if not affine else
         #     NeatParameter((heads, 1), requires_grad=False, device=device, dtype=dtype) # .unsqueeze(2)
         # )
-        self.scalars = NeatParameter((heads, head_dim, lambdas), requires_grad=False, device=device, dtype=dtype)
+        if mode not in ('legacy', 'simplex'):
+            raise ValueError(f"AttentionLambda mode must be 'legacy' or 'simplex', got '{mode}'")
+        self.mode = mode
+        self.beta_bias = beta_bias    # sigmoid(0 + 3) ~ 0.95: starts close to exact common-mode rejection
+        scalar_shape = (heads, lambdas + 1) if mode == 'simplex' else (heads, head_dim, lambdas)
+        self.scalars = NeatParameter(scalar_shape, requires_grad=False, device=device, dtype=dtype)
         # shape (1, lambdas) — broadcasts with gain (heads, lambdas)
         self.exponents = (torch.arange(lambdas, device=device, dtype=dtype) + 1).unsqueeze(0).unsqueeze(1)
         self.multipliers = torch.pow(-1, self.exponents)
@@ -617,7 +672,10 @@ class AttentionLambda(NeatModule):
         self.std  = init_std
 
         # Register a hook to modify gradients
-        for param in self.neat_parameters():
+        # TODO: Might be useless since NEAT backend has its own way initializing Parameter values, 
+        #       and happens after the model has already been initialized. Just ensure the output
+        #       gain is within the realistic limit of [0, 1]
+        for param in self.neat_parameters(recurse=False):
             with torch.no_grad():
                 param.data.normal_(init_mean, init_std)
         self.min_val = init_mean - init_std * 2
@@ -661,12 +719,38 @@ class AttentionLambda(NeatModule):
     #         with torch.no_grad():
     #             param.data[:] = torch.clamp(param.data, self.min_val, self.max_val)
 
+    @torch.no_grad()
+    def diagnostics(self, keys: Union[int, Iterable[int], None] = None) -> dict[str, Tensor]:
+        """
+        Read-only view of the differential factors, for logging (does not change any behaviour).
+
+        Returns tensors with the genomes on dim 0:
+            ``lambdas``  (genomes, heads, lambdas)  the coefficients applied to the extra branches (a_0 = 1 is implicit)
+            ``lambda_sum`` (genomes, heads)         sum_k lambda_k
+            ``cm_gain``  (genomes, heads)           |1 + sum_k lambda_k|: gain of a component shared by every branch
+                                                    (0 = perfect common-mode rejection, 1 = no rejection)
+        and in 'simplex' mode additionally ``beta`` (genomes, heads) and ``weights`` (genomes, heads, lambdas).
+        """
+        lam = self.forward(keys)[:, 0, :, :, 0, 0]                  # (genomes, heads, lambdas)
+        out = {'lambdas': lam, 'lambda_sum': lam.sum(-1), 'cm_gain': (1.0 + lam.sum(-1)).abs()}
+        if self.mode == 'simplex':
+            s = self.scalars[keys]
+            out['weights'] = torch.softmax(s[..., :self.lambdas], dim=-1)
+            out['beta'] = torch.sigmoid(s[..., self.lambdas] + self.beta_bias)
+        return out
+
     def forward(self, keys: Union[int, Iterable[int]] = None):
         """
         Returns:
             (1, heads, lambdas, 1, 1)
             Broadcasts over energy shaped (batch, heads, coeffs, q_len, k_len).
         """
+        if self.mode == 'simplex':
+            s = self.scalars[keys]                                   # (genomes, heads, lambdas + 1)
+            w = torch.softmax(s[..., :self.lambdas], dim=-1)         # (genomes, heads, lambdas), sums to 1
+            beta = torch.sigmoid(s[..., self.lambdas:] + self.beta_bias)   # (genomes, heads, 1), in (0, 1)
+            coeffs = -beta * w                                       # all subtracted; sum = -beta
+            return coeffs.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)   # (genomes, 1, heads, lambdas, 1, 1)
         # query:     (batch_size, q_len, heads, head_dim)
         # key:       (batch_size, k_len, heads, head_dim)
         # attention: (batch_size, heads, q_len, k_len)
@@ -682,7 +766,7 @@ class AttentionLambda(NeatModule):
         # gain = torch.sigmoid(gain) * self.max_gain
         # TODO: Most implementations of NEAT weight mutation do not scale well so exponential calculations are to be avoided
         gain = torch.clamp(torch.mean(torch.tanh(self.scalars[keys]) * self.max_gain, dim=-2), -self.max_gain, +self.max_gain)
-        gain = (gain + self.max_gain) / 2
+        gain = (gain + self.max_gain) / 2 # Ensures positive gain
         assert torch.all((gain >= 0) & (gain <= self.max_gain))
         # self.exponents: (1, lambdas), self._init_affine(): (heads, 1) or scalar
         scalars = (
@@ -732,6 +816,14 @@ class Attention(NeatModule):
         inputs: int         = manage_params(options, 'inputs', None)
         outputs: int        = manage_params(options, 'outputs', None)
         self.repo_enabled   = manage_params(options, 'reposition', True)
+        self.lambda_mode    = manage_params(options, 'lambda_mode', 'simplex')   # 'simplex' | 'legacy'
+        self.qk_norm        = manage_params(options, 'qk_norm', False)           # RMS-normalise q/k per branch before RoPE
+        self.branch_rope    = manage_params(options, 'branch_rope', True)        # rotate every differential branch with the SAME frequencies
+        self.proj_coeffs    = int(manage_params(options, ['proj_coeffs', 'coefficients'], 1))   # >1: Polynomial instead of Linear
+        self.poly_projs     = manage_params(options, 'poly_projs', 'qkvo')       # which projections: letters of q, k, v, o
+        self.repo_coeffs    = int(manage_params(options, 'repo_coeffs', self.proj_coeffs))      # >1: Polynomial in the cache Repositioning converters
+        if self.proj_coeffs < 1 or self.repo_coeffs < 1:
+            raise ValueError(f"proj_coeffs/repo_coeffs must be >= 1, got {self.proj_coeffs}/{self.repo_coeffs}")
 
         # ---- attributes ----------------------------------------------------
         self.bias        = bias
@@ -746,6 +838,7 @@ class Attention(NeatModule):
         self.mult              = 1 if not differential else 1 + int(differential)
         self.att_coeff_num     = None if not differential else 1 + int(differential)
         self.att_coeff_indices = None if not differential else torch.arange(differential, device=device) + 1
+        self.layer_idx = 0 if layer_idx is None else layer_idx
         self.device = device
         self.dtype  = dtype
 
@@ -756,29 +849,31 @@ class Attention(NeatModule):
         # self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
         self.pre_norm = LayerNorm(dim_size, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
 
-        self.query_proj = Linear(in_dim, heads * self.head_dim * self.mult, bias, device, dtype)
-        self.key_proj   = Linear(in_dim, kv_heads * self.head_dim * self.mult, bias, device, dtype)
-        self.value_proj = Linear(in_dim, kv_heads * self.head_dim, bias, device, dtype)
-        self.out_proj   = Linear(dim_size, out_dim, bias, device, dtype)
+        self.query_proj = self._projection('q', in_dim, heads * self.head_dim * self.mult, bias, device, dtype)
+        self.key_proj   = self._projection('k', in_dim, kv_heads * self.head_dim * self.mult, bias, device, dtype)
+        self.value_proj = self._projection('v', in_dim, kv_heads * self.head_dim, bias, device, dtype)
+        self.out_proj   = self._projection('o', dim_size, out_dim, bias, device, dtype)
 
-        self.rotary_embedding = RoPE(self.max_seq_len, dim_size * self.mult, heads, self.constant, device, dtype)
+        # With branch_rope each differential branch is a head_dim-wide vector rotated with identical frequencies, so a
+        # signal common to the branches stays common (incl. its relative-position part) and can be rejected.
+        rope_size = dim_size if self.branch_rope else dim_size * self.mult
+        self.rotary_embedding = RoPE(self.max_seq_len, rope_size, heads, self.constant, device, dtype)
         self.softmax    = nn.Softmax(dim=-1)
         # self.head_norm  = RMSNorm(self.head_dim, self.epsilon, self.affine, device, dtype) if self.normalize else None
         self.head_norm  = LayerNorm(self.head_dim, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
         self.diff_lambda = AttentionLambda(
-            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, 2.0, True, self.epsilon, device, dtype
+            heads, self.head_dim, layer_idx, differential, 0.0, 0.1, 2.0, True, self.epsilon, 
+            mode=self.lambda_mode, device=device, dtype=dtype,
         ) if differential else None
 
-        # Repositioning helpers for KV-cache dequeue
+        # Repositioning helpers for KV-cache dequeue. Keys are RoPE-rotated, values are not.
         self.repo_k = Repositioning(
-            max_seq_len, self.head_dim * self.mult, layer_idx, bias, self.rotary_embedding, device, dtype, **options
+            max_seq_len, self.head_dim * self.mult, self.layer_idx, bias, self.rotary_embedding, device, dtype,
+            coefficients=self.repo_coeffs, **options
         ) if self.cache else None
-        value_rope = (
-            self.rotary_embedding if self.mult == 1 else 
-            RoPE(self.max_seq_len, dim_size, heads, self.constant, device, dtype)
-        ) # TODO: Does heads even have an effect on RoPE
         self.repo_v = Repositioning(
-            max_seq_len, self.head_dim, layer_idx, bias, value_rope, device, dtype, **options
+            max_seq_len, self.head_dim, self.layer_idx, bias, None, device, dtype,
+            coefficients=self.repo_coeffs, **options
         ) if self.cache else None
 
         # ---- KV-cache state ------------------------------------------------
@@ -792,6 +887,8 @@ class Attention(NeatModule):
     # ------------------------------------------------------------------
         
     def force_cache(self, enable: bool = True):
+        if enable and not self.cache:
+            raise ValueError("force_cache needs the repositioning modules; build with cache=True")
         self.forced_cache = enable
         if enable:
             if self.cache_k is None:
@@ -827,76 +924,78 @@ class Attention(NeatModule):
         )
         self.cache_size = 0
     
-    def _update_cache(self, key: Tensor, value: Tensor, pos_idx: int, verbose: bool | int = False):
-        """Update cache with optional deque-like behavior.
-        
-        Args:
-            key: (genomes, batch_size, seq_len, kv_heads, head_dim * mult)
-            value: (genomes, batch_size, seq_len, kv_heads, head_dim)
-            pos_idx: If None, append to cache. If specified, place at position and truncate after.
+    def _ensure_cache(self, genomes: int, batch_size: int):
+        if (self.cache_k is None or self.cache_k.shape[0] != genomes or self.cache_k.shape[1] != batch_size):
+            self._init_cache(genomes, batch_size)
+
+    def _update_cache(self, key: Tensor, value: Tensor, pos_idx: int,
+                      keys: Union[int, Iterable[int]] = None, verbose: bool | int = False):
         """
-        g, b, s, _, _ = key.shape
-        
+        forced_cache=True : append after the current cache; on overflow dequeue the oldest `excess`
+                            entries (reposition the survivors) and append at the end.
+        forced_cache=False: write at pos_idx and truncate everything after it.
+        key: (g, b, s, kv_heads, head_dim*mult)   value: (g, b, s, kv_heads, head_dim)
+        """
+        g, b, s = key.shape[:3]
         if s > self.max_seq_len:
-            raise ValueError(
-                f"Input tensor's sequence length is greater than module's max sequence length; "
-                f"{s} from K({key.shape}) | V({value.shape}) > {self.max_seq_len}"
-            )
-        
-        # Resize cache if needed
-        if self.cache_k.shape[0] != g or self.cache_k.shape[1] != b:
-            self._init_cache(g, b)
-        
+            raise ValueError(f"Input sequence length {s} > max_seq_len {self.max_seq_len}")
+        self._ensure_cache(g, b)
+
         if self.forced_cache:
-            # Deque-like append: add new tensor after current cache position
-            start_pos = self.cache_size
-            end_pos   = start_pos + s
+            start = self.cache_size
         else:
-            # Position-indexed placement with truncation
-            if pos_idx < 0 or pos_idx >= self.max_seq_len:
-                raise ValueError(
-                    f"Position index '{pos_idx}' must be within limits (0, {self.max_seq_len}-1)"
-                )
-            # Place tensor at position pos_idx
-            start_pos = pos_idx
-            end_pos   = pos_idx + s
-            if end_pos > self.max_seq_len:
-                raise ValueError(
-                    f"Position index '{pos_idx}' with input sequence length '{s}' "
-                    f"exceeds max sequence length '{self.max_seq_len}'"
-                )
-            
-        # Shift excess
-        excess = max(0, end_pos - self.max_seq_len)
+            if not 0 <= pos_idx < self.max_seq_len:
+                raise ValueError(f"Position index '{pos_idx}' must be within [0, {self.max_seq_len - 1}]")
+            if pos_idx > self.cache_size:
+                raise ValueError(f"Position index '{pos_idx}' leaves a gap after cache_size={self.cache_size}")
+            start = pos_idx
+        end = start + s
+        if not self.forced_cache and end > self.max_seq_len:
+            raise ValueError(f"pos_idx {pos_idx} + seq_len {s} exceeds max_seq_len {self.max_seq_len}")
+
+        excess = max(0, end - self.max_seq_len)      # only ever > 0 in forced mode
         if verbose: print(f"Shifting cache by {excess} position(s)")
-        if excess > 0:
-            try:
-                # TODO: Modify to use tensor.select to properly cater for ex dims
-                if key.ndim >= 6: raise NotImplementedError()
-                # TODO: Use negative indexing in for the sake of extra batch dimensions
-                if self.cache_k.shape[2] > excess:
-                    self.cache_k[:, :, :-excess] = self.repo_k(self.cache_k[:, :, excess:], excess, keys=None, verbose=verbose)
-                    self.cache_v[:, :, :-excess] = self.repo_v(self.cache_v[:, :, excess:], excess, keys=None)
-            except Exception as e:
-                print(f"excess = {excess}")
-                print(f"K: {key.shape} -> {self.cache_k.shape}")
-                print(f"V: {value.shape} -> {self.cache_v.shape}")
-                raise e
-            
-        # Only store what fits
-        start_pos -= excess
-        end_pos   -= excess
-        if verbose: print(f"Setting position {start_pos} to {end_pos}")
-        # TODO: Modify to use tensor.select to properly cater for ex dims
-        if key.ndim >= 6: raise NotImplementedError()
-        self.cache_k[:, :, start_pos:end_pos] = key
-        self.cache_v[:, :, start_pos:end_pos] = value
-        
-        self.cache_size = min(end_pos, self.max_seq_len)
+        if excess:
+            keep = self.cache_size - excess          # survivors; <= 0 means the whole cache is replaced
+            if keep > 0:
+                # clone: source and destination slices overlap
+                self.cache_k[:, :, :keep] = self.repo_k(
+                    self.cache_k[:, :, excess:self.cache_size].clone(), excess, keys=keys, verbose=verbose)
+                self.cache_v[:, :, :keep] = self.repo_v(
+                    self.cache_v[:, :, excess:self.cache_size].clone(), excess, keys=keys)
+            start -= excess
+            end   -= excess
+        if verbose: print(f"Setting position {start} to {end}")
+        self.cache_k[:, :, start:end] = key
+        self.cache_v[:, :, start:end] = value
+        self.cache_size = end
 
     # ------------------------------------------------------------------
     # GQA helper
     # ------------------------------------------------------------------
+
+    def _projection(self, tag: str, inputs: int, outputs: int, bias: bool, device, dtype):
+        """Linear, or Polynomial(proj_coeffs) for the projections listed in poly_projs.
+        Polynomial(1 coefficient) is exactly a Linear layer, so proj_coeffs=1 keeps Linear."""
+        if self.proj_coeffs > 1 and tag in self.poly_projs:
+            return Polynomial(inputs, outputs, self.proj_coeffs, bias, device, dtype)
+        return Linear(inputs, outputs, bias, device, dtype)
+
+    def _qk_norm(self, tensor: Tensor):
+        """Parameter-free RMS normalisation of every branch of q/k over head_dim.
+        Bounds the energies regardless of how large the q/k projection weights get (RoPE preserves the norm)."""
+        shape = tensor.shape                                     # (..., heads, head_dim * mult)
+        tensor = tensor.reshape(*shape[:-1], self.mult, self.head_dim)
+        tensor = tensor * torch.rsqrt(tensor.pow(2).mean(-1, keepdim=True) + self.epsilon)
+        return tensor.reshape(shape)
+
+    def _rope(self, tensor: Tensor, pos_idx: int, verbose: int = None):
+        """RoPE over (g, b, seq, heads, head_dim * mult); with branch_rope every branch gets its own full set of frequencies."""
+        if not self.branch_rope or self.mult == 1:
+            return self.rotary_embedding(tensor, pos_idx, verbose)
+        shape = tensor.shape
+        folded = tensor.reshape(*shape[:-2], shape[-2] * self.mult, self.head_dim)
+        return self.rotary_embedding(folded, pos_idx, verbose).reshape(shape)
 
     def repeat_kv(self, tensor: Tensor):
         """Expand key/value heads to match query heads (GQA)."""
@@ -954,9 +1053,11 @@ class Attention(NeatModule):
 
         if mask:
             q_len, k_len = energy.shape[-2:]
-            diff = k_len - q_len
-            mask_ = torch.ones_like(energy, dtype=torch.bool).triu(1 + diff)
-            energy.masked_fill_(mask_, -torch.inf)
+            if q_len > k_len:
+                raise ValueError(f"query_len {q_len} > key_len {k_len}: first queries would have no keys")
+            # the last query sees the last key, so query i sees keys <= i + (k_len - q_len)
+            mask_ = torch.ones(q_len, k_len, device=energy.device, dtype=torch.bool).triu(1 + k_len - q_len)
+            energy = energy.masked_fill(mask_, -torch.inf)
             if verbose and verbose >= 2:
                 print(get_tensor_info(mask_, 'Mask', verbose))
                 print(get_tensor_info(energy, 'Masked Energy', verbose))
@@ -986,23 +1087,21 @@ class Attention(NeatModule):
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, prompt: Tensor = None,
                 pos_idx: int | None = 0, verbose: int = None, get: bool = False):
         """
-        Args:
-            tensor:  (batch_size, seq_len, dim_size)
-            prompt:  Optional query-only tensor of the same shape (cross-attention).
-            pos_idx: Starting position for RoPE.  None → 0.
-            get:     If True, also return the raw attention scores.
-        Returns:
-            output tensor (batch_size, seq_len, dim_size)
-            or (output, scores) when get=True.
+        tensor:  (genomes, batch, seq_len, dim)  -> supplies K and V (and Q unless `prompt` is given)
+        prompt:  optional (genomes, batch, q_len, dim) with q_len <= seq_len; they are the LAST q_len queries
+        pos_idx: absolute position of the first query token (negative = relative to seq_len).
+                 Keys are placed so the last key and last query coincide (what the causal mask assumes).
+                 Ignored in forced-cache mode, where positions come from the cache.
         """
         if self.auto_single and prompt is None:
             prompt = tensor.select(-2, -1).unsqueeze(-2)
-        if pos_idx is not None:
-            seq_len = tensor.shape[-2]
-            pos_idx = (seq_len + pos_idx) if pos_idx < 0 else pos_idx
-            assert 0 <= pos_idx < seq_len
+        seq_len = tensor.shape[-2]
         if pos_idx is None:
             pos_idx = 0
+        elif pos_idx < 0:
+            pos_idx += seq_len
+        if not 0 <= pos_idx < self.max_seq_len:
+            raise ValueError(f"pos_idx {pos_idx} must be within [0, {self.max_seq_len - 1}]")
         if verbose:
             print(f'\n{CM("Executing Self Attention", Fore.LIGHTBLUE_EX)}')
             print(get_tensor_info(tensor, f'Input', verbose, Fore.LIGHTRED_EX))
@@ -1027,40 +1126,44 @@ class Attention(NeatModule):
             print(get_tensor_info(value, 'Value', verbose, Fore.LIGHTBLUE_EX))
 
         # Reshape Q, K, V for each rep head
-        g, b, s, d = query.shape
-        query   = query.view(g, b, s, self.heads, self.head_dim*self.mult)
+        g, b, q_len, _ = query.shape
+        query   = query.view(g, b, q_len, self.heads, self.head_dim*self.mult)
         key     = key.view(g, b, -1, self.kv_heads, self.head_dim*self.mult)
         value   = value.view(g, b, -1, self.kv_heads, self.head_dim)
         if verbose:
             print(get_tensor_info(query, 'Q after Reshaping', verbose))
             print(get_tensor_info(key, 'K after Reshaping', verbose))
-
-        # Apply Rotary Embeddings NOTE: Ensure when one-shot/single-shot prompting the correct position is provided
+        if self.qk_norm:
+            query, key = self._qk_norm(query), self._qk_norm(key)
         key_len = key.shape[-3]
-        if self.forced_cache:
-            overflow = (self.cache_size + key_len) > self.max_seq_len
-            rope_pos = self.cache_size if not overflow else (self.max_seq_len - key_len) # NOTE: dequeing
-        else:
-            rope_pos = pos_idx
-        # pos_idx = min(self.max_seq_len - 1, max(0, pos_idx)) 
+        if q_len > key_len:
+            raise ValueError(f"query_len {q_len} > key_len {key_len}")
+        lead = key_len - q_len        # queries are the last q_len of the incoming key chunk
+        if key_len > self.max_seq_len:
+            raise ValueError(f"seq_len {key_len} > max_seq_len {self.max_seq_len}")
 
-        q_pi = rope_pos if not self.forced_cache else rope_pos + (key_len - 1)
-        k_pi = 0 if not self.forced_cache else rope_pos
-        query = self.rotary_embedding(query, q_pi, verbose)
-        key   = self.rotary_embedding(key, k_pi) # TODO: Only temporary for current use case
+        # Absolute position of the first incoming key
+        use_cache = self.cache_k is not None and (self.forced_cache or self.cache)
+        if self.forced_cache:
+            start = self.cache_size if (self.cache_size + key_len) <= self.max_seq_len else (self.max_seq_len - key_len)
+        else:
+            start = max(0, pos_idx - lead)
+            if start + key_len > self.max_seq_len:
+                raise ValueError(f"positions {start}..{start + key_len} exceed max_seq_len {self.max_seq_len}")
+        q_pi, k_pi = start + lead, start
+        query = self._rope(query, q_pi, verbose)
+        key   = self._rope(key, k_pi)
         if verbose:
-            print(get_tensor_info(query, f'Q after Rotary Embedding({q_pi}, {s})', verbose))
+            print(get_tensor_info(query, f'Q after Rotary Embedding({q_pi}, {q_len})', verbose))
             print(get_tensor_info(key, f'K after Rotary Embedding({k_pi}, {key_len})', verbose))
 
-        # KV-cache
-        if self.forced_cache and self.cache_k is not None: # TODO: Using forced_cache flag instead of cache for now
-            self._update_cache(key, value, rope_pos, verbose)
-            # Use cached key and value up to cache_pos
-            size  = (pos_idx + s) if not self.forced_cache else self.cache_size
-            key   = self.cache_k[:, :, :size]
-            value = self.cache_v[:, :, :size]
+        # KV-cache (forced: deque + reposition | normal: positional write + truncate)
+        if use_cache:
+            self._update_cache(key, value, start, keys, verbose)
+            key   = self.cache_k[:, :, :self.cache_size]
+            value = self.cache_v[:, :, :self.cache_size]
             if verbose:
-                print(f'Using cached K, V with cache_size={size}')
+                print(f'Using cached K, V with cache_size={self.cache_size}')
                 print(get_tensor_info(key, 'Cached K', verbose))
                 print(get_tensor_info(value, 'Cached V', verbose))
 
@@ -1072,10 +1175,8 @@ class Attention(NeatModule):
             print(get_tensor_info(value, 'Duplicated V', verbose))
 
         # Apply attention
-        attention_scores, attention = self.attention(
-            query, key, value, keys, self.causal_mask, verbose
-        )
-        attention = attention.reshape(g, b, s, self.dim_size)
+        attention_scores, attention = self.attention(query, key, value, keys, self.causal_mask, verbose)
+        attention = attention.reshape(g, b, q_len, self.dim_size)
         # out_view shape:  (genomes, batch_size, seq_len, dim_size)
         if verbose:
             print(get_tensor_info(attention, 'Attended Values', verbose))
@@ -1088,10 +1189,7 @@ class Attention(NeatModule):
             print(get_tensor_info(tensor, 'Output Projection', verbose))
 
         # Store attention for debugging
-        if not get:
-            return tensor
-        else:
-            return tensor, attention_scores
+        return tensor if not get else (tensor, attention_scores)
 
     def extra_repr(self) -> str:
         return (f"*** "

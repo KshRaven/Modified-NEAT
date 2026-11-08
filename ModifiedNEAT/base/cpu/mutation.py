@@ -8,7 +8,7 @@ from numba import njit, prange
 from numpy import ndarray as CPUArray
 
 
-@njit
+@njit(cache=True)
 def mutate_genome(parameter: CPUArray, g: int, x: int, y: int, mutate_rate: float, mutate_power: float,
                   replace_rate: float, init_type: int, mean: float, std: float, minimum: float, maximum: float,
                   ssm: bool, add_param: float, delete_param: float, epsilon: float,
@@ -63,7 +63,7 @@ def mutate_genome(parameter: CPUArray, g: int, x: int, y: int, mutate_rate: floa
         )
 
 
-@njit(parallel=True) # , cache=True) # nogil=True)
+@njit(parallel=True, cache=True)
 def mutate(
         updates: CPUArray, children: CPUArray,
         mutate_rate: float, mutate_power: float,

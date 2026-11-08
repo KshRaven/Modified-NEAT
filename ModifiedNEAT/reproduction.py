@@ -27,17 +27,35 @@ class Reproduction:
         self._config = configuration
         self.ancestors: dict[int, tuple[Genome, Genome]] = Dict.empty(INT, GENOME_TUPLE)
 
-    def create_new(self, genus: int, pop_size: int, module: NeatModule, tpb: int = None, verbose: int = None) -> dict[int, Genome]:
-        assert module.genus == genus
+    def create_new(
+        self, genus: int | list[int], pop_size: int | dict[int, int], module: NeatModule,
+        tpb: int = None, verbose: int = None
+    ) -> dict[int, Genome]:
+        if isinstance(genus, int):
+            genus_sizes = {genus: pop_size}
+        else:
+            genera = list(genus)
+            if isinstance(pop_size, dict):
+                genus_sizes = pop_size
+                if set(genus_sizes) != set(genera):
+                    raise ValueError("Genus sizes must match the requested genera")
+            else:
+                base_size, remainder = divmod(pop_size, len(genera))
+                genus_sizes = {
+                    genus: base_size + (index < remainder)
+                    for index, genus in enumerate(genera)
+                }
+        if module.genus not in genus_sizes:
+            raise ValueError(f"Module genus {module.genus} is not in the requested genera")
+        if any(size < 1 for size in genus_sizes.values()):
+            raise ValueError("Each genus must have at least one genome")
         if tpb is None:
             tpb = get_tpb()
-        # Set genomes
         genomes = Dict.empty(INT, GENOME)
-        for _ in range(pop_size):
-            gid = next(self.genome_indexer)
-            genome = Genome(gid, genus)
-            genomes[gid] = genome
-        # Initialize each parameter
+        for genus, size in genus_sizes.items():
+            for _ in range(size):
+                gid = next(self.genome_indexer)
+                genomes[gid] = Genome(gid, genus)
         for m in module.neat_modules():
             m.updated = False
         module.update(genomes, verify=False)

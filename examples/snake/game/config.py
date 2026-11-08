@@ -16,6 +16,7 @@ __all__ = [
     "PlayerConfig",
     "EnvironmentConfig",
     "overwrite_config",
+    "normalize_hiatus",
 ]
 
 
@@ -99,17 +100,48 @@ class SnakeConfig(Configuration):
         # An action the snake uses less than this share of its most used action counts as "low action
         # usage" (spiralling / looping). null disables the check.
         self.var_thresh: float | None = self.params.get("var_thresh", 0.05)
-        # State layout: 'vector' (feature vector per snake) or 'grid' (normalized board, 1 channel)
-        self.state_type: str = self.params.get("state_type", "vector")
+        # State layout: 'ego' (egocentric: food / tail bearing + distance, 3 rays, length, optionally the road offsets;
+        # no feature judges a move), 'vector' (12 compass-dependent features), 'strategy' (20 features that include the
+        # road solver's verdict on every move - the oracle, kept only for comparison), 'grid' (the board as a 3-channel
+        # image: body age, food, next-move cells; no oracle) or 'auto' (= 'ego')
+        self.state_type: str = self.params.get("state_type", "auto")
+        # 'ego' state only: append the road geometry (road offset of the three neighbour cells, the food and the tail,
+        # 13 inputs). False = pure sensing, 8 inputs (bearing / distance of food and tail, 3 rays, length).
+        self.ego_road: bool = self.params.get("ego_road", True)
         # Sensor ray length in cells (null = longest board side)
         self.ray_length: int | None = self.params.get("ray_length", None)
 
 
 class RewardConfig(Configuration):
-    """Reward shaping weights. Per-frame fitness lives in player.py, the shaping terms in reward.py."""
+    """
+    Reward shaping. Per-frame fitness lives in player.py, the shaping terms in reward.py.
+
+    `mode` picks what the dense shaping imitates:
+
+      basic      food-distance shaping only (closer / away / time / hiatus / looping). The original reward.
+      dhcr       "Dynamic Hamiltonian Cycle Repair, tier 1". The board has a one-way ring road through every
+                 cell. A snake whose body stays in road order can never trap itself, and it may hop to a free
+                 neighbour that is further along the road but not past the food (a shortcut). The reward
+                 grades every move as road / shortcut / slow / unsafe from exactly that rule.
+      cell_tree  The ring road is the outline of a spanning tree over 2x2 cells, and a move off the road is
+                 safe only if a tree swap makes it a road link while the body stays one piece. Legal swaps
+                 are really applied, so the road bends around the snake, like the test solver.
+                 Needs an even width and height (>= 4).
+      staged     dhcr while the snake is still learning, cell_tree once `skill` passes `staged_switch`.
+
+    Road modes use a skill curriculum (like the car racer): survive first (stay in road order, never box
+    yourself in, heavy crash cost), then go fast (shortcuts are credited more and more as `skill` rises).
+    A board a road mode cannot use (odd cells, or odd sides for cell_tree) falls back to `basic` with a warning.
+    """
+
+    MODES = ("basic", "dhcr", "cell_tree", "staged")
 
     def __init__(self, *, params: dict[str, Any] = None, file: str = None):
         super().__init__(params=params, file=file)
+
+        self.mode: str = str(self.params.get("mode", "staged")).lower()
+        if self.mode not in self.MODES:
+            raise ValueError(f"reward mode must be one of {self.MODES}, got {self.mode!r}")
 
         # Dense shaping on/off. Off = only food, death and completion events
         self.shaping: bool = bool(self.params.get("shaping", True))
@@ -117,7 +149,7 @@ class RewardConfig(Configuration):
         self.food_reward: float = self.params.get("food_reward", 200.0)
         self.death_penalty: float = self.params.get("death_penalty", 50.0)
         self.complete_reward: float = self.params.get("complete_reward", 100000.0)
-        # Dense terms (shaping only)
+        # Dense terms shared by every mode
         self.closer_weight: float = self.params.get("closer_weight", 1.0)      # moved closer to the food
         self.away_weight: float = self.params.get("away_weight", 1.1)          # moved away from the food
         self.time_penalty: float = self.params.get("time_penalty", 0.01)       # flat cost per frame
@@ -126,6 +158,53 @@ class RewardConfig(Configuration):
         # Added to every living snake's reward each frame, and multiplier on the reward the learner sees
         self.reward_offset: float = self.params.get("reward_offset", 0.0)
         self.reward_scale: float = self.params.get("reward_scale", 0.01)
+
+        # ---- Road modes (dhcr / cell_tree / staged) ----
+        # Per safe frame on the road (survive-first). Fades out as the skill rises.
+        self.road_weight: float = self.params.get("road_weight", 1.0)
+        # Credit per cell of road distance to the food removed this frame (a plain road step removes 1)
+        self.progress_weight: float = self.params.get("progress_weight", 2.0)
+        # A shortcut removes more than 1 cell: the extra cells are credited at this multiple x skill
+        self.shortcut_mult: float = self.params.get("shortcut_mult", 1.5)
+        # Largest road distance a single bad move is charged for (cells). Overshooting the food costs a lap.
+        self.slow_cap: float = self.params.get("slow_cap", 20.0)
+        # One-off cost of the move that breaks road order (cell_tree: an illegal swap, multiplied by the crash
+        # scale, see below), and a mild per-frame cost while the body is out of road order.
+        self.unsafe_weight: float = self.params.get("unsafe_weight", 30.0)
+        self.desync_weight: float = self.params.get("desync_weight", 0.3)      # per frame, NOT crash-scaled
+        # Share of the unsafe cost paid back when the body is in road order again (road order = a potential)
+        self.resync_refund: float = self.params.get("resync_refund", 0.9)
+        # Per living frame, x (1 - skill), fading with the frames since the last meal. Keeps living worth more than
+        # dying while the snake has no skill (see kernels/reward.py).
+        self.alive_weight: float = self.params.get("alive_weight", 1.0)
+        # Cost of a move into a pocket the snake cannot get out of (flood fill: less room than its length and
+        # no way to the tail). Also applies to `basic` when the strategy state is on.
+        self.trap_weight: float = self.params.get("trap_weight", 10.0)
+        # Driving style of the dhcr "mods": NASCAR = cost for reversing the turn direction (keeps the free
+        # space in big pieces), apple-fear = cost for swinging off the road into the food on the last step.
+        self.nascar_weight: float = self.params.get("nascar_weight", 0.3)
+        self.fear_weight: float = self.params.get("fear_weight", 3.0)
+        self.fear_min_frac: float = self.params.get("fear_min_frac", 0.25)   # board share filled before it counts
+        # dhcr hops are credited up to this board share (the original solver switches to repair after it)
+        self.shortcut_max_frac: float = self.params.get("shortcut_max_frac", 0.5)
+        # cell_tree: also try neighbours that are not closer to the food (slower, rarely useful)
+        self.tree_any_direction: bool = bool(self.params.get("tree_any_direction", False))
+        # New random spanning tree and a random start on the road for every (re)spawn (false = comb tree, fixed start)
+        self.random_road: bool = bool(self.params.get("random_road", True))
+        # `staged`: skill above which the road is switched from dhcr to cell_tree
+        self.staged_switch: float = self.params.get("staged_switch", 0.6)
+        # The road needs up to cells-1 moves per meal: raise max_hiatus to at least the cell count
+        self.auto_hiatus: bool = bool(self.params.get("auto_hiatus", True))
+
+        # ---- Skill curriculum (road modes), graded from the finished episode on every reset ----
+        self.curriculum: bool = bool(self.params.get("curriculum", True))
+        self.skill_start: float = self.params.get("skill_start", 0.0)
+        self.skill_rate: float = self.params.get("skill_rate", 0.15)           # how fast the skill follows the quality
+        self.skill_food_per_death: float = self.params.get("skill_food_per_death", 3.0)  # meals one death is worth
+        self.skill_lo: float = self.params.get("skill_lo", 0.3)                # quality at which skill starts to grow
+        self.skill_hi: float = self.params.get("skill_hi", 0.9)                # quality at which skill is full
+        # Death, unsafe and trap costs are multiplied by 1 + early_crash_mult * (1 - skill)
+        self.early_crash_mult: float = self.params.get("early_crash_mult", 3.0)
 
 
 class WindowConfig(Configuration):
@@ -166,8 +245,8 @@ class PlayerConfig(Configuration):
         super().__init__(params=params, file=file)
 
         self.lives: int = self.params.get("lives", 3)              # respawns a snake gets before it is out
-        self.max_hiatus: int = self.params.get("max_hiatus", 100)  # frames without eating before a life is lost
-        self.max_frames: int = self.params.get("max_frames", 1000) # episode length in frames
+        self.max_hiatus: int | None = normalize_hiatus(self.params.get("max_hiatus", 100))  # frames without eating before a life is lost, null = never
+        self.max_frames: int = self.params.get("max_frames", 2000) # episode length in frames
 
 
 class EnvironmentConfig(Configuration):
@@ -180,7 +259,7 @@ class EnvironmentConfig(Configuration):
       * Bigger or smaller board ........ grid_size
       * Cross boundaries ............... wrap = true
       * Longer or shorter episodes ..... max_frames
-      * More forgiving or stricter ..... lives, max_hiatus
+      * More forgiving or stricter ..... lives, max_hiatus (null = no starvation limit)
       * Same run every time ............ seed
       * Retro look ..................... window.pixel = true
 
@@ -208,10 +287,21 @@ class EnvironmentConfig(Configuration):
 
         # ---- Episode rules ----
         self.lives: int = self.params.get("lives", self.player.lives)
-        self.max_hiatus: int = self.params.get("max_hiatus", self.player.max_hiatus)
+        self.max_hiatus: int | None = normalize_hiatus(self.params.get("max_hiatus", self.player.max_hiatus))
         self.max_frames: int = self.params.get("max_frames", self.player.max_frames)
         # Multiplier applied to the state returned by reset() and step()
         self.state_scale: float = self.params.get("state_scale", 1.0)
+
+
+def normalize_hiatus(value: Any) -> int | None:
+    """Frames without food before a life is lost. None, 0, a negative number or infinity mean no limit (None)."""
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:
+        return None
+    if value == float("inf") or value <= 0:
+        return None
+    return int(value)
 
 
 def overwrite_config(config: Configuration, params: dict[str, Any]):

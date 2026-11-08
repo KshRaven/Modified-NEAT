@@ -185,17 +185,24 @@ def speciate(backend: Backend, config: Config, genera: list[int], modules: dict[
     ]
     modules_genera: list[NeatModule] = [modules[genus] for genus in genera]
     distances = []
+    distances_by_module = {}
     for species, genomes, module, genus in zip(species_genera, population_genera, modules_genera, genera):
-        assert module.genus == genus
         assert isinstance(genomes, Dict)
         unspeciated: list[int]              = List(set(genomes.keys()))
-        distances_cache                     = GenomeDistanceCache() # species_set.distances_cache
+        distances_cache = distances_by_module.get(id(module))
+        if distances_cache is None:
+            distances_cache = GenomeDistanceCache()
+            distances_by_module[id(module)] = distances_cache
+            update_cache = True
+        else:
+            update_cache = False
         new_representatives: dict[int, int] = Dict.empty(INT, INT)
         new_members: dict[int, list[int]]   = Dict.empty(INT, types.ListType(INT))
 
         # Update distances cache
         gts = clock.perf_counter()
-        update_distances_cache(backend, config, module, distances_cache, tpb=tpb, verbose=verbose)
+        if update_cache:
+            update_distances_cache(backend, config, module, distances_cache, tpb=tpb, verbose=verbose)
         if verbose and verbose >= 2:
             print(f"{CM('Created distances cache', Fore.CYAN)} in {round(clock.perf_counter() - gts, 2)} s")
 

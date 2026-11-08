@@ -3,6 +3,7 @@
 import sys
 import tempfile
 from pathlib import Path
+import warnings
 import torch
 import numpy as np
 
@@ -60,6 +61,45 @@ def test_population_save_dict():
     assert len(save_dict['module_state_dicts']) > 0, "No module architecture saved"
     
     print("✓ Population.save_dict() test passed")
+
+
+def test_module_metadata_verifier_accepts_child_name():
+    module = SimpleNeatModule()
+    module.child = torch.nn.Identity()
+    metadata = module.neat_dict()['architecture']['neat_modules']
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert module._verify_modules_metadata(metadata, strict=True) is metadata
+
+    assert not caught, f"Unexpected architecture warning: {caught}"
+
+
+def test_population_state_dict_filepath_and_extra_files():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        population, _, config = create_test_population(3)
+        config.general.pop_size = 17
+        state = population.state_dict()
+        assert state['config'].general.pop_size == 17
+        assert 'module_state_dicts' in state
+
+        filepath = Path(tmpdir) / 'checkpoint.neat.pkl'
+        success, _ = population.save(
+            filepath=str(filepath),
+            extra_files={'configs/run.json': '{"seed": 4}', 'logs/run.log': b'complete'},
+            debug=False,
+        )
+        assert success and filepath.is_file()
+        assert (Path(tmpdir) / 'checkpoint' / 'configs' / 'run.json').read_text(encoding='utf-8') == '{"seed": 4}'
+        assert (Path(tmpdir) / 'checkpoint' / 'logs' / 'run.log').read_bytes() == b'complete'
+
+        restored = create_test_population(2)[0]
+        restored.load(filepath=str(filepath), strict=False, debug=False)
+        assert len(restored.genomes) == len(population.genomes)
+        assert restored.config.general.pop_size == 17
+
+        restored.load(state_dict=state, strict=False, debug=False)
+        assert len(restored.genomes) == len(population.genomes)
 
 
 def test_population_save_load_to_file():

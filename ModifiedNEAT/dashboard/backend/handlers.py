@@ -100,16 +100,31 @@ def _open_pkl(filepath: Path):
 
 def _resolve_path(base_dir: Path, filename: str) -> Path:
     """Resolve filename relative to base_dir; raise 404/403 on failure."""
-    filepath = base_dir / filename
-    if not filepath.exists():
-        matches = list(base_dir.rglob(filename))
-        if matches:
-            filepath = matches[0]
-        else:
-            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    # Only the model file types the dashboard lists may be unpickled (never arbitrary files).
+    if not filename or not filename.endswith((".module.pkl", ".neat.pkl")):
+        raise HTTPException(status_code=403, detail="Invalid file type")
+    base_resolved = base_dir.resolve()
+    filepath = None
     try:
-        filepath = filepath.resolve()
-        filepath.relative_to(base_dir.resolve())
+        candidate = (base_resolved / filename).resolve()
+        candidate.relative_to(base_resolved)
+        if candidate.is_file():
+            filepath = candidate
+    except (ValueError, OSError):
+        raise HTTPException(status_code=403, detail="Invalid file path")
+    if filepath is None:
+        # Fall back to a bare file name; compared literally (no glob patterns from user input)
+        for pattern in ("*.module.pkl", "*.neat.pkl"):
+            for p in base_resolved.rglob(pattern):
+                if p.name == filename and p.is_file():
+                    filepath = p.resolve()
+                    break
+            if filepath is not None:
+                break
+    if filepath is None:
+        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    try:
+        filepath.relative_to(base_resolved)
     except ValueError:
         raise HTTPException(status_code=403, detail="Invalid file path")
     return filepath

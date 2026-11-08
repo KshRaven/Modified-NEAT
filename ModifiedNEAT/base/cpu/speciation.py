@@ -10,7 +10,7 @@ from numpy import ndarray as CPUArray
 import numpy as np
 
 
-@njit
+@njit(cache=True)
 def calc_distance(parameter: CPUArray, total_distance: CPUArray,
                   genome0: int, genome1: int, x: int,
                   compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
@@ -41,7 +41,7 @@ def calc_distance(parameter: CPUArray, total_distance: CPUArray,
     return current_distance
 
 
-@njit(parallel=True) # , cache=True)
+@njit(parallel=True, cache=True)
 # NOTE: Same fix as crossover(): a single return point and ret_code instead of
 #       raising inside a prange body. Only the outer `genome0` loop is a prange -
 #       each iteration exclusively owns row `genome0` of total_distance (lower

@@ -8,7 +8,7 @@ from numpy import ndarray as CPUArray
 import numpy as np
 
 
-@njit
+@njit(cache=True)
 def _crossover(value1: float, value2: float, states: CPUArray, index: int):
     if prob(states, index) >= 0.5:
         return value1
@@ -16,7 +16,7 @@ def _crossover(value1: float, value2: float, states: CPUArray, index: int):
         return value2
 
 
-@njit(parallel=True) # , cache=True) # nogil=True)
+@njit(parallel=True, cache=True)
 # TODO: Caching seems to work for now since no custom Classes or prints are used
 def crossover(genus: int, source: CPUArray, updates: CPUArray, parents: CPUArray, genera: CPUArray, filled: CPUArray,
               probabilities: CPUArray, equal_sources: bool):

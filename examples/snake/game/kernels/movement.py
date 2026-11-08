@@ -32,14 +32,27 @@ def spawn(
             continue
         cells[p, :, :] = CELL_EMPTY
         d = init_dir[p]
+        # Keep a centred spawn where possible, but shift the head just enough that its tail
+        # remains on-board with solid walls. This also makes runtime wrap toggling safe on
+        # boards where init_len is longer than half a dimension.
+        sx, sy = cx, cy
+        if not wrap:
+            if d == 0:       # facing right; body extends left from the head
+                sx = max(sx, init_len - 1)
+            elif d == 2:     # facing left; body extends right from the head
+                sx = min(sx, w - init_len)
+            elif d == 1:     # facing up; body extends down from the head
+                sy = min(sy, h - init_len)
+            else:            # facing down; body extends up from the head
+                sy = max(sy, init_len - 1)
         direction[p] = d
         length[p] = init_len
         head_idx[p] = init_len - 1
         hiatus[p] = 0
         action_count[p, :] = 0
         for i in range(init_len):                       # i = 0 is the head
-            x = cx - _DX[d] * i
-            y = cy - _DY[d] * i
+            x = sx - _DX[d] * i
+            y = sy - _DY[d] * i
             if wrap:
                 x %= w
                 y %= h

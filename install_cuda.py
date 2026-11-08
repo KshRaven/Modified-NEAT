@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-install.py — Optional helper script for ModifiedNEAT installation with GPU auto-detection.
+install_cuda.py — Optional helper script for ModifiedNEAT installation with GPU auto-detection.
 
 This script is OPTIONAL. You can also install directly with pip:
     pip install .              # CPU-only (default, recommended)
@@ -14,10 +14,10 @@ DIRECT pip/uv INSTALLATION (Recommended):
     pip install --extra-index-url https://download.pytorch.org/whl/cu132 -e .[gpu]
 
 USING THIS SCRIPT (Advanced):
-    python install.py              # Auto-detect and install CPU or GPU
-    python install.py --cpu        # Force CPU-only installation
-    python install.py --gpu        # Auto-detect CUDA and install GPU
-    python install.py --all        # Same as --gpu
+    python install_cuda.py              # Auto-detect and install CPU or GPU
+    python install_cuda.py --cpu        # Force CPU-only installation
+    python install_cuda.py --gpu        # Auto-detect CUDA and install GPU
+    python install_cuda.py --all        # Same as --gpu
 
 Post-installation:
     Set device via environment variable before importing:
@@ -236,15 +236,14 @@ def main() -> None:
         description="Install ModifiedNEAT with optional GPU/CUDA support",
         epilog="""
 Examples (using this script):
-  python install.py              # Auto-detect CPU/GPU and install
-  python install.py --cpu        # Force CPU-only installation
-  python install.py --gpu        # Auto-detect CUDA and install GPU
-  python install.py --all        # Same as --gpu
+  python install_cuda.py              # Auto-detect CPU/GPU and install
+  python install_cuda.py --cpu        # Force CPU-only installation
+  python install_cuda.py --gpu        # Auto-detect CUDA and install GPU
+  python install_cuda.py --all        # Same as --gpu
 
 Direct pip installation (no script needed):
   pip install .                  # CPU-only (default)
   pip install --extra-index-url https://download.pytorch.org/whl/cu132 -e .[gpu]  # GPU with CUDA 13.0
-  pip install -c constraints-gpu-cu132.txt -e .[gpu]  # Using constraints file
         """
     )
     parser.add_argument("--cpu", action="store_true",
@@ -265,7 +264,7 @@ Direct pip installation (no script needed):
     print("=" * 70)
     print("\nNote: You can also install directly with pip without this script:")
     print("  pip install .")
-    print("  pip install --index-url https://download.pytorch.org/whl/cu132 -e .[gpu]")
+    print("  pip install --extra-index-url https://download.pytorch.org/whl/cu132 -e .[gpu]")
     print("  python setup.py develop")
 
     cuda_major = None
@@ -297,7 +296,7 @@ Direct pip installation (no script needed):
     else:
         print("\nModifiedNEAT is configured for CPU.")
         print("To enable GPU support later:")
-        print("  pip install --index-url https://download.pytorch.org/whl/cu132 .[gpu]")
+        print("  pip install --extra-index-url https://download.pytorch.org/whl/cu132 .[gpu]")
 
     print("\nTo import ModifiedNEAT:")
     print("  from ModifiedNEAT import population")

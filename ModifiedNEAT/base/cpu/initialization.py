@@ -8,7 +8,7 @@ from numpy import ndarray as CPUArray
 import numpy as np
 
 
-@njit
+@njit(cache=True)
 def initialize_genome(parameter: CPUArray, g: int, x: int, y: int, init_type: int, mean: float, std: float,
                       norm_min: float, norm_max: float, rng_states: CPUArray, rng_index: int):
     uni_min = max(norm_min, (mean - (2 * std)))
@@ -23,7 +23,7 @@ def initialize_genome(parameter: CPUArray, g: int, x: int, y: int, init_type: in
         parameter[g, x, y] = uniform(rng_states, rng_index, uni_min, uni_max)
 
 
-@njit(parallel=True) # , cache=True)
+@njit(parallel=True, cache=True)
 def initialize(parameter: CPUArray, init_type: int, mean: float, std: float, minimum: float, maximum: float, rng_states):
     ret_code: int = 0
     if parameter.ndim != 3: ret_code = 1

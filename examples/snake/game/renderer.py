@@ -228,7 +228,7 @@ class SnakeRenderer:
         sn.cast_rays()
         pl = sn.players
         lines = [
-            f"dir {int(sn.direction[index])}  hiatus {int(sn.hiatus[index])}/{int(pl.max_hiatus)}",
+            f"dir {int(sn.direction[index])}  hiatus {int(sn.hiatus[index])}/{"inf" if pl.max_hiatus is None else int(pl.max_hiatus)}",
             f"food dist {sn.dist[index]:.1f}  d=({sn.food_dx[index]:+.0f}, {sn.food_dy[index]:+.0f})",
             f"obstacle L/S/R {' '.join(str(int(v)) for v in sn.obstacle[index])}",
             f"food ray L/S/R {' '.join(str(int(v)) for v in sn.food_ray[index])}",

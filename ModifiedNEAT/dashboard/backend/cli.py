@@ -136,6 +136,9 @@ Examples:
         print(f"Development mode: enabled (auto-reload)")
     if args.verbose > 0:
         print(f"Verbose logging: level {args.verbose}")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print("WARNING: listening on a non-local address. NeatBoard has no authentication and loads")
+        print("         pickle files (which can execute code). Only expose it on trusted networks.")
     print(f"Press Ctrl+C to stop\n")
 
     # Import here to avoid issues when module is imported but not run

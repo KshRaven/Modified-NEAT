@@ -22,7 +22,7 @@ from .population import Population
 from .reproduction import Reproduction
 from .species import Species, SpeciesSet
 from .stagnation import Stagnation
-from .rl import NEAT
+from .rl import NEAT, PPO
 
 # Lazy imports for less commonly used modules
 _lazy_modules = {

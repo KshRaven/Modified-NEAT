@@ -15,6 +15,7 @@ import numpy as np
 import sys
 import traceback
 import warnings
+import copy
 
 # GPU packages are never imported here (CPU-only machines may not have them). A cupy / numba.cuda array can only
 # exist if its package is already loaded, so it is enough to look it up in sys.modules.
@@ -86,6 +87,22 @@ class NeatParameter(nn.Parameter):
         self.cd: CPUArray = None
         self.md: CPUArray = None
         
+    def __deepcopy__(self, memo):
+        """
+        ``nn.Parameter.__deepcopy__`` rebuilds the parameter with ``type(self)(data, requires_grad)``, which would hit
+        this class' ``__new__(shape, ...)`` with a tensor as ``shape``. Rebuild it here from the cloned data instead and
+        carry over the python attributes (``param_index``, ``mapping``, ``original_shape`` ...).
+        """
+        if id(self) in memo:
+            return memo[id(self)]
+        result = torch.Tensor._make_subclass(
+            type(self), self.data.clone(memory_format=torch.preserve_format), self.requires_grad
+        )
+        memo[id(self)] = result
+        for name, value in self.__dict__.items():
+            result.__dict__[name] = copy.deepcopy(value, memo)
+        return result
+
     @property
     def module_index(self):
         if self._module_index is None:
@@ -612,22 +629,24 @@ class NeatModule(nn.Module):
             return False
     
         children = metadata['children']
-        if recurse and len(children) > 0:
-            count = 0
-            for name, module in self.named_children():
-                if isinstance(module, NeatModule):
-                    count += 1
-                    if strict and name not in children:
-                        warnings.warn(
-                            f"A NeatModule '{self.__class__.__name__} is missing a child module '{name}' "
-                            f"or its attribute name has been modified",
-                            category=RuntimeWarning,
-                        )
-                        return False
-            if count != len(children):
+        if recurse:
+            saved_child_names = {child.get('child_name') for child in children}
+            current_child_names = {name for name, _ in self.named_children()}
+            if strict and current_child_names != saved_child_names:
+                missing = current_child_names - saved_child_names
+                if missing:
+                    name = sorted(missing)[0]
+                    warnings.warn(
+                        f"A NeatModule '{self.__class__.__name__}' is missing a child module '{name}' "
+                        f"or its attribute name has been modified",
+                        category=RuntimeWarning,
+                    )
+                    return False
+            if len(current_child_names) != len(saved_child_names):
                 warnings.warn(
                     f"Mismatch in NeatModule metadata being set. "
-                    f"Expected {len(children)} child modules but current module requires {count} ",
+                    f"Expected {len(saved_child_names)} child modules but current module requires "
+                    f"{len(current_child_names)}",
                     category=RuntimeWarning,
                 )
                 return False
@@ -734,8 +753,10 @@ class NeatModule(nn.Module):
                 )
             shapes_match = all([nt.shape[1:] == ot.shape[1:] for (nt, ot) in zip(state_dict.values(), old_state_dict.values())])
             if not shapes_match:
+                for (nt, ot) in zip(state_dict.values(), old_state_dict.values()): print((nt.shape, ot.shape) )
+
                 raise RuntimeError(
-                    f"Current order and shape of parameters does not match of the state_dict"
+                    f"Current order and shape of parameters does not match that of the state_dict"
                 )
             for (nn, new_array), (on, param) in zip(state_dict.items(), old_param_dict.items()):
                 if strict and nn != on:

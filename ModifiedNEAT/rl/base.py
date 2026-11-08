@@ -1,32 +1,47 @@
-from ModifiedNEAT.nn.base import NeatModule, Model
-from ModifiedNEAT.population import Population
-from ModifiedNEAT.optim.scheduler import Scheduler
-from ModifiedNEAT.util.replay import ReplayBuffer
-from ModifiedNEAT.util.datetime import eta, clock
-# from ModifiedNEAT.util.storage import save, load
-from ModifiedNEAT.util.qol import manage_params
-from ModifiedNEAT.util.datetime import unix_to_datetime_file
-from ModifiedNEAT.util.fancy_text import CM, Fore
+from __future__ import annotations
 
+import math
+import warnings
+from itertools import count
+from typing import Any, Callable, Iterable, Union
+
+import numpy as np
+import torch
+from numpy import ndarray
 from torch import Tensor
 from torch.utils.tensorboard import SummaryWriter
-from numba import njit
-from numpy import ndarray
-from typing import Any, Union, Iterable, Callable
-from itertools import count
 
-import torch
-import random
-import warnings
-import numpy as np
-import math
+from ModifiedNEAT.nn.base import Model, NeatModule
+from ModifiedNEAT.optim.scheduler import Scheduler
+from ModifiedNEAT.population import Population
+from ModifiedNEAT.util.datetime import clock, eta, unix_to_datetime_file
+from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.qol import manage_params
+
+from .functional import EpisodeRuns, get_rl_backend
+from .replay import LogBuffer, ReplayBuffer, RolloutBuffer
+
+__all__ = ['Algorithm', 'NEATAlgoWarning', 'TensorDict', 'TensorboardLogger', 'TerminalReporter']
 
 
 class NEATAlgoWarning(Warning):
     pass
 
 
+# Kept for imports of the former Torch based API; the trainers now work on arrays shaped (genomes, records, *features)
 TensorDict = dict[int, Tensor]
+
+
+def _scalar(value):
+    """Converts Tensor / numpy / python numbers to something SummaryWriter.add_scalar accepts."""
+    if isinstance(value, Tensor):
+        value = value.detach().cpu()
+        return value.item() if value.numel() == 1 else value.numpy()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, bool):
+        return int(value)
+    return value
 
 
 class TensorboardLogger:
@@ -34,6 +49,9 @@ class TensorboardLogger:
     Groups scalars into named sections (eg. ``rollout``, ``policy``) and writes them all to a single
     Tensorboard ``SummaryWriter`` in one call, so algorithms build a plain dict per section instead of
     repeating ``writer.add_scalar(...)`` for every metric.
+
+    Values that are arrays with more than one element are written as histograms instead of scalars, and ``call`` gives
+    raw access to any other ``SummaryWriter`` method (text, images, figures, hparams ...).
     """
 
     def __init__(self, log_path: str):
@@ -65,7 +83,15 @@ class TensorboardLogger:
             for name, value in scalars.items():
                 if value is None:
                     continue
-                self.writer.add_scalar(f"{section}/{name}", value, step)
+                value = _scalar(value)
+                if isinstance(value, np.ndarray):
+                    self.writer.add_histogram(f"{section}/{name}", value, step)
+                else:
+                    self.writer.add_scalar(f"{section}/{name}", value, step)
+
+    def call(self, method: str, *args, **kwargs):
+        """Calls any ``SummaryWriter`` method, eg. ``tb.call('add_text', 'env/notes', 'hello', step)``."""
+        return getattr(self.init(), method)(*args, **kwargs)
 
     def flush(self):
         """Flushes any buffered events to disk."""
@@ -118,11 +144,30 @@ class TerminalReporter:
         print("\n" + "\n".join(lines))
 
 
+def _numpy_dtype(dtype: torch.dtype) -> np.dtype:
+    try:
+        return np.dtype(torch.empty(0, dtype=dtype).numpy().dtype)
+    except Exception:  # eg. bfloat16
+        return np.dtype(np.float32)
+
+
 class Algorithm(object):
+    """
+    Shared rollout / scoring machinery of the NEAT-style trainers.
+
+    Data lives in dense NumPy arrays (``RolloutBuffer``, shape ``(genomes, records, *features)``) and all the
+    post-rollout bookkeeping (sorting by episode, returns, per-episode reductions, accuracies, losses) is done by
+    Numba kernels (``ModifiedNEAT.rl.functional``). Torch is only used for the model passes, through
+    :meth:`forward_pass`, which supports two batching systems:
+
+    * ``batching='genome'``: genomes are processed one by one, each with its own batches of ``batch_size`` records.
+    * ``batching='record'``: every genome of a genus (module) is processed at once, ``record_batch_size`` records at
+      a time (default 1, which keeps the memory use of large populations low).
+    """
     mapping_indexer = count(0)
 
     def __init__(self, population: Population, schedulers: list[Scheduler] = None,
-                 device=torch.device('cpu'), dtype: torch.dtype = torch.float32, **options):
+                 device=None, dtype: torch.dtype = torch.float32, **options):
         # ------------------------------ Handle input ------------------------------ #
         models = list(population.modules.values())
         if isinstance(models, NeatModule):
@@ -133,13 +178,19 @@ class Algorithm(object):
             schedulers = [schedulers]
         else:
             schedulers = list(schedulers)
+        # ------------------------------ Device ------------------------------ #
+        # The bookkeeping backend follows the device ModifiedNEAT.base uses; the torch device only runs the models.
+        self.ops = get_rl_backend()
+        if device is None:
+            device = torch.device('cuda' if self.ops.name == 'cuda' else 'cpu')
         # ------------------------------ Build ------------------------------ #
         self.models                     = models
         self.population: Population     = population
         self.schedulers: list[Scheduler] = schedulers
-        self.primary                    = ReplayBuffer()
-        self.secondary                  = ReplayBuffer()
-        self.logging                    = ReplayBuffer()
+        self.np_dtype                   = _numpy_dtype(dtype)
+        self.primary                    = RolloutBuffer(dtype=self.np_dtype)  # rollout records
+        self.secondary                  = RolloutBuffer(dtype=np.float64)     # per-episode scores
+        self.logging                    = LogBuffer()                        # logging / reporting series
         # ------------------------------ Attributes ------------------------------ #
         self.steps_done                 = 0
         self.prev_steps_done            = self.steps_done
@@ -147,14 +198,17 @@ class Algorithm(object):
         self.episodes_done              = 0
         self.prev_episodes_done         = self.episodes_done
         self.updates_done               = 0
-        self.batch_size                 = manage_params(options, 'batch_size', 64)
+        self.batch_size                 = manage_params(options, 'batch_size', 256)
+        self.record_batch_size          = manage_params(options, 'record_batch_size', 1)
+        self.batching                   = manage_params(options, 'batching', 'genome')
         self.terminated                 = True
         # ------------------------------ States ------------------------------ #
         self.device: torch.device       = device
         self.dtype: torch.dtype         = dtype
         self.episode_mapping: dict[int, int] = {}
         self.episode_lengths: dict[int, int] = {}
-        self._global_mean = self._global_std = self._global_min = self._global_max = None
+        self.key_genus: dict[int, int]  = {}
+        self.row_genus: np.ndarray      = np.zeros(0, np.int64)
         # ------------------------------ Tensorboard logging ------------------------------ #
         from ModifiedNEAT.util.storage import STORAGE_DIR
 
@@ -166,6 +220,9 @@ class Algorithm(object):
         self.tb: TensorboardLogger = TensorboardLogger(self.log_path)
         self.reporter: TerminalReporter = TerminalReporter()
         self._report_hook: Callable = None
+        self._log_sources: dict[str, tuple[Callable | dict, bool]] = {}
+        self._pending_logs: dict[str, dict[str, Any]] = {}
+        self.prev_valid_keys: list[int] = None
         # ------------------------------ Scheduling ------------------------------ #
         # Last step on purpose: subclasses define their tunable attributes BEFORE calling super().__init__,
         # so every attribute a scheduler targets already exists when it is bound.
@@ -202,6 +259,73 @@ class Algorithm(object):
         """
         self._report_hook = hook
 
+    # ============================================================================================== #
+    #                                  External logging (Tensorboard)                                #
+    # ============================================================================================== #
+    def add_log_source(self, section: str, source: Callable[['Algorithm'], dict] | dict, report: bool = False):
+        """
+        Registers an external source that is written to Tensorboard under ``section`` every update (e.g. how your
+        environment's goals are changing).
+
+        :param section: Tensorboard section (``'<section>/<name>'``) the source's scalars are written under.
+        :param source: Either a callable ``fn(trainer) -> {name: value}`` evaluated once per update, or a dict that is
+            read (so it can be mutated by the environment) every update. A callable may also return
+            ``{section: {name: value}}`` to write several sections. Arrays with more than one element become histograms.
+        :param report: Also print the source's values in the terminal report.
+        """
+        self._log_sources[section] = (source, report)
+
+    def remove_log_source(self, section: str):
+        self._log_sources.pop(section, None)
+
+    def log_external(self, section: str, **scalars):
+        """
+        Queues scalars from anywhere (eg. your evaluation function) for the next update's Tensorboard write, e.g.
+        ``trainer.log_external('env', goal=ENV.goal, difficulty=ENV.difficulty)``. Later values of the same name
+        within one epoch overwrite earlier ones.
+        """
+        self._pending_logs.setdefault(section, {}).update(scalars)
+
+    def log_now(self, step: int | None = None, **sections: dict[str, Any]):
+        """Writes sections to Tensorboard immediately (``step`` defaults to the number of updates done)."""
+        self.tb.log(self.updates_done if step is None else step, **sections)
+        self.tb.flush()
+
+    def _collect_external(self) -> tuple[dict[str, dict], dict[str, dict]]:
+        tb_sections: dict[str, dict] = {}
+        rep_sections: dict[str, dict] = {}
+        for section, (source, report) in self._log_sources.items():
+            try:
+                values = source(self) if callable(source) else dict(source)
+            except Exception as e:  # a broken external source must not kill a long training run
+                warnings.warn(category=NEATAlgoWarning, message=f"Log source '{section}' failed: {e!r}")
+                continue
+            if not values:
+                continue
+            nested = all(isinstance(v, dict) for v in values.values())
+            for name, scalars in (values.items() if nested else [(section, values)]):
+                tb_sections.setdefault(name, {}).update(scalars)
+                if report:
+                    rep_sections.setdefault(name.upper(), {}).update(scalars)
+        for section, scalars in self._pending_logs.items():
+            tb_sections.setdefault(section, {}).update(scalars)
+        self._pending_logs = {}
+        return tb_sections, rep_sections
+
+    def _write_logs(self, step: int, **sections: dict[str, Any]) -> dict[str, dict]:
+        """Writes the algorithm's own sections plus every external one; returns external sections to report."""
+        external, report = self._collect_external()
+        merged: dict[str, dict] = {section: dict(scalars) for section, scalars in external.items()}
+        for section, scalars in sections.items():
+            if scalars:
+                merged.setdefault(section, {}).update(scalars)  # the algorithm's own metrics win on name clashes
+        self.tb.log(step, **merged)
+        self.tb.flush()
+        return report
+
+    # ============================================================================================== #
+    #                                          Mapping / buffers                                     #
+    # ============================================================================================== #
     def get_module(self, key: int) -> Model:
         for module in self.models:
             if key in module.mapping:
@@ -213,89 +337,30 @@ class Algorithm(object):
             mapping = self.population.get_mapping(consolidated=True, grouped=False)
         self.primary.update_mapping(mapping)
         self.secondary.update_mapping(mapping)
-        self.logging.update_mapping(mapping)
+        genomes = self.population.genomes
+        self.key_genus = {key: genomes[key].genus for key in mapping if key in genomes}
+        self.row_genus = np.full(len(mapping), -1, np.int64)
+        for key, index in mapping.items():
+            self.row_genus[index] = self.key_genus.get(key, -1)
 
-    @staticmethod
-    @njit
-    def get_episode_filter(mapping: list[int], episodes_done: int, episode_wanted: int):
-        episodes_to_del = [ep for ep in range(episodes_done) if ep < (episodes_done - episode_wanted)]
-        record_filter = [i for i, ep in enumerate(mapping) if ep in episodes_to_del]
-        return record_filter
+    def rows_of(self, keys: Iterable[int]) -> np.ndarray:
+        return self.primary.rows_of(list(keys))
 
     def deque_episodes(self, episodes: int, keys: list[int] = None):
-        """
-        Deletes the episodes before the last n episodes.
-        Used to compensate for the long data collection times of the NEAT evaluation functions.
-        :param episodes: (int) Number of recent episodes to keep.
-        :param keys: (list[int])
-        :return: (none)
-        """
-        assert episodes >= 0
-        filters = {}
-        episode_mapping: dict[int, list[int]] = self.primary.rollout(buffers='ep_map', as_list=True)[0]
-        for key in self.primary.mapping.keys():
-            # episodes_to_del = torch.tensor([ep for ep in range(self.episodes_done) if ep < (self.episodes_done-episodes)])
-            # mapping         = torch.tensor(episode_mapping[key])
-            # episode_filter  = torch.isin(mapping, episodes_to_del)
-            # record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
-            # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
-            filters[key] = self.get_episode_filter(episode_mapping[key], self.episodes_done, episodes) # record_filter
-        self.primary.deque(filters, keys)
+        """Keeps only the last ``episodes`` episodes of the primary (rollout) buffer."""
+        self.primary.keep_last_episodes(episodes, keys, latest=self.episodes_done)
 
     def deque_steps(self, steps: int, keys: list[int] = None):
-        """
-        Deletes the last n steps.
-        Used to compensate for the large data sizes of the NEAT evaluation functions.
-        :param steps: (int) Number of steps to keep.
-        :param keys: (list[int])
-        :return: (none)
-        """
-        assert steps >= 0
-        filters = {}
-        episode_mapping: dict[int, list[int]] = self.primary.rollout(buffers='ep_map', as_list=True)[0]
-        for key in self.primary.mapping.keys():
-            records = len(episode_mapping[key])
-            limit = max(0, records - steps)
-            filters[key] = list(range(limit)) # [i for i in range(records) if i < limit]
-        self.primary.deque(filters, keys)
+        """Keeps only the last ``steps`` records of the primary (rollout) buffer; ``0`` empties it."""
+        self.primary.keep_last_steps(steps, keys)
 
     def deque_episodes_secondary(self, episodes: int, keys: list[int] = None):
-        """
-        Deletes the episodes before the last n episodes.
-        Used to compensate for the long data collection times of the NEAT evaluation functions.
-        :param episodes: (int) Number of recent episodes to keep.
-        :param keys: (list[int])
-        :return: (none)
-        """
-        assert episodes >= 0
-        filters = {}
-        episode_mapping: dict[int, list[int]] = self.secondary.rollout(buffers='ep_map', as_list=True)[0]
-        for key in self.secondary.mapping.keys():
-            max_ep = max(self.secondary.data[key]['ep_map']) + 1
-            # episodes_to_del = torch.tensor([ep for ep in range(max_ep) if ep < (max_ep-episodes)])
-            # mapping = torch.tensor(episode_mapping[key])
-            # episode_filter  = torch.isin(mapping, episodes_to_del)
-            # record_filter   = torch.nonzero(episode_filter, as_tuple=True)[0].tolist()
-            # # record_filter   = [elem.cpu().item() if elem.numel() == 1 else None for elem in record_filter]
-            filters[key] = self.get_episode_filter(episode_mapping[key], max_ep, episodes) # record_filter
-        self.secondary.deque(filters, keys)
+        """Keeps only the last ``episodes`` episodes of each genome in the secondary (score) buffer."""
+        self.secondary.keep_last_episodes(episodes, keys)
 
     def deque_steps_secondary(self, steps: int, keys: list[int] = None):
-        """
-        Deletes the last n steps.
-        Used to compensate for the large data sizes of the NEAT evaluation functions.
-        :param steps: (int) Number of steps to keep.
-        :param keys: (list[int])
-        :return: (none)
-        """
-        assert steps >= 0
-        filters = {}
-        episode_mapping: dict[int, list[int]] = self.secondary.rollout(buffers='ep_map', as_list=True)[0]
-        for key in self.secondary.mapping.keys():
-            records = len(episode_mapping[key])
-            limit = max(0, records - steps)
-            filters[key] = list(range(limit)) # [i for i in range(records) if i < limit]
-        self.secondary.deque(filters, keys)
+        """Keeps only the last ``steps`` episode records of each genome in the secondary (score) buffer."""
+        self.secondary.keep_last_steps(steps, keys)
 
     def reset_buffers(self):
         self.primary.reset()
@@ -315,10 +380,7 @@ class Algorithm(object):
             for env_idx, (done, reset) in enumerate(zip(terminated, force_reset)):
                 # Assign new mapping for each env instance on no mapping, instance termination or forced reset
                 ep_map = self.episode_mapping.get(env_idx)
-                # ep_len = self.episode_lengths.get(ep_map)
                 if any([ep_map is None, done, reset]):
-                    # print(cmod(f"Assigned mapping {self.episode_mapping.get(env_idx)} "
-                    #            f"term: {len(terminated)} -> {[self.episode_mapping.get(env_idx) is None, done, force_reset[env_idx]]}", Fore.LIGHTRED_EX))
                     self.episode_mapping[env_idx] = next(self.mapping_indexer)
             # Delete invalid ep mapping; NOTE: For the case where num of envs change
             for env_idx in list(self.episode_mapping.keys()):
@@ -338,512 +400,344 @@ class Algorithm(object):
                 if self.episode_lengths.get(env_map) is None:
                     self.episode_lengths[env_map] = 0
         # For case where rollout buffer has been filled and new episodes have been made fore future env data collection
-        if self.terminated: # self.steps_done == self.prev_steps_done:
+        if self.terminated:
             for ep_map in self.episode_lengths.keys():
                 self.episode_lengths[ep_map] = 0
 
+    def _record_step(self, data: dict[str, Any], terminated, force_stop=False,
+                     reset_mapping: bool | list[bool] = False, session_dim: int | None = None) -> bool:
+        """
+        Appends one environment step for every environment instance to the primary buffer.
+
+        :param data: ``{buffer name: array}``; arrays (Tensor / ndarray / cupy) have the genomes on dim 0 and, when
+            several environment sessions are run, the sessions on ``session_dim`` (default 1).
+        :return: Whether the rollout buffer has been filled (steps limit reached or ``force_stop``).
+        """
+        terminated = [bool(t) for t in np.atleast_1d(terminated)] if not isinstance(terminated, list) else terminated
+        sd_set = session_dim is not None
+        if session_dim is None:
+            session_dim = 1
+
+        if self.steps_done == self.prev_steps_done:
+            self.handle_episode_mapping(terminated, True)
+            self.terminated = False
+
+        data = {name: self.ops.to_host(value) for name, value in data.items()}
+
+        def select(array: np.ndarray, session_idx: int):
+            if len(terminated) > 1 or sd_set:
+                assert array.shape[session_dim] == len(terminated)
+                return np.take(array, session_idx, axis=session_dim)
+            return array
+
+        filled = False
+        if self.steps_done < self.steps_limit:
+            # Loop through all environments
+            for idx, ended in enumerate(terminated):
+                self.primary.append(
+                    **{name: select(value, idx) for name, value in data.items()},
+                    ep_map=self.episode_mapping[idx],
+                )
+
+                self.steps_done += 1
+                self.episodes_done = max(self.episode_mapping.values()) + 1
+                self.episode_lengths[self.episode_mapping[idx]] += 1
+
+                if self.steps_done >= self.steps_limit or force_stop:
+                    self.prev_steps_done = self.steps_done
+                    self.prev_episodes_done = self.episodes_done
+                    filled = True
+        else:
+            raise RuntimeError(f"Steps have already been filled.")
+
+        if filled:
+            self.terminated = True
+        else:
+            self.handle_episode_mapping(terminated, reset_mapping)
+
+        return filled
+
     def get_batches(self, keys: Iterable[int], batch_size: int = None, shuffle=False):
+        """``{key: [index arrays]}`` batches over each genome's primary records (kept for external use)."""
         batches = {}
-        buffer_sizes = self.primary.buffer_sizes() # TODO: Might want to parameterize it
+        if batch_size is None:
+            batch_size = self.batch_size
+        assert batch_size > 0
         for key in keys:
-            records = int(buffer_sizes[key])
-
-            if batch_size is None:
-                batch_size = 64
-            assert batch_size > 0
-            batch_size = min(batch_size, records)
-
-            indices: list[int] = list(range(records))
-            if shuffle:
-                random.shuffle(indices)
-            batch_indices: list[list[int]] = list()
-            batch: list[int] = list()
-            for i, index in enumerate(indices):
-                batch.append(index)
-                batch_is_filled = len(batch) == batch_size
-                no_more_records = i == len(indices) - 1 and not batch_is_filled
-                if batch_is_filled or no_more_records:
-                    batch_indices.append(batch)
-                    batch = list()
-
-            batches[key] = batch_indices
+            records = self.primary.size(key)
+            indices = np.random.permutation(records) if shuffle else np.arange(records)
+            batches[key] = [indices[i:i + batch_size] for i in range(0, records, batch_size)]
         return batches
 
-    # TODO: Complete
+    # ============================================================================================== #
+    #                                            Model passes                                        #
+    # ============================================================================================== #
+    def _module_groups(self, keys: Iterable[int]) -> list[tuple[Model, list[int]]]:
+        """Splits genome keys per module (genus), each ordered like the module's own mapping."""
+        keys = list(keys)
+        groups = []
+        for module in self.models:
+            module_keys = [k for k in keys if k in module.mapping]
+            if module_keys:
+                module_keys.sort(key=lambda k: module.mapping[k])
+                groups.append((module, module_keys))
+        return groups
+
+    def _to_tensor(self, array: np.ndarray) -> Tensor:
+        return torch.from_numpy(np.ascontiguousarray(array)).to(self.device)
+
+    @staticmethod
+    def _to_numpy(tensor) -> np.ndarray:
+        if not isinstance(tensor, Tensor):
+            return np.asarray(tensor)
+        tensor = tensor.detach()
+        if tensor.dtype in (torch.float16, torch.bfloat16):
+            tensor = tensor.float()
+        return tensor.cpu().numpy()
+
+    def _call(self, func: Callable, inputs: list[np.ndarray], keys, strict: bool):
+        try:
+            result = func(*[self._to_tensor(x) for x in inputs], keys=keys)
+        except NotImplementedError as e:
+            if strict:
+                raise NotImplementedError(f"Must implement '{getattr(func, '__name__', func)}' in the NEATModule; {e}")
+            return None
+        if not isinstance(result, (tuple, list)):
+            result = (result,)
+        return [self._to_numpy(r) for r in result]
+
+    def forward_pass(
+            self, method: str, inputs: list[str | np.ndarray], keys: Iterable[int], lengths: np.ndarray = None,
+            batching: str | None = None, batch_size: int | None = None, record_batch_size: int | None = None,
+            strict: bool = False,
+    ) -> tuple[np.ndarray, ...] | None:
+        """
+        Runs a Model method (``get_policy``, ``get_std``, ``get_mean``, ``get_value``, ``evaluate_action`` ...) over
+        every stored record of the given genomes and returns its outputs as arrays of shape
+        ``(genomes, capacity, *output_features)`` (same layout as the primary buffer).
+
+        :param method: Name of the Model method; called as ``method(*inputs, keys=keys)`` with inputs shaped
+            ``(genomes, batch, *record_shape)``. In ``'record'`` batching ``keys`` is a list ordered like the
+            module's mapping (or None for the whole module), in ``'genome'`` batching a single key.
+        :param inputs: Primary buffer names or arrays of shape ``(genomes, capacity, ...)``.
+        :param keys: Genome keys to evaluate.
+        :param lengths: Valid records per row (defaults to the primary buffer's).
+        :param batching: ``'genome'``: genomes one by one with ``batch_size`` records per batch. ``'record'``: all genomes
+            of a module at once, ``record_batch_size`` records per batch. Defaults to the trainer's setting.
+        :param strict: Raise instead of returning None when the module does not implement ``method``.
+        :return: Tuple of output arrays, or None when ``method`` is missing / not implemented and ``strict`` is False.
+        """
+        batching = batching or self.batching
+        if batching not in ('genome', 'record'):
+            raise ValueError(f"Unknown batching '{batching}'; use 'genome' or 'record'")
+        batch_size = int(batch_size or self.batch_size)
+        record_batch_size = int(record_batch_size or self.record_batch_size)
+        lengths = self.primary.lengths if lengths is None else lengths
+        arrays = [self.primary.data[x] if isinstance(x, str) else x for x in inputs]
+        rows_total, cap = arrays[0].shape[:2]
+        mapping = self.primary.mapping
+        outputs: list[np.ndarray] | None = None
+
+        def store(result, sel, c0, c1):
+            nonlocal outputs
+            if outputs is None:
+                outputs = [np.zeros((rows_total, cap, *o.shape[2:]), o.dtype) for o in result]
+            for out, o in zip(outputs, result):
+                out[sel, c0:c1] = o
+
+        with torch.no_grad():
+            for module, module_keys in self._module_groups(keys):
+                if not hasattr(module, method):
+                    if strict:
+                        raise NotImplementedError(f"Module has no method '{method}'")
+                    return None
+                func = getattr(module, method)
+                rows = np.asarray([mapping[k] for k in module_keys], np.int64)
+                row_lengths = lengths[rows]
+                uniform = bool((row_lengths == row_lengths[0]).all())
+                if batching == 'record' and not uniform:
+                    warnings.warn(category=NEATAlgoWarning,
+                                  message="Genomes hold different record counts; falling back to genome batching")
+                if batching == 'record' and uniform:
+                    keys_arg = None if len(module_keys) == len(module.mapping) else module_keys
+                    contiguous = bool((np.diff(rows) == 1).all()) if len(rows) > 1 else True
+                    sel = slice(int(rows[0]), int(rows[-1]) + 1) if contiguous else rows
+                    total = int(row_lengths[0])
+                    for c0 in range(0, total, record_batch_size):
+                        c1 = min(c0 + record_batch_size, total)
+                        result = self._call(func, [a[sel, c0:c1] for a in arrays], keys_arg, strict)
+                        if result is None:
+                            return None
+                        store(result, sel, c0, c1)
+                else:
+                    for key, row in zip(module_keys, rows):
+                        sel = slice(int(row), int(row) + 1)
+                        total = int(lengths[row])
+                        for c0 in range(0, total, batch_size):
+                            c1 = min(c0 + batch_size, total)
+                            result = self._call(func, [a[sel, c0:c1] for a in arrays], key, strict)
+                            if result is None:
+                                return None
+                            store(result, sel, c0, c1)
+        return tuple(outputs) if outputs is not None else None
+
+    # ============================================================================================== #
+    #                                      Episodes / returns / GAE                                  #
+    # ============================================================================================== #
+    def prepare_rollout(self, buffer: RolloutBuffer, keys: Iterable[int], check: bool = True) -> tuple[np.ndarray, EpisodeRuns]:
+        """
+        Sorts a buffer's records by episode (stable, in place) for the given genomes and returns their rows and the
+        episode segments. With ``check`` it raises when genomes did not all go through the same number of episodes.
+        """
+        keys = list(keys)
+        rows = buffer.rows_of(keys)
+        buffer.sort_by('ep_map', keys)
+        runs = self.ops.episode_runs(buffer.data['ep_map'], buffer.lengths, rows)
+        counts = runs.counts[rows]
+        if check and len(counts) and not (counts == counts[0]).all():
+            raise RuntimeError(f"Ensure all genomes go through the same number of episodes in the environment;"
+                               f"Got:\n {counts.tolist()}")
+        return rows, runs
+
+    def compute_returns(
+        self, rewards: np.ndarray, episodes: np.ndarray, lengths: np.ndarray, rows: np.ndarray,
+        gamma: float = 0.97, kappa: float = 0.00, alpha: float = 1.00, order=0, inverse: bool = False,
+        normalize=False, genus_filter: list[int] | None = None, beta: float = 1.00,
+        per_genus: bool | None = None,
+    ) -> np.ndarray:
+        """
+        Rewards -> returns for every genome in ``rows`` at once (Numba). ``rewards`` / ``episodes`` are buffer arrays
+        shaped ``(genomes, capacity, ...)`` / ``(genomes, capacity)`` that must be sorted by episode. See
+        ``CpuRLBackend.compute_returns``. The input is not modified.
+
+        ``per_genus`` (default: the trainer's ``norm_per_genus`` option, True): the normalization statistics are taken
+        between genomes of the same genus only, so a weak genus is not flattened by a stronger one.
+        """
+        if per_genus is None:
+            per_genus = getattr(self, 'norm_per_genus', True)
+        return self.ops.compute_returns(
+            rewards, episodes, lengths, rows, self.row_genus, gamma, kappa, alpha, order, inverse, normalize,
+            genus_filter, beta, per_genus
+        )
+
     def compute_returns_and_advantage(
-            self, rewards: TensorDict, values: Union[TensorDict, None],
-            gamma=0.95, gae_lambda=0.91, alpha=1.10, reverse=False,
-            episodes: dict[int, list[int]] = None, observations: TensorDict = None, device: torch.device = None
+            self, rewards: np.ndarray, values: np.ndarray | None, episodes: np.ndarray, lengths: np.ndarray,
+            rows: np.ndarray, gamma=0.95, gae_lambda=0.91, alpha=1.10, reverse=False,
+            observations: np.ndarray | str | None = None, keys: Iterable[int] | None = None,
     ):
         """
-        Post-processing step: compute the lambda-return (TD(lambda) estimate)
-        and GAE(lambda) advantage.
+        Lambda-return (TD(lambda)) and GAE(lambda) advantage (https://arxiv.org/abs/1506.02438) per episode, with the
+        per-episode ``alpha`` scaling of the rewards. ``gae_lambda=1`` gives the Monte-Carlo advantage; TD(0) is
+        ``gae_lambda=0``. When ``values`` is None they are computed with ``Model.get_value`` from ``observations``.
 
-        Uses Generalized Advantage Estimation (https://arxiv.org/abs/1506.02438)
-        to compute the advantage. To obtain Monte-Carlo advantage estimate (A(s) = R - V(S))
-        where R is the sum of discounted reward with value bootstrap
-        (because we don't always have full episode), set ``gae_lambda=1.0`` during initialization.
-
-        The TD(lambda) estimator has also two special cases:
-        - TD(1) is Monte-Carlo estimate (sum of discounted rewards)
-        - TD(0) is one-step estimate with bootstrapping (r_t + gamma * v(s_{t+1}))
-
-        For more information, see discussion in https://github.com/DLR-RM/stable-baselines3/pull/375.
+        :return: ``(returns, advantages)`` float64 arrays shaped like ``rewards``.
         """
-
-        keys = list(rewards.keys())
-        max_records = int(np.max([tensor.shape for tensor in rewards.values()]))
-        if episodes is None:
-            episodes = {key: [0 for _ in range(max_records)] for key in keys}
-
-        @njit
-        def sorting_is_correct(eps_: list[int]):
-            idx_ = eps_[0]
-            for ep_idx_ in eps_:
-                if ep_idx_ < idx_ or ep_idx_ > idx_ + 1:
-                    return False
-                idx_ = ep_idx_
-            return True
-
-        for key, eps in episodes.items():
-            if not sorting_is_correct(eps):
-                raise ValueError(f"{self.__class__.__name__} episodes have not been sorted well for key '{key}'. "
-                                 f"Got: \n{eps}")
-
-        # Get values in case they aren't available
         if values is None:
             if observations is None:
                 raise RuntimeError(f"Cannot compute returns and advantages without values or observations")
-            values = {}
-            for key, observation in observations.items():
-                stack = []
-                for batch in self.get_batches([key], self.batch_size, False)[key]:
-                    value = self.get_module(key).get_value(observation[batch].to(self.device), keys=key)
-                    stack.append(value)
-                values[key] = torch.cat(stack).cpu()
+            keys = [self.primary.reverse[r] for r in rows] if keys is None else keys
+            result = self.forward_pass('get_value', [observations], keys, lengths, strict=True)
+            values = result[0]
+        return self.ops.compute_gae(rewards, values, episodes, lengths, rows, gamma, gae_lambda, alpha, reverse)
 
-        advantages  = {}
-        returns     = {}
-        for (key, rewards_), (ck1, values_), (ck2, episodes_) in zip(rewards.items(), values.items(), episodes.items()):
-            assert key == ck1 == ck2
-            prev_ep_idx = episodes_[-1]
-            adv_stack = []
-            ret_stack = []
-            future_value: Tensor = torch.zeros_like(values_[0])
-            future_advantage: Tensor = torch.zeros_like(values_[0])
-            factor = len(np.unique(episodes_))-1 if not reverse else 0
-            for reward, value, ep_idx in reversed(list(zip(rewards_, values_, episodes_))):
-                if prev_ep_idx != ep_idx:
-                    future_value = torch.zeros_like(values_[0])
-                    future_advantage = torch.zeros_like(values_[0])
-                    if not reverse:
-                        factor -= 1
-                    else:
-                        factor += 1
-                reward = reward * (alpha ** factor)
-                # reward = reward * ((alpha if (reward > 0 and alpha > 1) or (reward < 0 and alpha < 1) else 1) ** factor)
-                delta = reward + gamma*future_value - value
-                future_value = value
-                future_advantage = delta + gamma*gae_lambda*future_advantage
-                adv_stack.insert(0, future_advantage)
-                ret_stack.insert(0, future_advantage + value)
-                prev_ep_idx = ep_idx
-            adv, ret = torch.stack(adv_stack), torch.stack(ret_stack)
-            if device is not None:
-                adv, ret = adv.to(device=device), ret.to(device=device)
-            advantages[key] = adv
-            returns[key] = ret
+    def episode_means(self, array: np.ndarray, lengths: np.ndarray, rows: np.ndarray, runs: EpisodeRuns) -> np.ndarray:
+        """``(genomes, capacity, *features)`` -> ``(genomes, episodes)`` mean of every episode (NaN-padded)."""
+        return self.ops.segment_mean(self.ops.record_mean(array, lengths, rows), runs, rows)
 
-        return returns, advantages
+    def row_stats(self, matrix: np.ndarray, counts: np.ndarray, rows: np.ndarray, ddof: int = 0):
+        """Mean and std over the first ``counts[g]`` entries per row; raises on NaN (as the former fixed_std)."""
+        mean, std = self.ops.row_mean_std(matrix, counts, rows, ddof)
+        if np.isnan(std[rows]).any():
+            raise ValueError("std_dev raised NaN")
+        return mean, std
 
     @staticmethod
-    def compute_returns_static(
-            rewards: TensorDict,
-            gamma: float = 0.97, kappa: float = 0.00, 
-            alpha: float = 1.00, order=0, inverse: bool = False,
-            normalize: int = 1,
-            episodes: dict[int, list[int]] = None, 
-            genus_filter: list[int] | None = None, beta: float = 1.00,
-            device: torch.device = None, self: 'Algorithm' = None
-    ):
-        if -1 >= order > 6: raise ValueError(f"Invalid alpha order: '{order}'")
-        if genus_filter is None: genus_filter = []
+    def as_dict(array: np.ndarray, keys: list[int], rows: np.ndarray) -> dict[int, float]:
+        return dict(zip(keys, array[rows].tolist()))
 
-        keys = list(rewards.keys())
-
-        if episodes is None:
-            try:
-                max_records = int(np.max([tensor.shape if not isinstance(tensor, (float, int)) else tensor for tensor in rewards.values()]))
-            except Exception as e:
-                zero_rew_num = np.count_nonzero([len(tensor) for tensor in rewards.values()])
-                print(CM(
-                    f"\nThe number of genomes with 0 rewards are {zero_rew_num}/{len(rewards)}:\n" + (
-                        f"\tgenomes = {len(self.primary.data)}"
-                        f"\tmin_size = {self.primary.min_size()}"
-                        f"\tmax_size = {self.primary.max_size()}"
-                        f"\n"
-                    ) if self is not None else '',
-                    Fore.MAGENTA
-                ))
-                raise e
-            episodes = {key: [0 for _ in range(max_records)] for key in keys}
-
-        @njit
-        def sorting_is_correct(episode_list: list[int]):
-            # Start as first episodes
-            current_ep = episode_list[0]
-            # Loop until last episode index
-            for ep_to_check in episode_list:
-                if ep_to_check < current_ep:
-                    return False, (current_ep, ep_to_check)
-                current_ep = ep_to_check
-            return True, None
-
-        for key, eps in episodes.items():
-            correct, error = sorting_is_correct(eps)
-            if not correct:
-                raise ValueError(f"Episodes have not been sorted well for '{self.__class__.__name__}'; "
-                                 f"Error for key '{key}' at index {error[1]}, when testing for index {error[0]}.")
-
-        def torch_std(tensor):
-            if tensor.ndim < 1 or tensor.numel() <= 1:
-                return torch.zeros_like(tensor).mean()
-            return torch.std(tensor)
-
-        def numpy_std(array):
-            if len(array) <= 1:
-                return 0.0
-            return np.std(array)
-
-        def fetch(attr: float, var: float, func: callable):
-            if var is None:
-                return None
-            elif attr is None:
-                return var
-            else:
-                return func(attr, var)
-
-        global_mean, global_std = [
-            g([f(r).cpu().item() for r in rewards.values()])
-            for f, g in zip([torch.mean, torch_std], [np.mean, numpy_std])
-        ] if normalize == 1 else (None, None)
-        global_min, global_max = [
-            g([f(r).cpu().item() for r in rewards.values()])
-            for f, g in zip([torch.min, torch.max], [np.min, np.max])
-        ] if normalize in [2, 3, 4] else (None, None)
-        # if normalize:
-        #     try:
-        #         self._global_mean = global_mean = fetch(self._global_mean, global_mean, max)
-        #         self._global_std = global_std = fetch(self._global_std, global_std, min)
-        #         self._global_min = global_min = fetch(self._global_min, global_min, min)
-        #         self._global_max = global_max = fetch(self._global_max, global_max, max)
-        #     except AttributeError:
-        #         pass
-        # max_ep_len = np.max([
-        #     np.max([
-        #         len([i for i, ep_idx in enumerate(listing) if ep_idx == u_idx])
-        #         for u_idx in np.unique(listing)
-        #     ]).item()
-        #     for key, listing in episodes.items()
-        # ]).item()
-        returns: TensorDict = {}
-        for (key, rewards_), (c_key, episodes_) in zip(rewards.items(), episodes.items()):
-            assert key == c_key
-            genome = self.population.genomes[key]
-            genus  = genome.genus
-            
-            # Normalize using mean and std_dev
-            if normalize == 1 and global_std != 0.0:
-                rewards_ = (rewards_ - global_mean) / (global_std + 1e-9)
-            # Normalize between [0, 1] or [-1, 1]
-            elif normalize in [2, 3] and (global_max - global_min) != 0.0:
-                rewards_ = (rewards_ - global_min) / (global_max - global_min)
-                if normalize == 3:
-                    rewards_ = -1 + 2 * rewards_
-            # Normalize by removing negative values
-            elif normalize == 4:
-                rewards_ = rewards_ - global_min
-            if order in [2, 3, 4, 5]:
-                if len(rewards_) != len(episodes_):
-                    raise ValueError(f"Number of rewards (scores) must be equal to number of episodes for key '{key}' "
-                                     f"when parameter 'best' is enabled.")
-                scores = torch.mean(rewards_.view(rewards_.shape[0], -1), dim=-1)
-                episodes_ = torch.tensor(episodes_, device=scores.device, dtype=scores.dtype)
-                _, episode_ranking = torch.sort(scores, descending=False if order in [2, 4] else True) # Ensure the best is last
-                rewards_ = rewards_[episode_ranking] # If episodes are re-ordered, ensures the same on the rewards
-                episodes_ = episodes_[episode_ranking].tolist()
-            idx = episodes_[-1]
-            prop_past_reward: Tensor = 0.
-            prop_future_reward: Tensor = 0.
-            ep_total = len(np.unique(episodes_))
-            ep_factors = list(range(ep_total))[::(-1 if order not in [1,] else +1)]
-
-            def get_ai(remaining_factors: list[int]) -> int:
-                if len(remaining_factors) <= 0:
-                    raise ValueError(f"No episodes rolled out or incorrect mapping")
-                if order not in [4, 5, 6] or len(remaining_factors) == 1:
-                    return 0
-                else:
-                    ef = np.arange(len(remaining_factors))
-                    ef_ = ef[::-1] + 1
-                    try:
-                        return np.random.choice(ef, p=(ef_ / np.cumsum(ef_).max()) if order in [4, 5] else None)
-                    except Exception as e:
-                        print(ef)
-                        print(ef / np.cumsum(ef).max())
-                        print(remaining_factors)
-                        raise e
-            ep_factor = ep_factors.pop(get_ai(ep_factors))
-
-            # Handle Alpha and Beta
-            if (alpha is not None and alpha != 1.0) or beta != 1.0:
-                mult = alpha
-                use_beta = (genus in genus_filter) and beta != 1.0
-                if use_beta: mult = beta
-                if inverse: mult = 1 / mult
-                # TODO: Reverse the listing of ep_factors
-                for index, (reward, ep_idx) in reversed(list(enumerate(zip(rewards_, episodes_)))):
-                    if idx != ep_idx:
-                        try:
-                            ep_factor = ep_factors.pop(get_ai(ep_factors))
-                        except Exception as e:
-                            print(ep_factors)
-                            print(get_ai(ep_factors))
-                            raise e
-                    # TODO: Should length factor be re-enabled for Alpha?
-                    # ep_len = len([e for e in episodes_ if e == ep_idx])
-                    # len_factor = 1 # ep_len / max_ep_len
-                    # diff = mult - 1.0
-                    rewards_[index] = reward * (mult ** ep_factor) # ((1.0 + (diff * len_factor)) ** ep_factor)
-                    idx = ep_idx
-
-            # Handle Gamma
-            rtg_gamma = []
-            discounted_reward: Tensor | float = 0.
-            if gamma > 0:
-                for reward, ep_idx in reversed(list(zip(rewards_, episodes_))):
-                    if idx != ep_idx:
-                        discounted_reward = 0.
-                    discounted_reward = reward + (discounted_reward * gamma)
-                    rtg_gamma.insert(0, discounted_reward)
-                    idx = ep_idx
-            rtg_gamma = torch.stack(rtg_gamma).to(rewards_.device, rewards_.dtype) if len(rtg_gamma) > 0 else None
-
-            # Handle Kappa
-            rtg_kappa = []
-            discounted_reward: Tensor | float = 0.
-            if kappa > 0:
-                for reward, ep_idx in zip(rewards_, episodes_):
-                    if idx != ep_idx:
-                        discounted_reward = 0.
-                    discounted_reward = reward + (discounted_reward * gamma)
-                    rtg_kappa.append(discounted_reward)
-                    idx = ep_idx
-            rtg_kappa = torch.stack(rtg_kappa).to(rewards_.device, rewards_.dtype) if len(rtg_kappa) > 0 else None
-
-            if rtg_gamma is not None and rtg_kappa is not None:
-                rewards_to_go = (rtg_gamma + rtg_kappa) / 2
-            elif rtg_gamma is not None:
-                rewards_to_go = rtg_gamma
-            elif rtg_kappa is not None:
-                rewards_to_go = rtg_kappa
-            else:
-                rewards_to_go = rewards_.clone()
-            if device is not None:
-                rewards_to_go = rewards_to_go.to(device=device)
-            returns[key] = rewards_to_go
-        return returns
-
-    def compute_returns(
-        self, rewards: TensorDict, gamma: float = 0.97, kappa: float = 0.00, 
-        alpha: float = 1.00, order=0, inverse: bool = False,
-        normalize=False, episodes: dict[int, list[int]] = None, 
-        genus_filter: list[int] | None = None, beta: float = 1.00,
-        device: torch.device = None
-    ):
-        return self.compute_returns_static(
-            rewards, gamma, kappa, alpha, order, inverse, normalize, episodes, 
-            genus_filter, beta,
-            device, self
-        )
-
-    def _get_accuracy(
-        self, key: int, batches: list[list[int]], observations: Tensor, actions: Tensor, rewards: Tensor = None, 
-        error=0.10, type='continuous', 
-    ):
-        action_sum, reward_sum = [], []
-        with torch.no_grad():
-            for batch in batches:
-                # Calculate
-                observation = observations[batch].to(self.device)
-
-                # Get action accuracy
-                action = actions[batch].to(self.device)
-                try:
-                    action_pred: Tensor = self.get_module(key).get_policy(observation.unsqueeze(0), keys=key).squeeze(0)
-                except Exception as e:
-                    self.get_module(key).get_policy(observation.unsqueeze(0), keys=key, verbose=2)
-                    raise e
-                try:
-                    if type == 'continuous':
-                        action_res = ((action_pred <= action * (1+error)) & (action_pred >= action * (1-error))).float()
-                    elif type == 'binary':
-                        action_res = ((action_pred >= (1 - error)) == (action >= (1 - error))).float()
-                    elif type == 'discrete':
-                        action_res = (action_pred == action).float()
-                    else:
-                        raise ValueError(f"Unsupported accuracy type '{type}'")
-                except Exception as e:
-                    print(CM(f'Action Prediction = {action_pred.shape}, Target = {action.shape}\n', Fore.LIGHTRED_EX))
-                    raise e
-                action_sum.append(action_res)
-
-                # Get reward accuracy
-                if rewards is not None:
-                    reward = rewards[batch].to(self.device)
-                    reward_pred: Tensor = self.get_module(key).get_value(observation.unsqueeze(0), keys=key).squeeze(0)
-                    reward_sum.append(
-                        ((reward_pred <= reward * (1 + error)) & (reward_pred >= reward * (1 - error))).float()
-                    )
-                else:
-                    reward_sum.append(torch.zeros(1).float())
-        a = torch.concat(action_sum)
-        r = torch.concat(reward_sum)
-
-        actions_acc = a.mean().cpu().item()
-        rewards_acc = r.mean().cpu().item()
-        return actions_acc, rewards_acc
-    
-    def _get_method(
-        self, method: str, key: int, batches: list[list[int]], inputs: Tensor | Iterable[Tensor], 
-        default: float = 0., strict: bool = False, raw: bool = False
-    ):
-        if not isinstance(inputs, (tuple, list, set)): inputs = (inputs,)
-        aggregation = []
-        with torch.no_grad():
-            for batch in batches:
-                module = self.get_module(key)
-                
-                if not hasattr(module, method): 
-                    value: Tensor = torch.tensor([default])
-                else:
-                    func  = getattr(module, method)
-                    try:
-                        input = [d[batch].unsqueeze(0).to(self.device) for d in inputs]
-                    except IndexError as e:
-                        print(f"Debug shapes = {[t.shape for t in inputs]}")
-                        print(f"Debug batches = {[len(b) for b in batches]}")
-                        raise e
-                    try:
-                        value = func(*input, keys=key).squeeze(0)
-                    except NotImplementedError as e:
-                        if not strict: value = torch.tensor([default])
-                        else: raise NotImplementedError(f"Must implemented the method '{method}' in the NEATModule; {e}")
-                
-                aggregation.append(value.float())
-        
-        tensor = torch.concat(aggregation)
-        if not raw: res = tensor.mean().cpu().item()
-        else: res = tensor
-
-        return res
-    
-    # def _get_stdev(self, key: int, batches: list[list[int]], observations: Tensor):
-    #     deviation = []
-    #     with torch.no_grad():
-    #         for batch in batches:
-    #             module = self.get_module(key)
-                
-    #             if not hasattr(module, 'get_std'): 
-    #                 stdev = torch.zeros(1)
-    #             else:
-    #                 observation = observations[batch].to(self.device)
-    #                 try:
-    #                     stdev = module.get_std(observation.unsqueeze(0), keys=key).squeeze(0)
-    #                 except NotImplementedError:
-    #                     stdev = torch.zeros(1)
-                
-    #             deviation.append(stdev.float())
-        
-    #     std: float = torch.concat(deviation).mean().cpu().item()
-
-    #     return std
-    
-    def _get_stdev(self, key: int, batches: list[list[int]], observations: Tensor, raw: bool = False):
-        """Get the mean of the standard deviation of actions from observations provided"""
-        std = self._get_method(
-            "get_std", key, batches, observations, default=0., strict=False, raw=raw
-        )
-        return std
-    
-    def _get_mean(self, key: int, batches: list[list[int]], observations: Tensor, raw: bool = False):
-        mean = self._get_method(
-            "get_mean", key, batches, observations, default=0., strict=True, raw=raw
-        )
-        return mean
-    
-    def _get_mean_std(self, key: int, batches: list[list[int]], observations: Tensor, raw: bool = False):
-        mean_std = self._get_method(
-            "get_mean_std", key, batches, observations, default=0., strict=True, raw=raw
-        )
-        return mean_std
-
-    def get_accuracy(
-        self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
-        rewards: TensorDict = None, error: float = 0.10, type: str = 'continuous', verbose: int = None,
-        keys: Union[int, list[int]] = None, strict: bool = False
-    ) -> tuple[dict[int, float], dict[int, float]]:
-        if isinstance(keys, (int, float)):
-            keys = [keys]
-        all_keys = list(self.population.genomes.keys())
-        keys = all_keys if keys is None else keys
-        
-        ts, ud, ut = clock.perf_counter(), 0, len(keys)
-        actions_acc, rewards_acc = {}, {}
-
-        # Calculate accuracy for each key
-        for key in all_keys:
-            if key in keys:
-                actions_acc[key], rewards_acc[key] = self._get_accuracy(
-                    key, batches[key], observations[key], actions[key], 
-                    rewards[key] if rewards is not None else None,
-                    error, type
-                )
-            elif not strict:
-                actions_acc[key] = 0
-                rewards_acc[key] = 0
-
-            if verbose and verbose >= 2:
-                ud += 1
-                eta(ts, ud, ut, 'Getting accuracy')
-
+    # ============================================================================================== #
+    #                                          Epoch helpers                                         #
+    # ============================================================================================== #
+    @staticmethod
+    def _tick(verbose: int | None, label: str, start: float) -> float:
+        """Prints the time since ``start`` when verbose >= 2 and returns a new start."""
+        now = clock.perf_counter()
         if verbose and verbose >= 2:
-            print(f"\rGot accuracy in {round(clock.perf_counter() - ts, 2)}s")
-        return actions_acc, rewards_acc
-        
-    def get_stdev(
-        self, batches: dict[int, list[list[int]]], observations: TensorDict, keys: int | list[int] | None = None,
-        strict: bool = False
-    ):
-        if isinstance(keys, (int, float)):
-            keys = [int(keys)]
-        all_keys = list(self.population.genomes.keys())
-        keys = all_keys if keys is None else keys
-        
-        std: dict[int, float] = {}
-        max_value = 0.
-        for key in all_keys:
-            if key in keys: 
-                deviation = self._get_stdev(key, batches[key], observations[key])
-                if deviation > max_value: max_value = deviation
-            else: deviation = float("inf")
-            
-            if not strict or (strict and key in keys): std[key] = deviation
-        for key, value in std.items():
-            if math.isinf(value):
-                std[key] = max_value * 1.5
+            print(f"{label} in {CM(f'{round(now - start, 2)}s', Fore.LIGHTCYAN_EX)}")
+        return now
 
-        return std
+    def _collect_rollout(self, evaluation_function: callable, steps: int, verbose: int | None) -> tuple[list[int], float]:
+        """Runs the environment for ``steps`` records and returns the genome keys to train on and the run time."""
+        ts = clock.perf_counter()
+        self.steps_limit = self.steps_done + steps
+        self.primary.reserve(steps)
+        self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
+        if len(self.population.to_delete) == len(self.population.genomes):
+            self.population.to_delete.clear()
+        invalid_population = len(self.population.to_delete) == len(self.population.genomes)
+        valid_keys = [
+            key for key in self.population.genomes.keys() if key not in self.population.to_delete or invalid_population
+        ] if self.validate else list(self.population.genomes.keys())
+        if len(valid_keys) == 0:
+            valid_keys = list(self.population.genomes.keys())
+        run_time = clock.perf_counter() - ts
+        if verbose and verbose >= 2:
+            print(f"collected data in {CM(f'{round(run_time, 2)}s', Fore.LIGHTCYAN_EX)}")
+        return valid_keys, run_time
+
+    def _finish_epoch(self, evaluation_function: callable, epoch_done: int, epochs, verbose: int | None):
+        if self._report_hook is not None:
+            self._report_hook(self)
+
+        if self.schedulers is not None:
+            for s in self.schedulers:
+                s.step()
+
+        if epoch_done == epochs - 1:
+            self.population.run(
+                evaluation_function, 1, verbose=verbose, skip=True, trainer=self, terminate_skip=True
+            )
+
+    def _creep(self, valid_keys: list[int], best_key: int, sizes: dict[int, float], verbose: int | None = None):
+        """Share of genomes that were also trained on last epoch (overall, as the best genome and as the largest)."""
+        if self.prev_valid_keys is None:
+            creep = creep_max = creep_best = np.nan
+        elif len(valid_keys) <= 0:
+            creep = creep_max = creep_best = 0.0
+        else:
+            creep = len([key for key in self.prev_valid_keys if key in valid_keys]) / len(valid_keys)
+            size_best = sizes[best_key]
+            size_max = max(sizes.values())
+            if verbose:
+                print(f"max_buffer_size = {size_max}")
+            creep_best = len([
+                key for key in self.prev_valid_keys if key in valid_keys and sizes[key] >= size_best
+            ]) / len(valid_keys)
+            creep_max = len([
+                key for key in self.prev_valid_keys if key in valid_keys and sizes[key] >= size_max
+            ]) / len(valid_keys)
+        self.prev_valid_keys = valid_keys
+        return creep, creep_best, creep_max
+
+    # noinspection PyBroadException
+    def _param_stats(self, key: Union[int, None]):
+        """Mean / std / max / min / share of ~zero NEAT parameters of one genome (or of all when ``key`` is None)."""
+        try:
+            with torch.no_grad():
+                params = []
+                if key is not None:
+                    for p in self.get_module(key).neat_parameters():
+                        params.append(p[key].flatten())
+                else:
+                    for module in self.models:
+                        for p in module.neat_parameters():
+                            params.append(p[key].flatten())
+                params = torch.cat(params)
+                return torch.mean(params).cpu().item(), torch.std(params).cpu().item(), \
+                       torch.max(params).cpu().item(), torch.min(params).cpu().item(), \
+                       torch.sum(torch.abs(params) <= self.population.config.genome.param_epsilon).cpu().item() / params.numel()
+        except Exception:
+            return math.nan, math.nan, math.nan, math.nan, math.nan
 
     def log_scheduler_params(self):
         values: dict[str, Union[int, float, bool]] = {}
@@ -851,6 +745,13 @@ class Algorithm(object):
             for param in scheduler.params:
                 values[param] = scheduler.get(param, scheduler.config)
         return values
+
+    # ============================================================================================== #
+    #                                    Dict based score helpers                                    #
+    # ============================================================================================== #
+    def _genus_of(self, key: int) -> int:
+        genus = self.key_genus.get(key)
+        return self.population.genomes[key].genus if genus is None else genus
 
     @staticmethod
     def segregate(ranking: dict[int, float], size: int):
@@ -874,8 +775,8 @@ class Algorithm(object):
         full_norm_array = {key: default for key in array.keys()}
         # Filter by genera
         for genus in (self.population.genera if genus_separated else [-1]):
-            keys    = [key for key in array.keys() if not genus_separated or self.population.genomes[key].genus == genus]
-            source  = [value for (key, value) in array.items() if not genus_separated or self.population.genomes[key].genus == genus]
+            keys    = [key for key in array.keys() if not genus_separated or self._genus_of(key) == genus]
+            source  = [array[key] for key in keys]
 
             # Handle errors
             if len(source) == 0: continue
@@ -935,8 +836,8 @@ class Algorithm(object):
         full_level_array = {key: np.nan for key in array.keys()}
         # Filter by genera
         for genus in (self.population.genera if genus_separated else [-1]):
-            keys    = [key for key in array.keys() if not genus_separated or self.population.genomes[key].genus == genus]
-            source  = [value for (key, value) in array.items() if not genus_separated or self.population.genomes[key].genus == genus]
+            keys    = [key for key in array.keys() if not genus_separated or self._genus_of(key) == genus]
+            source  = [array[key] for key in keys]
 
             # Handle errors
             if len(source) == 0:
@@ -965,73 +866,3 @@ class Algorithm(object):
                 full_level_array[key] = value
 
         return full_level_array
-
-    @staticmethod
-    def sort_episodes(episode_mapping: dict[int, list[int]], *buffers: TensorDict):
-        episode_lengths = {}
-        for key in episode_mapping.keys():
-            records = len(episode_mapping[key])
-            sorting_indices = torch.tensor(
-                sorted([i for i in range(records)], key=lambda idx: (episode_mapping[key][idx], idx)), dtype=torch.int
-            )
-
-            for buffer in buffers:
-                buffer[key] = torch.index_select(buffer[key], 0, sorting_indices)
-
-            episode_mapping[key] = np.array(episode_mapping[key])[sorting_indices.cpu().tolist()].tolist()
-
-            length = {}
-            for ep_idx in episode_mapping[key]:
-                if ep_idx not in length:
-                    length[ep_idx] = 1
-                else:
-                    length[ep_idx] += 1
-            lengths = list(length.values())
-            episode_lengths[key] = lengths
-
-        return episode_lengths
-
-    # # TODO: Implement saving and loading of RL Algorithm
-    # def save(self, name: str = None, directory: str = None, file_no: int = None, replace=False):
-    #     # exclude = ['population', 'parameters', 'model', 'replay', 'logging', 'writer']
-    #     # state = {var: getattr(self, var) for var in vars(self).keys() if var not in exclude}
-    #     #
-    #     # algo = self.__class__.__name__
-    #     # if name is None:
-    #     #     name = 'default'
-    #     # if directory is None:
-    #     #     directory = f'{algo.lower()}'
-    #     #
-    #     # # Save Trainer data
-    #     # if save(state, name, directory, file_no, replace, items_name=f'NEAT {algo}')[0]:
-    #     #     # Save population
-    #     #     self.population.save_dict(name, directory, file_no, replace)
-    #     #
-    #     #     print(CM(f"Successfully saved trainer to '{directory}/{name}'", Fore.LIGHTGREEN_EX))
-    #     # else:
-    #     #     print(CM(f"Failed to save trainer to '{directory}/{name}'", Fore.LIGHTRED_EX))
-    #     raise NotImplementedError()
-    #
-    # def load(self, name: str = None, directory: str = None, file_no: int = None):
-    #     # algo = self.__class__.__name__
-    #     # if name is None:
-    #     #     name = 'default'
-    #     # if directory is None:
-    #     #     directory = f'{algo.lower()}'
-    #     # state = load(name, directory, file_no, items_name=f'NEAT {algo}')
-    #     # if state is not None:
-    #     #     # Load Trainer data
-    #     #     for var, val in state.items():
-    #     #         setattr(self, var, val)
-    #     #
-    #     #     # Load Population
-    #     #     self.population.load_dict(None, name, directory, file_no)
-    #     #
-    #     #     # Load Model and Params
-    #     #     self._get_params(self.model)
-    #     #     bind_modules(self.parameters, self.population.genomes, True)
-    #     #
-    #     #     print(CM(f"Successfully loaded trainer from '{directory}/{name}'", Fore.LIGHTGREEN_EX))
-    #     # else:
-    #     #     print(CM(f"Failed to load trainer from '{directory}/{name}'", Fore.LIGHTRED_EX))
-    #     raise NotImplementedError()

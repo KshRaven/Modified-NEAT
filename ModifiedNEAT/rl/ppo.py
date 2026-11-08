@@ -1,18 +1,19 @@
-from ModifiedNEAT.nn.base import Model
-from ModifiedNEAT.population import Population
-from ModifiedNEAT.rl.base import Algorithm, TensorDict, NEATAlgoWarning
-from ModifiedNEAT.optim.scheduler import Scheduler
-from ModifiedNEAT.util.datetime import eta, clock
-from ModifiedNEAT.util.qol import manage_params
-from ModifiedNEAT.util.fancy_text import CM, Fore
+from __future__ import annotations
 
-from torch import Tensor
-from typing import Union, Iterable
-
-import torch
-import numpy as np
 import warnings
-import math
+from typing import Iterable, Union
+
+import numpy as np
+import torch
+
+from ModifiedNEAT.optim.scheduler import Scheduler
+from ModifiedNEAT.population import Population
+from ModifiedNEAT.rl.base import Algorithm, NEATAlgoWarning
+from ModifiedNEAT.util.datetime import clock
+from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.qol import manage_params
+
+__all__ = ['PPO']
 
 
 class PPO(Algorithm):
@@ -24,15 +25,19 @@ class PPO(Algorithm):
     its own, NEAT-evolved policy) are used to rank genomes for the next generation, the same way NEAT
     ranks genomes by return/accuracy. ``Model.evaluate_action`` supplies the log-probabilities used to
     compute that policy loss.
+
+    All post-rollout calculations run on NumPy arrays through Numba kernels (see ``ModifiedNEAT.rl.functional``);
+    only the model passes (``evaluate_action``, ``get_value``, ``get_policy``, ``get_std``) use Torch, through
+    ``Algorithm.forward_pass`` which supports ``batching='genome'`` and ``batching='record'``.
     """
 
     def __init__(self, population: Population, schedulers: Union[Scheduler, Iterable[Scheduler]] = None,
-                 device=torch.device('cpu'), dtype=torch.float32, use_critic: bool = False, **options):
+                 device=None, dtype=torch.float32, use_critic: bool = False, **options):
         """
         :param population: Population being trained.
         :param schedulers: Scheduler or iterable of schedulers stepped once per epoch.
-        :param device: Device used for computation (default is 'cpu').
-        :param dtype: Data type used for tensors (default is torch.float32).
+        :param device: Torch device used for the model passes (default: follows the ``ModifiedNEAT.base`` device).
+        :param dtype: Torch data type used for the model passes and the rollout arrays (default is torch.float32).
         :param use_critic: When True, ``Model.get_value`` is used to compute a value baseline that is
             subtracted from the returns to form advantages. When False (default), the raw returns are
             used directly as advantages.
@@ -42,23 +47,23 @@ class PPO(Algorithm):
         :keyword alpha: Per-episode reward multiplier used when reducing secondary returns (default 1.0).
         :keyword order: Episode ranking/ordering mode used when reducing secondary returns (default 0).
         :keyword normalize: Reward normalization mode used when reducing secondary returns (default 0).
+        :keyword norm_per_genus: Take the normalization statistics between genomes of the same genus only (default True).
         :keyword rew_reg: Weight of the (normalized) return component of the fitness score (default 1.0).
-        :keyword loss_reg: Weight of the (normalized, inverted) policy-loss component of the fitness score (default 1.0).
+        :keyword loss_reg: Weight of the (normalized, inverted) policy-loss component of the fitness score (default 0.33).
         :keyword pol_reg: Weight of the (normalized, inverted) policy-consistency component of the fitness score
-            (default 0.0). Measures the MSE between each action's old and new log-probability (from
-            ``Model.evaluate_action``) as a cheap stand-in for MSE-between-action-means, avoiding a dedicated
-            ``Model.get_mean`` call or exponentiating log-probabilities back into raw probabilities.
+            (default 0.33). Measures the MSE between each action's old and new probability (from
+            ``Model.evaluate_action``) as a cheap stand-in for MSE-between-action-means.
         :keyword ent_reg: Weight of the (normalized, inverted) policy std-dev component of the fitness score
-            (default 0.0). Positive values reward genomes with a lower action std-dev (exploitation); negative
+            (default 1.0). Positive values reward genomes with a lower action std-dev (exploitation); negative
             values reward genomes with a higher action std-dev (exploration).
-        :keyword use_entropy: When True, the policy std-dev used by ``ent_reg`` (and logged as ``policy_std``)
-            is derived analytically from the action entropy returned by ``Model.evaluate_action``, instead of
-            calling ``Model.get_std`` on the module (default False). Useful when a genome's module doesn't
-            implement ``get_std`` but does return a valid entropy from ``evaluate_action``.
-        :keyword div_reg: Weight applied to the std-dev of returns/loss across retained episodes (default 0.1).
+        :keyword use_entropy: When True, the policy std-dev used by ``ent_reg`` is the action entropy returned by
+            ``Model.evaluate_action``, otherwise ``Model.get_std`` is used (default True).
+        :keyword div_reg: Weight applied to the std-dev of returns/loss across retained episodes (default 0.01).
         :keyword validate: Whether to restrict training to genomes not flagged for deletion (default False).
         :keyword max_steps: Maximum steps kept in the secondary buffer (default 1024).
         :keyword max_episodes: Maximum episodes kept in the secondary buffer (default None).
+        :keyword batching: ``'genome'`` (genomes one by one, ``batch_size`` records per batch) or ``'record'`` (all
+            genomes of a genus at once, ``record_batch_size`` records per batch, default 1).
         :keyword log_dir: Directory tensorboard logs are written under.
         :keyword log_name: Name of this run's tensorboard log.
         """
@@ -75,6 +80,7 @@ class PPO(Algorithm):
         self.beta: float        = manage_params(options, 'beta', 1.00)
         self.beta_order: int    = manage_params(options, 'beta_order', 0)
         self.normalize: int     = manage_params(options, 'normalize', 0)
+        self.norm_per_genus: bool = manage_params(options, 'norm_per_genus', True)
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
         self.loss_reg: float    = manage_params(options, 'loss_reg', 0.33)
         self.val_reg: float     = manage_params(options, 'val_reg', 0.0)
@@ -82,7 +88,7 @@ class PPO(Algorithm):
         self.ent_reg: float     = manage_params(options, 'ent_reg', 1.0)
         self.div_reg: float     = manage_params(options, 'div_reg', 0.01)
         self.use_entropy: bool  = manage_params(options, 'use_entropy', True)
-        self.use_critic: bool   = manage_params(options, 'use_critic', False)
+        self.use_critic: bool   = manage_params(options, 'use_critic', use_critic)
         self.validate: bool     = manage_params(options, 'validate', False)
         self.epsilon: float     = manage_params(options, 'epsilon', 1e-36)
         self.max_steps: Union[float, None] = manage_params(options, 'max_steps', 1024)
@@ -95,13 +101,10 @@ class PPO(Algorithm):
 
         super().__init__(population, schedulers, device, dtype, **base_options)
 
-        # Base
-
         # Buffers
         self.primary.add_buffers('state', 'action', 'reward', 'log_prob', 'ep_map',)
         # Map each episode's return and policy/value metrics to use as scores.
         self.secondary.add_buffers('ec_return', 'ep_loss', 'ep_val', 'ep_map', 'ep_len', 'ep_mean', 'ep_std')
-        # TODO: Fix deque and other buffer clearing methods to not raise Index or Value errors when clearing/dequeing shorter, unfilled or non-existent buffers
         self.score_idx = 0
 
         self.logging.add_buffers(
@@ -111,134 +114,34 @@ class PPO(Algorithm):
 
         self.prev_valid_keys: list[int] = None
 
-    def update(self, observations: Tensor, actions: Tensor, rewards: Tensor, log_probs: Tensor,
+    def update(self, observations, actions, rewards, log_probs,
                terminated: Union[bool, list[bool]], force_stop=False, reset_mapping: bool | list[bool] = False,
-               session_dim: int | None = None) -> Tensor:
+               session_dim: int | None = None) -> bool:
         """
         Records one environment step for every environment instance into the primary buffer.
 
-        :param observations: Observation tensor for this step.
-        :param actions: Action tensor taken this step.
-        :param rewards: Reward tensor received this step.
+        :param observations: Observation array (Tensor / ndarray) for this step, genomes on dim 0.
+        :param actions: Action array taken this step.
+        :param rewards: Reward array received this step.
         :param log_probs: Log-probability of ``actions`` under the policy that produced them (eg. from
             ``Model.get_action``); re-evaluated later via ``Model.evaluate_action`` to compute the policy loss.
         :param terminated: Whether each environment instance terminated this step.
         :param force_stop: Force the rollout buffer to be treated as filled after this step.
         :param reset_mapping: Force a new episode mapping for each environment instance, regardless of termination.
-        :param session_dim: Optional tensor dimension holding the per-environment session; inferred as 1 when omitted.
+        :param session_dim: Optional dimension holding the per-environment session; inferred as 1 when omitted.
         :return: Whether the rollout buffer has been filled (steps limit reached or ``force_stop``).
         """
-        if isinstance(terminated, bool):
-            terminated = [terminated]
-        sd_set = session_dim is not None
-        if session_dim is None:
-            session_dim = 1
+        return self._record_step(
+            dict(state=observations, action=actions, reward=rewards, log_prob=log_probs),
+            terminated, force_stop, reset_mapping, session_dim
+        )
 
-        if self.steps_done == self.prev_steps_done:
-            self.handle_episode_mapping(terminated, True)
-            self.terminated = False
+    @staticmethod
+    def _clean(metrics: dict) -> dict:
+        """Drops NaN metrics so they do not clutter tensorboard / the terminal."""
+        return {k: v for k, v in metrics.items()
+                if not (isinstance(v, (float, np.floating)) and np.isnan(v))}
 
-        def select(tensor: Tensor, session_idx: int):
-            if len(terminated) > 1 or sd_set:
-                assert tensor.shape[session_dim] == len(terminated)
-                return torch.select(tensor, session_dim, session_idx)
-            else:
-                return tensor
-
-        observations, actions, rewards, log_probs = observations.clone(), actions.clone(), rewards.clone(), log_probs.clone()
-
-        filled = False
-        if self.steps_done < self.steps_limit:
-            # Loop through all environments
-            for idx, ended in enumerate(terminated):
-                self.primary.update(
-                    state    = select(observations, idx),
-                    action   = select(actions, idx),
-                    reward   = select(rewards, idx),
-                    log_prob = select(log_probs, idx),
-                    ep_map   = self.episode_mapping[idx],
-                )
-
-                self.steps_done += 1
-                self.episodes_done = max(self.episode_mapping.values()) + 1
-                self.episode_lengths[self.episode_mapping[idx]] += 1
-
-                if self.steps_done >= self.steps_limit or force_stop:
-                    self.prev_steps_done = self.steps_done
-                    self.prev_episodes_done = self.episodes_done
-                    filled = True
-        else:
-            raise RuntimeError(f"Steps have already been filled.")
-
-        if filled:
-            self.terminated = True
-        else:
-            self.handle_episode_mapping(terminated, reset_mapping)
-
-        return filled
-
-    def _get_policy_loss(self, key: int, states: Tensor, actions: Tensor, old_log_probs: Tensor, advantages: Tensor, indices: list[int]):
-        """
-        Computes one genome's mean policy loss (``-new_log_prob * advantage``) over a set of records,
-        using ``Model.evaluate_action`` to get that genome's current log-probability of ``actions``.
-
-        :param key: Genome key being evaluated.
-        :param states: Genome's full state tensor.
-        :param actions: Genome's full action tensor, aligned with ``states``.
-        :param advantages: Genome's full advantage tensor, aligned with ``states``.
-        :param indices: Record indices (typically one episode) to compute the loss over.
-        :return: Tuple of (mean policy loss, mean policy consistency loss, mean entropy-derived std-dev)
-            over the given records.
-        """
-        state        = states[indices].to(self.device)
-        action       = actions[indices].to(self.device)
-        old_log_prob = old_log_probs[indices].to(self.device)
-        advantage    = advantages[indices].to(self.device)
-
-        new_log_prob, entropy = self.get_module(key).evaluate_action(state.unsqueeze(0), action.unsqueeze(0), keys=key)
-        new_log_prob = new_log_prob.squeeze(0)
-        assert new_log_prob.shape == old_log_prob.shape
-        
-        ratio = torch.exp(new_log_prob - old_log_prob)
-
-        # Reduce any trailing action/reward dimensions to one value per record before combining them
-        # new_log_prob = torch.mean(new_log_prob.reshape(new_log_prob.shape[0], -1), dim=-1)
-        advantage = torch.mean(advantage.reshape(advantage.shape[0], -1), dim=-1, keepdim=True)
-
-        try:
-            ppo_loss = -(ratio * advantage).mean().cpu().item() # Improve rewards
-        except RuntimeError as e:
-            print(f"ratio = {ratio.shape}")
-            print(f"advantage = {advantage.shape}")
-            raise e
-        if np.isinf(ppo_loss): raise ValueError(f"found NaN/Inf in PPO loss")
-
-        # Policy consistency: MSE between old and new log-probs, used by 'pol_reg' as a cheap stand-in
-        # for MSE-between-action-means (no separate get_mean() call or exp() needed).
-        pol_loss = torch.mean((new_log_prob.exp() - old_log_prob.exp()) ** 2 + self.epsilon).log10().cpu().item() # Improve accuracy on policy
-        if math.isinf(pol_loss) or math.isnan(pol_loss): raise ValueError("Encountered inf/nan loss")
-        
-        _ent_loss = entropy.mean() # Reduce spread on policy
-        ent_loss = self._get_true_entropy_loss(key, _ent_loss, [indices], states)
-
-        return ppo_loss, pol_loss, ent_loss
-
-    def _get_explained_variance(self, values: Tensor, returns: Tensor) -> float:
-        """Calculates explained variance for one genome's current rollout."""
-        target = returns.reshape(returns.shape[0], -1).mean(dim=1)
-        prediction = values.reshape(values.shape[0], -1).mean(dim=1)
-        target_variance = torch.var(target, unbiased=False)
-        if target_variance <= self.epsilon:
-            return np.nan
-        return (1.0 - torch.var(target - prediction, unbiased=False) / target_variance).item()
-    
-    def _get_true_entropy_loss(self, key: int, entropy_loss: float, batches: list[list[int]], observations: Tensor, raw: bool = False):
-        if self.use_entropy:
-            loss = entropy_loss
-        else:
-            loss = -self._get_stdev(key, batches, observations, raw)
-        return loss
-    
     def set_scores(self, returns: dict[int, float], policy_loss: dict[int, float], std: dict[int, float] | None = None,
                    mean: dict[int, float] | None = None, value_loss: dict[int, float] | None = None):
         """
@@ -262,6 +165,7 @@ class PPO(Algorithm):
             key, score = item
             return score, -key
 
+        use_loss = self.loss_reg != 0.
         use_std = self.ent_reg != 0.
         if use_std:
             assert std is not None and all(key in std for key in returns.keys())
@@ -274,7 +178,7 @@ class PPO(Algorithm):
 
         norm_returns = self.normalize_array(returns, genus_separated=True)
         # Policy loss is minimized, so its normalized value is inverted before being combined additively
-        norm_loss = {k: 1 - v for k, v in self.normalize_array(policy_loss, genus_separated=True).items()}
+        norm_loss = {k: 1 - v for k, v in self.normalize_array(policy_loss, genus_separated=True).items()} if use_loss else None
         # Log-prob MSE is minimized too, so it's inverted the same way as policy loss.
         norm_mean = {k: 1 - v for k, v in self.normalize_array(mean, genus_separated=True).items()} if use_mean else None
         norm_value = {k: 1 - v for k, v in self.normalize_array(value_loss, genus_separated=True).items()} if use_value else None
@@ -284,7 +188,7 @@ class PPO(Algorithm):
         scores = dict(sorted(
             {
                 key: (self.rew_reg * norm_returns[key]) 
-                     + (self.loss_reg * norm_loss[key])
+                     + (self.loss_reg * norm_loss[key] if use_loss else 0.0)
                      + (self.ent_reg * norm_std[key] if use_std else 0.0)
                      + (self.pol_reg * norm_mean[key] if use_mean else 0.0)
                      + (self.val_reg * norm_value[key] if use_value else 0.0)
@@ -294,13 +198,13 @@ class PPO(Algorithm):
         ))
 
         global_norm_returns = self.normalize_array(returns)
-        global_norm_loss  = {k: 1 - v for k, v in self.normalize_array(policy_loss).items()}
+        global_norm_loss  = {k: 1 - v for k, v in self.normalize_array(policy_loss).items()} if use_loss else None
         global_norm_std   = {k: 1 - v for k, v in self.normalize_array(std).items()} if use_std else None
         global_norm_mean  = {k: 1 - v for k, v in self.normalize_array(mean).items()} if use_mean else None
         global_norm_value = {k: 1 - v for k, v in self.normalize_array(value_loss).items()} if use_value else None
         global_scores = dict(sorted(
             {
-                key: (self.rew_reg * global_norm_returns[key]) + (self.loss_reg * global_norm_loss[key])
+                key: (self.rew_reg * global_norm_returns[key]) + (self.loss_reg * global_norm_loss[key] if use_loss else 0.0)
                      + (self.ent_reg * global_norm_std[key] if use_std else 0.0)
                      + (self.pol_reg * global_norm_mean[key] if use_mean else 0.0)
                      + (self.val_reg * global_norm_value[key] if use_value else 0.0)
@@ -336,7 +240,8 @@ class PPO(Algorithm):
         return best_genome_key, global_fitness_stats
 
     def learn(self, evaluation_function: callable, steps: int, epochs: int = None, batch_size: int = None,
-              accuracy_error=0.10, accuracy_type='continuous', verbose: int = None):
+              accuracy_error=0.10, accuracy_type='continuous', verbose: int = None,
+              batching: str | None = None, record_batch_size: int | None = None):
         """
         Runs the full evolution loop: collect rollout data, rank genomes by return and policy loss, log
         progress and step schedulers, until ``epochs`` generations have been trained (or forever, if
@@ -345,12 +250,19 @@ class PPO(Algorithm):
         :param evaluation_function: Callable that runs the population against the environment for one epoch.
         :param steps: Number of primary-buffer steps to collect per epoch.
         :param epochs: Number of epochs to train for; trains indefinitely when ``None``.
-        :param batch_size: Batch size used when iterating over collected records.
+        :param batch_size: Records per batch when genomes are processed one by one (``batching='genome'``).
         :param accuracy_error: Relative error tolerance used when computing (logging-only) policy accuracy.
         :param accuracy_type: Accuracy comparison mode; one of ``'continuous'``, ``'binary'``, ``'discrete'``.
         :param verbose: Verbosity level; ``0``/``None`` is silent, ``1`` prints the summary each epoch, ``2`` also prints timings.
+        :param batching: ``'genome'``: all genomes one by one with their own batches of ``batch_size`` records.
+            ``'record'``: all genomes of a genus at once, ``record_batch_size`` records per batch (smaller values
+            use less memory with many genomes). Defaults to the trainer's setting (``'genome'``).
+        :param record_batch_size: Records per batch for ``batching='record'`` (default 1).
         """
         print(f"Logging to {CM(self.log_path, Fore.MAGENTA)}")
+        if batch_size is not None: self.batch_size = batch_size
+        if batching is not None: self.batching = batching
+        if record_batch_size is not None: self.record_batch_size = record_batch_size
         if epochs is None:
             epochs = np.inf
         epoch_done = 0
@@ -358,502 +270,268 @@ class PPO(Algorithm):
             torch.cuda.empty_cache()
 
             # Running environment to collect rollout data
-            ts = clock.perf_counter()
-            self.steps_limit = self.steps_done + steps
-            self.population.run(evaluation_function, 1, verbose=verbose, skip=True, trainer=self)
-            if len(self.population.to_delete) == len(self.population.genomes):
-                self.population.to_delete.clear()
-            invalid_population = len(self.population.to_delete) == len(self.population.genomes)
-            valid_keys = [
-                key for key in self.population.genomes.keys() if key not in self.population.to_delete or invalid_population
-            ] if self.validate else list(self.population.genomes.keys())
-            if len(valid_keys) == 0:
-                valid_keys = list(self.population.genomes.keys())
-            batch_indices = self.get_batches(valid_keys, batch_size, False)
-            run_time = clock.perf_counter() - ts
+            valid_keys, run_time = self._collect_rollout(evaluation_function, steps, verbose)
+            prim, sec = self.primary, self.secondary
+            pts = ts = clock.perf_counter()
+
+            # Sort the rollout by episode and find the episode segments of every genome
+            rows, runs = self.prepare_rollout(prim, valid_keys)
+            lengths, ep = prim.lengths, prim.data['ep_map']
+            kept_lengths = lengths.copy()  # the primary buffer is emptied (lengths -> 0) before the best genome is known
+            n_eps = int(runs.counts[rows[0]])
+            G = len(lengths)
             if verbose and verbose >= 2:
-                print(f"collected data in {CM(f'{round(run_time, 2)}s', Fore.LIGHTCYAN_EX)}")
+                print(f"Valid keys: {len(valid_keys)}, records: {prim.max_size()}, episodes: {n_eps}")
+                print(f"states = {prim.data['state'].shape[2:]}, actions = {prim.data['action'].shape[2:]}")
+            ts = self._tick(verbose, "sorted episodic data", ts)
 
-            # Rolling out genomes that are not to be deleted
-            pts = clock.perf_counter()
-            with torch.no_grad():
-                # Roll out data from last episodes from primary buffers
-                ts = clock.perf_counter()
-                states, actions, rewards, log_probs, episode_mapping = self.primary.rollout(
-                    ['state', 'action', 'reward', 'log_prob', 'ep_map'], as_list=True, stack=True, keys=valid_keys
+            # Current returns; with no critic the raw returns double as the advantage
+            returns_current = self.compute_returns(
+                prim.data['reward'], ep, lengths, rows, self.gamma, self.kappa, 1.0, 0, False, False
+            )
+            ep_rewards = self.episode_means(prim.data['reward'], lengths, rows, runs)  # (genomes, episodes)
+            ts = self._tick(verbose, "computed primary returns", ts)
+
+            values = None
+            if self.use_critic:
+                values = self.forward_pass('get_value', ['state'], valid_keys, strict=True)[0]
+                advantages = returns_current - values
+            else:
+                advantages = returns_current
+            ts = self._tick(verbose, "computed advantages", ts)
+
+            # Terms whose coefficient is 0 do not influence fitness: skip them for the population and only
+            # evaluate them for the best genome afterwards (logging only).
+            use_loss = self.loss_reg != 0.
+            use_pol = self.pol_reg != 0.
+            use_ent = self.ent_reg != 0.
+            use_val = self.use_critic and self.val_reg != 0.
+            need_eval = use_loss or use_pol or (use_ent and self.use_entropy)
+            need_std = use_ent and not self.use_entropy
+            zeros = np.zeros((G, prim.max_size()), np.float64)
+            ppo_rec = sq_rec = ent_rec = zeros
+            if need_eval:
+                new_log_prob, entropy = self.forward_pass(
+                    'evaluate_action', ['state', 'action'], valid_keys, strict=True
+                )[:2]
+                ppo_rec, sq_rec, ent_rec = self.ops.ppo_terms(
+                    new_log_prob, prim.data['log_prob'], advantages, entropy, lengths, rows
                 )
-                if verbose and verbose >= 2:
-                    print(f"rolled out data in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+                if not np.isfinite(ppo_rec[rows]).all():
+                    raise ValueError(f"found NaN/Inf in PPO loss")
+            if need_std:  # std-dev from the module instead of the entropy
+                std_out = self.forward_pass('get_std', ['state'], valid_keys, strict=True)[0]
+                ent_rec = -self.ops.record_mean(std_out, lengths, rows)
+            val_rec = self.ops.value_terms(values, returns_current, lengths, rows, self.epsilon) if use_val else zeros
+            ep_return = self.ops.segment_mean(self.ops.record_mean(returns_current, lengths, rows), runs, rows)
+            if need_eval or need_std or use_val:
+                ep_loss = -self.ops.segment_mean(ppo_rec, runs, rows)
+                # Policy consistency: MSE between old and new probabilities (cheap stand-in for MSE-between-means)
+                ep_pol = np.log10(self.ops.segment_mean(sq_rec, runs, rows) + self.epsilon)
+                ep_ent = self.ops.segment_mean(ent_rec, runs, rows)
+                ep_val = self.ops.segment_mean(val_rec, runs, rows)
+            else:
+                ep_loss = ep_pol = ep_ent = ep_val = np.zeros((G, n_eps), np.float64)
+            if need_eval and not (np.isfinite(ep_pol[rows, :n_eps]).all()):
+                raise ValueError("Encountered inf/nan loss")
+            ts = self._tick(verbose, "computed policy terms", ts)
 
-                # Sort episodes wrt. episode mapping
-                ts = clock.perf_counter()
-                episode_lengths = self.sort_episodes(episode_mapping, states, actions, rewards, log_probs)
-                if verbose and verbose >= 2:
-                    print(f"sorted episodic data in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            # Set the new episodic returns, policy loss and policy (probability) MSE to the secondary buffer
+            def full(fill, matrix):
+                block = np.full((G, n_eps), fill, np.float64)
+                block[rows] = matrix[rows, :n_eps]
+                return block
+            ep_ids = np.broadcast_to(runs.ids[rows[0], :n_eps], (G, n_eps)).astype(np.int64)
+            sec.append_block(
+                ec_return=full(-np.inf, ep_return), ep_loss=full(+np.inf, ep_loss), ep_val=full(+np.inf, ep_val),
+                ep_mean=full(+np.inf, ep_pol), ep_std=full(+np.inf, ep_ent), ep_map=ep_ids,
+                ep_len=full(-np.inf, runs.lengths),
+            )
+            ts = self._tick(verbose, "updated secondary buffers", ts)
 
-                # Compute current returns
-                ts = clock.perf_counter()
-                returns_current = self.compute_returns(rewards, self.gamma, self.kappa, 1.0, 0, False, False, episode_mapping)
-                if verbose and verbose >= 2:
-                    print(f"computed primary returns in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            # Clean up memory for other calculations
+            if self.max_steps is not None: self.deque_steps_secondary(self.max_steps, None)
+            if self.max_episodes is not None: self.deque_episodes_secondary(self.max_episodes, None)
+            buffer_sizes_primary = prim.buffer_sizes()
+            buffer_sizes_secondary = sec.buffer_sizes()
+            self.deque_steps(0, None)  # only resets lengths; the arrays stay valid through ``kept_lengths``
+            ts = self._tick(verbose, "deleted data", ts)
 
-                # Values / advantages: with no critic, the raw returns double as the advantage
-                ts = clock.perf_counter()
-                if self.use_critic:
-                    values = {
-                        key: torch.cat([
-                            self.get_module(key).get_value(states[key][batch].unsqueeze(0).to(self.device), keys=key).squeeze(0)
-                            for batch in batch_indices[key]
-                        ]).cpu()
-                        for key in valid_keys
-                    }
-                    advantages = {key: returns_current[key] - values[key] for key in valid_keys}
-                else:
-                    advantages = returns_current
-                if verbose and verbose >= 2:
-                    print(f"computed advantages in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            # Full returns/loss, combined across every retained episode the same way (alpha/order/normalize)
+            srows, sruns = self.prepare_rollout(sec, valid_keys, check=False)
+            sl, sep = sec.lengths, sec.data['ep_map']
+            returns = self.compute_returns(sec.data['ec_return'], sep, sl, srows, 0, 0, self.alpha, self.order, False, self.normalize)
+            # NOTE: No normalization of the secondary scores. Values should remain fully negative
+            ppo_loss = None if not use_loss else self.compute_returns(sec.data['ep_loss'], sep, sl, srows, 0, 0, self.beta, self.beta_order, False, False)
+            pol_loss = None if not use_pol else self.compute_returns(sec.data['ep_mean'], sep, sl, srows, 0, 0, self.beta, self.beta_order, True, False)  # Inverted: limits [0, +inf]
+            value_loss = None if not use_val else self.compute_returns(sec.data['ep_val'], sep, sl, srows, 0, 0, self.beta, self.beta_order, True, False)
+            ent_loss = None if not use_ent else self.compute_returns(sec.data['ep_std'], sep, sl, srows, 0, 0, self.beta, self.beta_order, False, False)
+            ts = self._tick(verbose, "computed secondary returns", ts)
 
-                # Set the new episodic returns, policy loss and policy (log-prob) MSE to the secondary buffer
-                ts = clock.perf_counter()
-                episodic_data: dict[int, dict[int, tuple[float, float, float, float, int]]] = {
-                    key: {
-                        uei: (
-                            torch.mean(returns_current[key][episode_indices]).cpu().item(),
-                            *self._get_policy_loss(key, states[key], actions[key], log_probs[key], advantages[key], episode_indices),
-                            torch.mean(torch.log10((values[key][episode_indices] - returns_current[key][episode_indices]) ** 2 + self.epsilon)).item()
-                            if self.use_critic else 0, #np.inf,
-                            len(episode_indices),
-                        )
-                        for episode_indices, uei in [
-                            ([idx for idx, ep_idx in enumerate(episode_mapping[key]) if ep_idx == unique_ep_idx], unique_ep_idx)
-                            for unique_ep_idx in np.unique(episode_mapping[key])
-                        ] # List[ListOfIndicesForEachEpisode]
-                    }
-                    for key in valid_keys
-                } # Dict[Key, Dict[EpisodeIndex, Tuple[MeanReturn, MeanPPOLoss, MeanPolicyMSE, MeanPolicyEntropy, MeanValueLoss, EpisodeLength]]]
-                episode_counts = [len(er) for er in episodic_data.values()]
-                if not all([l == episode_counts[0] for l in episode_counts]):
-                    raise RuntimeError(f"Ensure all genomes go through the same number of episodes in the environment;"
-                                       f"Got:\n {episode_counts}")
-                episodes = sorted(set(sum([list(d.keys()) for d in episodic_data.values()], [])))
-                for ep_idx in episodes:
-                    ec_return = torch.tensor([
-                        episodic_data[key][ep_idx][0] if key in valid_keys else -np.inf
-                        for key in self.secondary.mapping.keys()
-                    ])
-                    ep_loss = torch.tensor([
-                        episodic_data[key][ep_idx][1] if key in valid_keys else +np.inf
-                        for key in self.secondary.mapping.keys()
-                    ])
-                    ep_val = torch.tensor([
-                        episodic_data[key][ep_idx][4] if key in valid_keys else +np.inf
-                        for key in self.secondary.mapping.keys()
-                    ])
-                    ep_mean = torch.tensor([
-                        episodic_data[key][ep_idx][2] if key in valid_keys else +np.inf
-                        for key in self.secondary.mapping.keys()
-                    ])
-                    ep_std = torch.tensor([
-                        episodic_data[key][ep_idx][3] if key in valid_keys else +np.inf
-                        for key in self.secondary.mapping.keys()
-                    ])
-                    ep_len = [
-                        episodic_data[key][ep_idx][5] if key in valid_keys else -np.inf
-                        for key in self.secondary.mapping.keys()
-                    ]
-                    self.secondary.update(
-                        ec_return=ec_return, ep_loss=ep_loss, ep_val=ep_val, ep_mean=ep_mean, ep_std=ep_std,
-                        ep_map=int(ep_idx), ep_len=ep_len
-                    )
-                if verbose and verbose >= 2:
-                    print(f"updated secondary buffers in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            def stat(array: np.ndarray):
+                """(mean, std) over the retained episodes of every genome."""
+                return self.row_stats(self.episode_means(array, sl, srows, sruns), sruns.counts, srows, 0)
 
-                # Clean up memory for other calculations
-                ts = clock.perf_counter()
-                if self.max_steps is not None: self.deque_steps_secondary(self.max_steps, None)
-                if self.max_episodes is not None: self.deque_episodes_secondary(self.max_episodes, None)
-                buffer_sizes_primary = self.primary.buffer_sizes()
-                buffer_sizes_secondary = self.secondary.buffer_sizes()
-                self.deque_steps(0, None)
-                if verbose and verbose >= 2:
-                    print(f"deleted data in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            # Reward consistency: mean minus spread. Penalize loss inconsistency: mean plus spread.
+            ret_m, ret_s = stat(returns)
+            returns_score = self.as_dict(ret_m - self.div_reg * ret_s, valid_keys, srows)
+            for key, value in returns_score.items(): self.population.genomes[key]._actual = value
 
-                # Get full returns/loss, combined across every retained episode the same way (alpha/order/normalize)
-                ts = clock.perf_counter()
-                returns_raw, ep_loss_raw, ep_val_raw, ep_pol_raw, ep_std_raw, full_mapping, episode_lengths = self.secondary.rollout(
-                    ['ec_return', 'ep_loss', 'ep_val', 'ep_mean', 'ep_std', 'ep_map', 'ep_len'], as_list=True, stack=True, keys=valid_keys
-                )
-                self.sort_episodes(full_mapping, returns_raw, ep_loss_raw, ep_val_raw, ep_pol_raw, ep_std_raw)
-                if verbose and verbose >= 2:
-                    print(f"fetched secondary data in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
-                ts = clock.perf_counter()
-                returns = self.compute_returns(returns_raw, 0, 0, self.alpha, self.order, False, self.normalize, full_mapping)
-                # TODO: Might want to add norm parameter for these secondary scores
-                beta_norm = False
-                ppo_loss = self.compute_returns(ep_loss_raw, 0, 0, self.beta, self.beta_order, False, beta_norm, full_mapping) # NOTE: No normalization. Values should remain fully negative
-                pol_loss = self.compute_returns(ep_pol_raw, 0, 0, self.beta, self.beta_order, True, beta_norm, full_mapping) # NOTE: Inverted because limits are [0, +inf]
-                value_loss = self.compute_returns(ep_val_raw, 0, 0, self.beta, self.beta_order, True, beta_norm, full_mapping)
-                ent_loss = self.compute_returns(ep_std_raw, 0, 0, self.beta, self.beta_order, False,beta_norm, full_mapping)
-                if verbose and verbose >= 2:
-                    print(f"computed secondary returns in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            keys_zero = {key: 0.0 for key in returns_score}
+            loss_score = (lambda ms: self.as_dict(ms[0] + self.div_reg * ms[1], valid_keys, srows))(stat(ppo_loss)) if use_loss else keys_zero
+            loss_true = self.as_dict(stat(sec.data['ep_loss'])[0], valid_keys, srows) if use_loss else dict(keys_zero)
 
-                def fixed_std(array: list[float] | Tensor):
-                    if len(array) == 0:
-                        raise ValueError("Array or Tensor is empty!")
-                    elif len(array) == 1:
-                        return 0.0
-                    else:
-                        if isinstance(array, Tensor):
-                            res = torch.std(array).cpu().item()
-                        else:
-                            res = np.std(array).item()
-                        if np.isnan(res):
-                            raise ValueError(f"std_dev raised NaN from array \n'{array}'")
-                        return res
+            if use_pol:
+                pm, ps = stat(pol_loss)
+                pol_mean_score = self.as_dict(pm + self.div_reg * ps, valid_keys, srows)
+                mean_true = self.as_dict(stat(sec.data['ep_mean'])[0], valid_keys, srows)
+            else:
+                pol_mean_score, mean_true = None, dict(keys_zero)
 
-                # Reward consistency: mean minus spread. Penalize loss inconsistency: mean plus spread.
-                _raw_returns: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(returns[key][indices]).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                _raw_losses: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(ppo_loss[key][indices]).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                _raw_losses_true: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(ep_loss_raw[key][indices]).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                _raw_mean: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(pol_loss[key][indices]).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                _raw_mean_true: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(ep_pol_raw[key][indices]).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                # Entropy-derived std-dev, already computed once (per-episode) in _get_policy_loss and stored
-                # in the secondary buffer, so no re-evaluation of actions is needed here.
-                _raw_std: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(ent_loss[key][indices]).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                _raw_std_true: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(ep_std_raw[key][indices]).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                _raw_value_losses: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(value_loss[key][indices].float()).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                _raw_value_losses_true: dict[int, list[float]] = {
-                    key: [
-                        torch.mean(ep_val_raw[key][indices].float()).item()
-                        for indices in [
-                            [idx for idx, ep_idx in enumerate(full_mapping[key]) if ep_idx == u_idx]
-                            for u_idx in np.unique(full_mapping[key])
-                        ]
-                    ]
-                    for key in valid_keys
-                }
-                # TODO: Create function(s) encompass all these repeated lines above and below
+            if use_ent:
+                em, es = stat(ent_loss)
+                pol_std_score = self.as_dict(em + self.div_reg * es, valid_keys, srows)
+                std_true = self.as_dict(stat(sec.data['ep_std'])[0], valid_keys, srows)
+            else:
+                pol_std_score, std_true = None, dict(keys_zero)
 
-                returns_score: dict[int, float] = {
-                    key: np.mean(value).item() - (self.div_reg * fixed_std(value))
-                    for key, value in _raw_returns.items()
-                }
-
-                for key, value in returns_score.items(): self.population.genomes[key]._actual = value
-                
-                loss_score: dict[int, float] = {
-                    key: np.mean(value).item() + (self.div_reg * fixed_std(value))
-                    for key, value in _raw_losses.items()
-                }
-                loss_true: dict[int, float] = {
-                    key: np.mean(value).item() # + (self.div_reg * fixed_std(value))
-                    for key, value in _raw_losses_true.items()
-                    # TODO: Find a way to simplifiy/combine this calculation since it's only needed for logging,
-                    #       just like the rewards
-                }
-                # Policy (log-prob MSE) consistency, only computed when actually used by set_scores (pol_reg != 0)
-                pol_mean_score: dict[int, float] | None = {
-                    key: np.mean(value).item() + (self.div_reg * fixed_std(value))
-                    for key, value in _raw_mean.items()
-                } if self.pol_reg != 0. else None
-                mean_true: dict[int, float] = {
-                    key: np.mean(value).item() # + (self.div_reg * fixed_std(value))
-                    for key, value in _raw_mean_true.items()
-                }
-                
-                # Policy std-dev, only computed when actually used by set_scores (std_reg != 0)
-                pol_std_score: dict[int, float] | None = {
-                    key: np.mean(value).item() + (self.div_reg * fixed_std(value))
-                    for key, value in _raw_std.items()
-                } if self.ent_reg != 0. else None
-                std_true: dict[int, float] = {
-                    key: np.mean(value).item() # + (self.div_reg * fixed_std(value))
-                    for key, value in _raw_std_true.items()
-                } if self.ent_reg != 0. else None
-
-                value_loss_score: dict[int, float] | None = {
-                    key: np.mean(value).item() + (self.div_reg * fixed_std(value))
-                    for key, value in _raw_value_losses.items()
-                } if self.use_critic and self.val_reg != 0. else None
-                value_loss_true: dict[int, float] = {
-                    key: np.mean(value).item() # + (self.div_reg * fixed_std(value))
-                    for key, value in _raw_value_losses_true.items()
-                } if self.ent_reg != 0. else None
-                # TODO: type hint that the true value dicts can also be None
+            if use_val:
+                vm, vs = stat(value_loss)
+                value_loss_score = self.as_dict(vm + self.div_reg * vs, valid_keys, srows)
+                value_loss_true = self.as_dict(stat(sec.data['ep_val'])[0], valid_keys, srows)
+            else:
+                value_loss_score, value_loss_true = None, dict(keys_zero)
 
             # Calculate and set scores
-            with torch.no_grad():
-                ts = clock.perf_counter()
-                best_genome_key, fitness_stats = self.set_scores(
-                    returns_score, loss_score, pol_std_score, pol_mean_score, value_loss_score
-                )
-                if verbose and verbose >= 2:
-                    print(f"set scores in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            best_genome_key, fitness_stats = self.set_scores(
+                returns_score, loss_score, pol_std_score, pol_mean_score, value_loss_score
+            )
+            ts = self._tick(verbose, "set scores", ts)
 
             # Post Calculations
-            with torch.no_grad():
-                ts = clock.perf_counter()
-                ep_len_mean = np.mean(episode_lengths[best_genome_key]).item()
-                ep_len_std  = np.std(episode_lengths[best_genome_key]).item()
+            best_row        = sec.mapping[best_genome_key]
+            ep_lens         = sec.data['ep_len'][best_row, :sl[best_row]]
+            ep_len_mean     = np.mean(ep_lens).item()
+            ep_len_std      = np.std(ep_lens).item()
+            ep_cum          = self.episode_means(returns, sl, srows, sruns)
+            best_rew        = ep_rewards[best_row, :n_eps]
+            ep_rew_mean     = np.mean(best_rew).item()
+            best_cum        = ep_cum[best_row, :sruns.counts[best_row]]
+            ep_cum_rew      = np.mean(best_cum).item()
+            ep_rew_std      = np.std(best_cum).item() if len(best_cum) > 1 else 0.0
+            global_rew      = np.mean(np.nanmean(ep_rewards[rows], axis=1)).item()
+            global_cum_rew  = np.mean(np.nanmean(ep_cum[srows], axis=1)).item()
+            policy_loss_best = loss_true[best_genome_key]
+            policy_mean_best = mean_true[best_genome_key]
+            policy_std_best = std_true[best_genome_key]  # NOTE: Categorical/MultivariateNormal have no direct std_dev, so entropy stands in
+            value_loss_best = value_loss_true[best_genome_key]
 
-                def get(buffer: TensorDict, episodic_mapping: dict[int, list[int]], key: int) -> list[list[float]]:
-                    return [
-                        [
-                            value.mean().cpu().item()
-                            for idx, value in enumerate(buffer[key])
-                            if episodic_mapping[key][idx] == ep_idx
-                        ]
-                        for ep_idx in np.unique(episodic_mapping[key])
-                    ]
-                episode_rewards = get(rewards, episode_mapping, best_genome_key)
-                cum_episode_rewards = get(returns, full_mapping, best_genome_key)
-                ep_rew_hold = [np.mean(episode) for episode in episode_rewards]
-                ep_rew_mean = np.mean(ep_rew_hold).item()
-                ep_cum_hold = [np.mean(episode) for episode in cum_episode_rewards]
-                ep_cum_rew = np.mean(ep_cum_hold).item()
-                ep_rew_std = np.std(ep_cum_hold).item() if len(ep_cum_hold) > 1 else 0.0
-                global_rew = np.mean([
-                    np.mean([
-                        np.mean(episode) for episode in get(rewards, episode_mapping, key)
-                    ]).item()
-                    for key in rewards.keys()
-                ])
-                global_cum_rew = np.mean([
-                    np.mean([
-                        np.mean(episode) for episode in get(returns, full_mapping, key)
-                    ]).item()
-                    for key in returns.keys()
-                ])
-                policy_loss_best = loss_true[best_genome_key]
+            # Best-genome-only evaluation of the terms skipped for the population (logging only)
+            if not need_eval:
+                bk = best_genome_key
+                br = np.asarray([prim.mapping[bk]], np.int64)
+                r0 = int(br[0])
+                nlp, ent_b = self.forward_pass('evaluate_action', ['state', 'action'], [bk], kept_lengths, strict=True)[:2]
+                pr, sq, en = self.ops.ppo_terms(nlp, prim.data['log_prob'], advantages, ent_b, kept_lengths, br)
+                policy_loss_best = float(-np.nanmean(self.ops.segment_mean(pr, runs, br)[r0, :n_eps]))
+                policy_mean_best = float(np.log10(np.nanmean(self.ops.segment_mean(sq, runs, br)[r0, :n_eps]) + self.epsilon))
+                policy_std_best = float(np.nanmean(self.ops.segment_mean(en, runs, br)[r0, :n_eps]))
+                if not self.use_entropy:
+                    std_b = self.forward_pass('get_std', ['state'], [bk], kept_lengths, strict=True)[0]
+                    policy_std_best = float(-np.mean(self.ops.record_mean(std_b, kept_lengths, br)[r0, :int(kept_lengths[r0])]))
 
-                # Policy accuracy: logging-only (not used in fitness), computed for the best genome only
-                policy_accuracy_best, value_accuracies = self.get_accuracy(
-                    batch_indices, states, actions, 
-                    returns_current if self.use_critic and self.val_reg != 0 else None, 
-                    error=accuracy_error, type=accuracy_type,
-                    keys=best_genome_key, strict=True,
-                )
-                policy_accuracy_best = policy_accuracy_best[best_genome_key]
-                value_accuracy_best = value_accuracies[best_genome_key]
+            # Policy / value accuracy: logging-only (not used in fitness), computed for the best genome only
+            best_prim_row = prim.mapping[best_genome_key]
+            best_rows = np.asarray([best_prim_row], np.int64)
+            policy_accuracy_best = value_accuracy_best = explained_variance_best = np.nan
+            policy = self.forward_pass('get_policy', ['state'], [best_genome_key], kept_lengths)
+            if policy is not None:
+                accuracy = self.ops.accuracy(policy[0], prim.data['action'], kept_lengths, best_rows, accuracy_error, accuracy_type)
+                policy_accuracy_best = float(np.mean(accuracy[best_prim_row, :kept_lengths[best_prim_row]]))
+            if self.use_critic:
+                n = int(kept_lengths[best_prim_row])
+                target = returns_current[best_prim_row, :n].reshape(n, -1).mean(axis=1)
+                prediction = values[best_prim_row, :n].reshape(n, -1).mean(axis=1)
+                target_variance = np.var(target)
+                if target_variance > self.epsilon:
+                    explained_variance_best = (1.0 - np.var(target - prediction) / target_variance).item()
+                if self.val_reg != 0 and values.shape[2:] == returns_current.shape[2:]:
+                    v_acc = self.ops.accuracy(values, returns_current, kept_lengths, best_rows, accuracy_error, 'continuous')
+                    value_accuracy_best = float(np.mean(v_acc[best_prim_row, :n]))
 
-                # Policy (log-prob MSE) consistency: reuse the score computation when pol_reg is active,
-                # otherwise compute just for the best genome so it can still be logged
-                policy_mean_best = (
-                    mean_true[best_genome_key] if mean_true is not None
-                    else np.mean(_raw_mean[best_genome_key]).item() + (self.div_reg * fixed_std(_raw_mean[best_genome_key]))
-                )
-
-                # Policy std-dev: reuse the score computation when std_reg is active, otherwise compute
-                # just for the best genome so it can still be logged
-                policy_std_best = (
-                    std_true[best_genome_key] if std_true is not None
-                    else np.mean(_raw_std[best_genome_key]).item() + (self.div_reg * fixed_std(_raw_std[best_genome_key]))
-                ) # NOTE: Distributions like Categorical/MultivariateNormal have no direct std_dev hence use entropy from distributions as std_dev
-                value_loss_best = (
-                    value_loss_true[best_genome_key] if value_loss_true is not None
-                    else np.mean(_raw_value_losses[best_genome_key]).item() + (self.div_reg * fixed_std(_raw_value_losses[best_genome_key]))
-                )
-                # TODO: Also add function/methods(s) to simplify these repeated lines above
-                if self.use_critic:
-                    explained_variance_best = self._get_explained_variance(
-                        values[best_genome_key], returns_current[best_genome_key]
-                    )
-                else:
-                    explained_variance_best = np.nan
-
-                # noinspection PyBroadException
-                def get_range(key: Union[int, None]):
-                    try:
-                        params = []
-                        if key is not None:
-                            for p in self.get_module(key).neat_parameters():
-                                params.append(p[key].flatten())
-                        else:
-                            for module in self.models:
-                                for p in module.neat_parameters():
-                                    params.append(p[key].flatten())
-                        params = torch.cat(params)
-                        return torch.mean(params).cpu().item(), torch.std(params).cpu().item(), \
-                               torch.max(params).cpu().item(), torch.min(params).cpu().item(), \
-                               torch.sum(torch.abs(params) <= self.population.config.genome.param_epsilon).cpu().item() / params.numel()
-                    except Exception:
-                        return torch.nan, torch.nan, torch.nan, torch.nan, torch.nan
-
-                mean, std, maximum, minimum, zero_count = get_range(best_genome_key)
-                processing_time = np.floor(clock.perf_counter() - pts)
-
-                if verbose and verbose >= 2:
-                    print(f"calculated stats in {CM(f'{round(clock.perf_counter() - ts, 2)}s', Fore.LIGHTCYAN_EX)}")
+            mean, std, maximum, minimum, zero_count = self._param_stats(best_genome_key)
+            processing_time = np.floor(clock.perf_counter() - pts)
+            self._tick(verbose, "calculated stats", ts)
 
             # Logging
-            with torch.no_grad():
-                self.logging.update(
-                    ep_len_mean=ep_len_mean, ep_len_std=ep_len_std, ep_rew_mean=ep_rew_mean, ep_rew_std=ep_rew_std,
-                    policy_loss=policy_loss_best, policy_accuracy=policy_accuracy_best, policy_std=policy_std_best,
-                    policy_mean=policy_mean_best, value_loss=value_loss_best,
-                    explained_variance=explained_variance_best,
-                )
+            self.logging.update(
+                ep_len_mean=ep_len_mean, ep_len_std=ep_len_std, ep_rew_mean=ep_rew_mean, ep_rew_std=ep_rew_std,
+                policy_loss=policy_loss_best, policy_accuracy=policy_accuracy_best, policy_std=policy_std_best,
+                policy_mean=policy_mean_best, value_loss=value_loss_best, explained_variance=explained_variance_best,
+            )
 
-                survival_rate = len([key for key in valid_keys if key not in self.population.to_delete]) / len(self.population.genomes)
-                best_genome = self.population.genomes[best_genome_key]
-                if self.prev_valid_keys is None:
-                    creep = creep_max = creep_best = np.nan
-                elif len(valid_keys) <= 0:
-                    creep = creep_max = creep_best = 0.0
-                else:
-                    creep = len([key for key in self.prev_valid_keys if key in valid_keys]) / len(valid_keys)
-                    buffer_size_best = buffer_sizes_secondary[best_genome_key]
-                    buffer_size_max  = max(buffer_sizes_secondary.values())
-                    creep_best = len([
-                        key for key in self.prev_valid_keys
-                        if key in valid_keys and buffer_sizes_secondary[key] >= buffer_size_best
-                    ]) / len(valid_keys)
-                    creep_max = len([
-                        key for key in self.prev_valid_keys
-                        if key in valid_keys and buffer_sizes_secondary[key] >= buffer_size_max
-                    ]) / len(valid_keys)
-                self.prev_valid_keys = valid_keys
+            survival_rate = len([key for key in valid_keys if key not in self.population.to_delete]) / len(self.population.genomes)
+            best_genome = self.population.genomes[best_genome_key]
+            creep, creep_best, creep_max = self._creep(valid_keys, best_genome_key, buffer_sizes_secondary, verbose)
 
-                self.tb.log(
-                    self.updates_done,
-                    rollout={
-                        'ep_len_mean': ep_len_mean, 'ep_len_std': ep_len_std, 'ep_rew_mean': ep_rew_mean,
-                        'ep_rew_std': ep_rew_std, 'ep_cum_rew': ep_cum_rew, 'global_rew': global_rew,
-                        'global_cum_rew': global_cum_rew, 'buffer_size_pri': buffer_sizes_primary[best_genome_key],
-                        'buffer_size_sec': buffer_sizes_secondary[best_genome_key],
-                    },
-                    time={'run_time': run_time, 'processing_time': processing_time},
-                    policy={
-                        'policy_loss': policy_loss_best, 'return_score': returns_score[best_genome_key],
-                        'policy_accuracy': policy_accuracy_best, 'policy_std': policy_std_best,
-                        'policy_mean': policy_mean_best, 'value_loss': value_loss_best,
-                        'value_accuracy': value_accuracy_best,
-                        'explained_variance': explained_variance_best,
-                    },
-                    module={
-                        'param_mean': mean, 'param_std': std, 'param_min': minimum, 'param_max': maximum,
-                        'param_zeros': zero_count,
-                        **{f'global_{label}': param for param, label in zip(get_range(None), ['mean', 'std', 'max', 'min', 'zeros'])},
-                    },
-                    population={
-                        'best_genome': best_genome.key,
-                        'best_genus': best_genome.genus if len(self.population.genera) > 0 else None,
-                        'survival_rate': survival_rate, 'creep_score': creep, 'creep_score_best': creep_best,
-                        'creep_score_max': creep_max,
-                        **{f'fitness_{label}': param for param, label in zip(fitness_stats, ['min', 'max', 'mean', 'std'])},
-                    },
-                    schedule=self.log_scheduler_params() if self.schedulers else None,
-                )
-                self.tb.flush()
+            external_report = self._write_logs(
+                self.updates_done,
+                rollout={
+                    'ep_len_mean': ep_len_mean, 'ep_len_std': ep_len_std, 'ep_rew_mean': ep_rew_mean,
+                    'ep_rew_std': ep_rew_std, 'ep_cum_rew': ep_cum_rew, 'global_rew': global_rew,
+                    'global_cum_rew': global_cum_rew, 'buffer_size_pri': buffer_sizes_primary[best_genome_key],
+                    'buffer_size_sec': buffer_sizes_secondary[best_genome_key],
+                },
+                time={'run_time': run_time, 'processing_time': processing_time},
+                policy=self._clean({
+                    'policy_loss': policy_loss_best, 'return_score': returns_score[best_genome_key],
+                    'policy_accuracy': policy_accuracy_best, 'policy_std': policy_std_best,
+                    'policy_mean': policy_mean_best,
+                    **({'value_loss': value_loss_best, 'value_accuracy': value_accuracy_best,
+                        'explained_variance': explained_variance_best} if self.use_critic else {}),
+                }),
+                module={
+                    'param_mean': mean, 'param_std': std, 'param_min': minimum, 'param_max': maximum,
+                    'param_zeros': zero_count,
+                    **{f'global_{label}': param for param, label in zip(self._param_stats(None), ['mean', 'std', 'max', 'min', 'zeros'])},
+                },
+                population={
+                    'best_genome': best_genome.key,
+                    'best_genus': best_genome.genus if len(self.population.genera) > 0 else None,
+                    'survival_rate': survival_rate, 'creep_score': creep, 'creep_score_best': creep_best,
+                    'creep_score_max': creep_max,
+                    **{f'fitness_{label}': param for param, label in zip(fitness_stats, ['min', 'max', 'mean', 'std'])},
+                },
+                schedule=self.log_scheduler_params() if self.schedulers else None,
+            )
             self.updates_done += 1
 
             # Displaying
             if verbose:
                 self.reporter.report({
                     'ROLLOUT': {
-                        'ep_len_mean': ep_len_mean, 'ep_len_std': ep_len_std, 
-                        'ep_rew_mean': ep_rew_mean, 'ep_rew_std': ep_rew_std, 
-                        'ep_cum_rew': ep_cum_rew,
+                        'ep_len_mean': ep_len_mean, 'ep_len_std': ep_len_std,
+                        'ep_rew_mean': ep_rew_mean, 'ep_rew_std': ep_rew_std, 'ep_cum_rew': ep_cum_rew,
                     },
                     'TIME': {
                         'epochs_done': epoch_done + 1, 'run_time': run_time, 'steps_done': self.steps_done,
                         'episodes_done': self.episodes_done,
                         'current_episodes_done': len(self.episode_lengths) if self.episode_lengths else 1,
                     },
-                    'TRAINING': {
+                    'TRAINING': self._clean({
                         'updates_done': self.updates_done, 'policy_loss': policy_loss_best,
-                        'return_score': returns_score[best_genome_key], 
+                        'return_score': returns_score[best_genome_key],
                         'policy_accuracy': policy_accuracy_best, 'policy_std': policy_std_best,
-                        'policy_mean': policy_mean_best, 'value_loss': value_loss_best,
-                        'explained_variance': explained_variance_best,
-                    },
+                        'policy_mean': policy_mean_best,
+                        **({'value_loss': value_loss_best, 'explained_variance': explained_variance_best}
+                           if self.use_critic else {}),
+                    }),
                     'POPULATION': {
                         'best_genome': best_genome.key, 'best_genus': best_genome.genus,
                         'survival_rate': survival_rate, 'creep': creep, 'creep_max': creep_max,
                     },
+                    **external_report,
                 })
-            if self._report_hook is not None:
-                self._report_hook(self)
 
-            if self.schedulers is not None:
-                for s in self.schedulers:
-                    s.step()
-
-            if epoch_done == epochs - 1:
-                self.population.run(
-                    evaluation_function, 1, verbose=verbose, skip=True, trainer=self, terminate_skip=True
-                )
-
+            self._finish_epoch(evaluation_function, epoch_done, epochs, verbose)
             epoch_done += 1

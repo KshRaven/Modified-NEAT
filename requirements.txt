@@ -1,7 +1,7 @@
 # Core dependencies (CPU-compatible, always installed)
 # Install with: pip install -r requirements.txt
 # For a full editable install with dashboard build support, use:
-#   python install.py
+#   python install_cuda.py
 #   python setup.py develop
 numpy
 numba
@@ -12,7 +12,7 @@ gymnasium
 pygame-ce>=2.5.8
 colorama
 
-# GPU/CUDA dependencies (optional, install via: pip install -e .[gpu] or python install.py)
+# GPU/CUDA dependencies (optional, install via: pip install -e .[gpu] or python install_cuda.py)
 # Only needed if you have NVIDIA GPU and want GPU acceleration
 # cuda-python
 # cuda-toolkit

@@ -16,7 +16,6 @@ class Linear(NeatModule):
         self.biases  = NeatParameter(outputs, False, device, dtype) if bias else None
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
-        verbose = False
         try:
             # print(f"lin_mod={self.weights.data.shape, tensor.shape}")
             w = self.expand(self.weights[keys], tensor, keys=keys)
@@ -32,7 +31,7 @@ class Linear(NeatModule):
                 return tensor
             else:
                 return tensor, (w, b)
-        except Exception as e:
+        except ValueError as e:
             print(f"Input shape = {tensor.shape}")
             print(f"Weights shape = {self.weights.shape}")
             print(f"Biases shape = {self.biases.shape if self.biases is not None else None}")
@@ -40,24 +39,35 @@ class Linear(NeatModule):
 
 
 class Polynomial(NeatModule):
-    """Polynomial layer with learnable coefficients."""
-    
+    """Polynomial layer with learnable coefficients.
+
+    For `coefficients=n` the layer computes, per output:
+        y = w[0]·x^n + w[1]·x^(n-1) + ... + w[n-1]·x^1 + b·x^0
+    e.g. coeffs=2, bias=True, desc=True  ->  y = a·x² + b·x¹ + c·x⁰
+    (the bias is the x⁰ term and is only present when bias=True).
+    """
+
     def __init__(self, inputs: int, outputs: int, coefficients: int = 2, bias=True,
-                 device: torch.device = 'cpu', dtype: torch.dtype = torch.float32):
+                 device: torch.device = 'cpu', dtype: torch.dtype = torch.float32, 
+                 descending: bool = True):
         super(Polynomial, self).__init__(inputs=inputs, outputs=outputs, coefficients=coefficients, bias=bias)
         self.coefficients = coefficients
         self.has_bias = bias
         assert coefficients >= 1
-        self.exponents = torch.arange(coefficients, device=device, dtype=dtype) + 1
+        # Descending powers: [n, n-1, ..., 1]  ->  [2, 1] for coefficients=2
+        factors = (coefficients, 0, -1) if descending else (1, coefficients + 1, 1)
+        self.exponents = torch.arange(*factors, device=device, dtype=dtype)
         self.weights = NeatParameter((coefficients, inputs, outputs), False, device, dtype)
         self.biases  = NeatParameter(outputs, False, device, dtype) if bias else None
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
-        tensor = torch.transpose(tensor.unsqueeze(-1) ** self.exponents, -2, -1).unsqueeze(-2)
-        w = self.expand(self.weights[keys], tensor, keys=keys, offset=1)
+        # (G, ..., in) -> (G, ..., C, 1, in), holding x^e for each exponent e
+        tensor = (tensor.unsqueeze(-2) ** self.exponents.unsqueeze(-1)).unsqueeze(-2)
+
+        # (G, C, in, out) -> (G, 1, ..., 1, C, in, out), one singleton per extra input dim
+        w = self.expand(self.weights[keys], tensor, keys=keys)
         try:
-            # print(f"lin_mod={self.weights.data.shape, tensor.shape}")
-            # print(w.shape, tensor.shape)
+            # (G, ..., C, 1, in) @ (G, 1.., C, in, out) -> (G, ..., C, 1, out) -> sum over C -> (G, ..., out)
             tensor = torch.sum(torch.matmul(tensor, w).squeeze(-2), dim=-2)
             if self.has_bias:
                 b = self.expand(self.biases[keys], tensor, keys=keys)

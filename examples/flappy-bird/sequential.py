@@ -1,28 +1,31 @@
-import ModifiedNEAT as neat
-import ModifiedNEAT.nn as mn
+import os, sys
 import torch
 import torch.nn as nn
-import os, sys
 import time as clock
 import numpy as np
 import warnings
 import multiprocessing as mp
 import argparse
 
-from ModifiedNEAT.nn.base import Model
-from ModifiedNEAT.optim import scheduler
-from ModifiedNEAT.util.fancy_text import CM, Fore
-from ModifiedNEAT.util.datetime import unix_to_datetime_file
-from ModifiedNEAT.util.qol import manage_params
 from torch import Tensor, device as TDEVICE, dtype as TDTYPE
 from torch.nn import Module
 from typing import Union
 from numba.core.errors import NumbaPerformanceWarning
 
 EXMP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJ_DIR = os.path.dirname(os.path.dirname(EXMP_DIR))
 print(f"Example path = {EXMP_DIR}")
-if EXMP_DIR not in sys.path:
-    sys.path.insert(0, EXMP_DIR)
+if EXMP_DIR not in sys.path: sys.path.insert(0, EXMP_DIR)
+if PROJ_DIR not in sys.path: sys.path.insert(0, PROJ_DIR)
+
+import ModifiedNEAT as neat
+import ModifiedNEAT.nn as mn
+
+from ModifiedNEAT.optim import scheduler
+from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.datetime import unix_to_datetime_file
+from ModifiedNEAT.util.qol import manage_params
+from ModifiedNEAT.nn.modules.reporting import differential_attention_logger
 
 from game import Game
 
@@ -31,11 +34,54 @@ torch.set_printoptions(threshold=10)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 DTYPE  = torch.float32
+
+
+def _T(x):
+    """Env arrays (NumPy) -> tensors on the training device."""
+    return torch.as_tensor(x, device=DEVICE, dtype=DTYPE)
+
 neat.set_device(DEVICE)
+neat.util.storage.set_storage_location(f"{PROJ_DIR}/storage/")
 print(f"Using PyTorch device: '{DEVICE}'. NEAT device: '{neat.get_device()}'")
-PROJECT_DIR = os.path.dirname(os.path.dirname(EXMP_DIR))
-neat.util.storage.set_storage_location(f"{PROJECT_DIR}/storage/")
-print(f"Example path = {neat.util.storage.STORAGE_DIR}")
+print(f"Storage path: {neat.util.storage.STORAGE_DIR}")
+
+
+class Block(mn.NeatModule):
+    def __init__(
+        self, inputs: int, outputs: int, dim_size: int, coefficients: int,
+        normalize: bool = False, residual: bool = True,
+        activation: nn.Module | None = None, bias: bool = True,
+        device: torch.device = "cpu", dtype: torch.dtype = torch.float32,
+    ):
+        super().__init__(
+            inp=inputs, out=outputs, dim=dim_size, coeffs=coefficients, norm=normalize,
+            res=residual, actv=activation.__class__.__name__ if not None else str(None), bias=bias
+        )
+        self.inputs     = inputs
+        self.outputs    = outputs
+        self.dim_size   = dim_size
+        self.normalize  = normalize
+        self.residual   = residual
+        self.activation = activation if activation is not None else nn.SiLU()
+        self.bias       = bias
+        self.device     = device
+        self.dtype      = dtype
+
+        self.pre_norm = mn.LayerNorm(inputs, bias=False, device=device, dtype=dtype) if normalize else None
+        self.inp_proj = mn.Polynomial(inputs, dim_size, coefficients, bias, device, dtype)
+        self.out_proj = mn.Polynomial(dim_size, outputs, coefficients, bias, device, dtype)
+        self.res_proj = (
+            mn.Identity()
+            if inputs == outputs else
+            mn.Polynomial(inputs, outputs, 1, False, device, dtype)
+        ) if residual else None
+
+    def forward(self, tensor: Tensor, keys: int | list[int] | None = None, **kwargs):
+        residue = tensor
+        if self.normalize: tensor = self.pre_norm(tensor, keys=keys)
+        tensor = self.out_proj(self.activation(self.inp_proj(tensor, keys=keys)), keys=keys)
+        if self.residual: tensor = tensor + self.res_proj(residue, keys=keys)
+        return tensor
 
 
 class BaseModelSeq(mn.Model):
@@ -50,13 +96,14 @@ class BaseModelSeq(mn.Model):
         self.max_seq_len        = max_seq_len
         self.inputs             = inputs
         self.outputs            = outputs
+        self.coefficients: int  = options.get('coefficients', 1)
         self.dim_size           = dim_size
         self.layers             = layers
         self.distribution       = options.get('distribution', 'normal')
         self.probabilistic      = probabilistic
         self.normalize          = options.get('normalize', True)
-        self.clip_min           = options.get('clip_min', -2)
-        self.clip_max           = options.get('clip_max', -0)
+        self.clip_min: int | None = options.get('clip_min', -24) # -12 apprx -28
+        self.clip_max: int | None = options.get('clip_max', +0)
         self.clip_range         = self.clip_max - self.clip_min
         self.lower              = 10 ** self.clip_min
         self.upper              = 10 ** self.clip_max
@@ -64,9 +111,10 @@ class BaseModelSeq(mn.Model):
         self.kv_heads           = kv_heads
         self.use_swiglu: bool   = options.get('use_swiglu', False)
         self.attn_bias: bool    = options.get('attn_bias', bias)
-        self.fwd_exp: int       = options.get('fwd_exp', 2)
+        self.fwd_exp: int       = options.get('fwd_exp', 1)
         self.constant: int      = options.get('constant', 1000)
         self.differential: bool | int = options.get('differential', False)
+        self.epsilon            = options.get('epsilon', 1e-9)
         
         if activation is None:
             activation = nn.SiLU()
@@ -74,36 +122,58 @@ class BaseModelSeq(mn.Model):
             dtype = torch.float32
         
         # Build
-        feed_fwd = None if self.use_swiglu else mn.Sequential(
-            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
-            mn.RMSNorm(dim_size, device=device, dtype=dtype),
-            mn.Linear(dim_size, dim_size, bias, device, dtype),
-            activation, 
-            mn.Linear(dim_size, dim_size, self.attn_bias, device, dtype),
+        # NOTE: SwiGLU seems to work well for backpropagated networks but not for NEAT weight crossover & mutation
+        # feed_fwd = None if self.use_swiglu else mn.Sequential(
+        #     # mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+        #     # mn.RMSNorm(dim_size, device=device, dtype=dtype),
+        #     mn.Linear(dim_size, dim_size * self.fwd_exp, bias, device, dtype),
+        #     activation, 
+        #     mn.Linear(dim_size * self.fwd_exp, dim_size, self.attn_bias, device, dtype),
+        #     # activation, 
+        # )
+        feed_fwd = None if self.use_swiglu else Block(
+            dim_size, dim_size, dim_size * self.fwd_exp, self.coefficients,
+            self.normalize, True, activation, bias, device, dtype
         )
         transformer = mn.TransformerBase(
             max_seq_len, dim_size, layers, heads, kv_heads,
             differential=self.differential, causal_mask=True, 
             bias=self.attn_bias, ff=feed_fwd, 
-            auto_single=True, fwd_exp=self.fwd_exp,
-            residual=True, normalize=True, constant=self.constant,
+            auto_single=True, fwd_exp=self.fwd_exp, proj_coeffs=self.coefficients,
+            residual=True, constant=self.constant, normalize=self.normalize,
             device=device, dtype=dtype
         )
         self.lat_proj = mn.Sequential(
-            mn.Linear(inputs, dim_size, True, device, dtype),
+            # mn.Linear(inputs, dim_size, True, device, dtype),
+            mn.Polynomial(inputs, dim_size, self.coefficients, True, device, dtype),
+            # activation, 
             transformer,
         )
         self.pol_proj = mn.Sequential(*[
-            # mn.LayerNorm(dim_size, bias=True, device=device, dtype=dtype),
-            mn.RMSNorm(dim_size, device=device, dtype=dtype),
-            mn.Linear(dim_size, dim_size, bias, device, dtype),
-            nn.Tanh(),
-            mn.Linear(dim_size, 2*outputs, True, device, dtype),
+            (
+                mn.LayerNorm(dim_size, bias=False, device=device, dtype=dtype) 
+                if self.normalize else 
+                mn.Identity()
+            ),
+            # mn.Linear(dim_size, dim_size, bias, device, dtype),
+            mn.Polynomial(dim_size, dim_size, self.coefficients, bias, device, dtype),
+            activation,
+            # mn.Linear(dim_size, 2 * outputs, True, device, dtype),
+            mn.Polynomial(dim_size, 2 * outputs, self.coefficients, True, device, dtype),
         ])
+        # self.val_proj = mn.Sequential(*[
+        #     mn.LayerNorm(dim_size, bias=bias, device=device, dtype=dtype),
+        #     # mn.RMSNorm(dim_size, device=device, dtype=dtype),
+        #     mn.Linear(dim_size, dim_size, bias, device, dtype),
+        #     nn.SiLU(),
+        #     mn.Linear(dim_size, dim_size, bias, device, dtype),
+        #     nn.SiLU(),
+        #     mn.Linear(dim_size, 1, bias, device, dtype),
+        # ])
        
     @property 
     def transformer(self) -> mn.TransformerBase:
-        return self.lat_proj.modules_list[1]
+        return self.lat_proj.modules_list[-1]
 
     def extra_repr(self) -> str:
         return f"probabilistic={self.probabilistic}, distro='{self.distribution}'"
@@ -112,25 +182,57 @@ class BaseModelSeq(mn.Model):
         return self.get_policy(state, keys=keys, **kwargs)
 
     def _get_mean_std(self, latent: Tensor, keys: Union[int, list[int]] = None):
-        mean_std        = self.pol_proj(latent, keys=keys)
-        mean, log_std   = torch.chunk(mean_std, 2, -1)
-        if self.normalize:
-            mean = torch.tanh(mean) * max(1, self.upper)
-            std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
-        else:
-            std = torch.exp(log_std)
+        self.transformer.layers[0].self_attention.forced_cache
+        mean_std      = self.pol_proj(latent, keys=keys)
+        mean, log_std = torch.chunk(mean_std, 2, -1)
+        # if self.normalize:
+        #     mean = torch.tanh(mean) * max(1, self.upper)
+        #     std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
+        # else:
+        #     std = torch.exp(log_std)
+        # mean, _std = torch.chunk(mean_std, 2, -1)
+        # std = torch.abs(_std)
+        std = torch.exp(log_std.clamp(self.clip_min, self.clip_max))
         return mean, std
 
     def _get_std(self, latent: Tensor, keys: Union[int, list[int]] = None, raw: bool = False):
-        mean_std   = self.pol_proj(latent, keys=keys)
-        _, log_std = torch.chunk(mean_std, 2, -1)
-        if self.normalize:
-            std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
-            if raw: std = torch.log10(std)
-        else:
-            if raw: std = log_std
-            else: std = torch.exp(log_std)
+        mean_std      = self.pol_proj(latent, keys=keys)
+        mean, log_std = torch.chunk(mean_std, 2, -1)
+        # _, _std = torch.chunk(mean_std, 2, -1)
+        # if self.normalize:
+        #     std = torch.pow(10, self.clip_min + self.clip_range * torch.sigmoid(log_std))
+        #     if raw: std = torch.log10(std)
+        # else:
+        #     if raw: std = log_std
+        #     else: std = torch.exp(log_std)
+        # std = torch.abs(_std)
+        std = torch.exp(log_std.clamp(self.clip_min, self.clip_max))
         return std
+
+    def get_action(self, state: Tensor, keys: int | list[int] = None, **options) -> tuple[Tensor, Tensor]:
+        assert state.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len, features) but got {state.shape}"
+        latent      = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False))
+        assert latent.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
+        latent      = latent.squeeze(-2) # Since single token mode should be enabled
+        mean, std   = self._get_mean_std(latent, keys=keys)
+        dist: torch.distributions.Distribution = self.dist(mean, std)
+        if self.probabilistic:
+            action = dist.sample()
+        else:
+            action = mean
+            if self.distribution == "discrete": action = action.argmax(-1)
+        log_prob = dist.log_prob(action)
+        return action, log_prob
+
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: int | list[int] = None) -> tuple[Tensor, Tensor | None]:
+        latent    = self.lat_proj(state, keys=keys, verbose=False)
+        latent    = latent.squeeze(-2)
+        mean, std = self._get_mean_std(latent, keys=keys)
+        dist: torch.distributions.Distribution = self.dist(mean, std)
+        # if self.distribution != "discrete": action = torch.atanh(action * (1 - self.epsilon))
+        log_prob = dist.log_prob(action)
+        entropy = dist.entropy()
+        return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
         assert state.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len, features) but got {state.shape}"
@@ -144,8 +246,16 @@ class BaseModelSeq(mn.Model):
         if self.distribution == 'discrete':
             action = torch.argmax(action, dim=-1)
         else:
-            action = torch.tanh(action * torch.pi)
+            action = torch.tanh(action)
         return action
+
+    # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
+    #     assert state.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len, features) but got {state.shape}"
+    #     latent = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False))
+    #     assert latent.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
+    #     latent = latent.squeeze(-2) # Since single token mode should be enabled
+    #     value  = self.val_proj(latent, keys=keys)
+    #     return value
     
     def get_mean(self, state: Tensor, keys: Union[int, list[int], None] = None):
         assert state.ndim == 4 # state(1, batch_size, seq_len, features)
@@ -187,66 +297,88 @@ GAP_SIZE            = (210, 210)
 PIPE_Y_VELOCITY     = 3
 FULL_STATES         = True
 DELAY               = 0
-DISCRETE            = True
+DISCRETE            = False
+LIVES               = 15 
+# NOTE: For more difficult.complex models like configurations higher than (dim_size=64,
+#       max_seq_len=4, layers=2, differential=1, coefficients=1, norm=False) then you'd
+#       need lives >= 5 so that the genomes have enough time to collect rollout that
+#       would allow you get genomes that don't just learn to constantly end themselves
 
 # Model properties
-GENOMES             = 100
-MAX_SEQ_LEN         = 8
+GENOMES             = 50
+MAX_SEQ_LEN         = 16
 SEQ_LEN             = MAX_SEQ_LEN // 1
 SEQ_LEN_TRAIN       = min(max(1, 1), SEQ_LEN)
 SEQ_LEN_EVAL        = min(max(SEQ_LEN, 1), SEQ_LEN)
-INPUTS              = (5 + (2 if PIPE_Y_VELOCITY else 0) if FULL_STATES else 3)
-OUTPUTS             = 1 if not DISCRETE else 2
+INPUTS              = None   # set in run() from ENV.observation_space
+OUTPUTS             = None   # set in run() from ENV.action_space
 EMBED_SIZE          = 32
-LAYERS              = 1
+COEFFICIENTS        = 2
+LAYERS              = 2
 HEADS               = 1
 KV_HEADS            = None
 FWD_EXP             = 1
-DIFFERENTIAL        = False
+DIFFERENTIAL        = True
 BIAS                = True
 PROBABILISTIC       = False
-PROJ_NORM           = False
+PROJ_NORM           = True
 CONSTANT            = 1000
-TEST_ACTIVATION     = nn.SiLU()
-SWIGLU              = True
-CLIP_MIN            = -4
+TEST_ACTIVATION     = nn.Tanh()
+SWIGLU              = False
+CLIP_MIN            = -13
 CLIP_MAX            = +0
 DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
-MODEL_NUM           = 3
+MODEL_NUM           = 2
+CACHE               = True
 
 # Trainer properties
-MEMORY_SIZE         = 10
-GAMMA               = fix(np.exp(np.log(0.01) / 128), 0.0)
+MEMORY_SIZE         = 5
+GAMMA               = fix(np.exp(np.log(0.01) / 256), 0.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.01) / 128), 0.0)
-ALPHA               = fix(np.exp(np.log(3.0) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(1.25) / (MEMORY_SIZE - 1)), 1.0)
 ALPHA_ORDER         = 0
-REW_NORM            = 3
-CPY_REG             = 0.75
-POL_REG             = 0.75
-STD_REG             = 0.00
+REW_NORM            = 4
+REW_REG             = 1.00
+LOSS_REG            = 0.00
+VAL_REG             = 0.00
+POL_REG             = 0.75 if (PROBABILISTIC or CACHE) else 0.0
+ENT_REG             = 0.00
 DIV_REG             = 0.00
+CPY_REG             = 0.00
+
+# Post-training test
+TEST_RUNS    = 5
+TEST_GOAL    = 100
+TEST_ELITES  = 10      # best genomes per genus kept for the test
 
 # Training 
 GOAL        = 20
 STEPS       = GOAL * 100
-EPOCHS      = 500
-FILTER_DEAD = False # TODO: Might remove since it might bring about truncated tensors with dequed kv cache
+EPOCHS      = 200
+FILTER_DEAD = False # TODO: Might remove since it might bring about truncated tensors with dequed kv cache, or make optional
 
-MODELS = [
-    BaseModelSeq(
-        MAX_SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS,
-        activation, PROBABILISTIC, BIAS, DEVICE, DTYPE,
-        clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
-        constant=CONSTANT, differential=DIFFERENTIAL, attn_bias=BIAS, 
-        use_swiglu=SWIGLU, fwd_exp=FWD_EXP, normalize=PROJ_NORM,
-    )
-    for activation in [TEST_ACTIVATION for _ in range(MODEL_NUM)]
-]
+MODELS: list = []     # built in run() once the Env (and so INPUTS / OUTPUTS) exists
+
+
+def build_models() -> list:
+    """Models are sized from the Env's observation / action spaces, so they are created after the Env."""
+    return [
+        BaseModelSeq(
+            MAX_SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS,
+            activation, PROBABILISTIC, BIAS, DEVICE, DTYPE,
+            clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
+            constant=CONSTANT, differential=DIFFERENTIAL, attn_bias=BIAS, 
+            use_swiglu=SWIGLU, fwd_exp=FWD_EXP, normalize=PROJ_NORM,
+            coefficients=COEFFICIENTS,
+        )
+        for activation in [TEST_ACTIVATION for _ in range(MODEL_NUM)]
+    ]
 
 GAME_TYPE = 0 if not FULL_STATES else (1 if PIPE_Y_VELOCITY == 0 else 2)
 BASE_NAME: str = (
     f"GT{GAME_TYPE}_DC{int(DISCRETE)}_T{MODEL_NUM}_"
-    f"MSL{MAX_SEQ_LEN}_E{EMBED_SIZE}_L{LAYERS}_H{HEADS}_K{KV_HEADS}_"
+    f"MSL{MAX_SEQ_LEN}_E{EMBED_SIZE}_L{LAYERS}_"
+    f"H{HEADS}_K{KV_HEADS}_C{COEFFICIENTS}_"
     f"A-{TEST_ACTIVATION.__class__.__name__}_B{int(BIAS)}_"
     f"F{FWD_EXP}_D{int(DIFFERENTIAL)}_Con{CONSTANT}_"
     f"S{int(SWIGLU)}{f'_R-{CLIP_MIN}~{CLIP_MAX}' if PROBABILISTIC else ''}"
@@ -257,19 +389,21 @@ FILE_NO: int | None = None
 INIT_GEN: int | None = None
 
 print(f"\ncreating config")
-CONFIG = neat.Config('sequential', '.config')
+CONFIG = neat.Config('flappy-bird-sequential', '.config')
 
+MULTIPLIER = 1.0 # 0.75
 CONFIG.genome.init_type                     = 'normal'
 CONFIG.genome.weight_init_mean              = 0.0
-CONFIG.genome.weight_init_std               = 1.0
+CONFIG.genome.weight_init_std               = 1.0 * MULTIPLIER
 CONFIG.genome.weight_min_value              = -np.inf
 CONFIG.genome.weight_max_value              = +np.inf
-CONFIG.genome.weight_mutate_power           = 0.6
-CONFIG.genome.weight_mutate_rate            = 0.50
-CONFIG.genome.weight_replace_rate           = 0.0
-CONFIG.genome.weight_add_prob               = 0.0
-CONFIG.genome.weight_del_prob               = 0.0
+CONFIG.genome.weight_mutate_power           = 0.25 * MULTIPLIER
+CONFIG.genome.weight_mutate_rate            = 0.60
+CONFIG.genome.weight_replace_rate           = 0.00
+CONFIG.genome.weight_add_prob               = 0.00
+CONFIG.genome.weight_del_prob               = 0.00
 CONFIG.genome.single_structural_mutation    = True
+CONFIG.genome.param_epsilon                 = 0e-9
 CONFIG.reproduction.min_species_size        = GENOMES
 CONFIG.reproduction.purge                   = 1
 CONFIG.reproduction.elitism                 = 0.33
@@ -279,18 +413,19 @@ CONFIG.reproduction.cross_threshold         = 0.00
 CONFIG.species.compatibility_threshold      = np.inf
 CONFIG.stagnation.max_stagnation            = 1
 CONFIG.stagnation.species_elitism           = 2
-CONFIG.reproduction.darwin_multiplier       = 0.33
+CONFIG.reproduction.darwin_multiplier       = 0.05 # 0.33
 CONFIG.reproduction.cross_multiplier        = 0.75
 CONFIG.reproduction.preserve_elite          = False
 CONFIG.save()
-CONFIG.load(2)
+CONFIG.load(verbose=2)
 
 ENV: Game | None = None
+POPULATION: neat.Population | None = None
 SELECTOR = torch.arange(SEQ_LEN, device=DEVICE, dtype=DTYPE).long()
 
 
 def evaluate(population: neat.Population, **options):
-    trainer: neat.rl.NEAT = options['trainer']
+    trainer: neat.rl.PPO = options['trainer']
     split_mappings = population.get_mapping()
     if len(population.genera) == 1: split_mappings = (split_mappings,)
     split_sizes = [len(m) for m in split_mappings]
@@ -309,7 +444,7 @@ def evaluate(population: neat.Population, **options):
     game_step = 0
     for model in MODELS: 
         model.eval()
-        model.enable_cache()
+        if CACHE: model.enable_cache()
     while not terminate:
         gts = clock.perf_counter()
         step = 0
@@ -318,10 +453,11 @@ def evaluate(population: neat.Population, **options):
             for m in split_mappings
         ])
 
-        states = ENV.reset()[0] # TODO: Implement keys paramter
-        for model in MODELS: model.reset_cache()
+        states = _T(ENV.reset(mapping=cons_mapping)[0])
+        for model in MODELS: 
+            if CACHE: model.reset_cache()
         step = 0
-        DEBUG_STEP = 10
+        DEBUG_STEP = 0 # 16
         done = False
         while not done:
             with torch.no_grad():
@@ -332,39 +468,43 @@ def evaluate(population: neat.Population, **options):
                 )
                 if DEBUG:
                     print(f"\nstates =>\n{states}\n\tshape = {states.shape}")
-                    
+
                 # Get actions with forced cache enabled during training
                 # States could be instances or sequences of shape (genomes, *seq_len, inputs)
-                split_states = torch.split(states.unsqueeze(1).select(-2, -1).unsqueeze(-2), split_sizes, dim=0)
+                if CACHE: split_states = torch.split(states.unsqueeze(1).select(-2, -1).unsqueeze(-2), split_sizes, dim=0)
+                else:     split_states = torch.split(states.unsqueeze(1), split_sizes, dim=0)
                 # split_states = torch.split(states.unsqueeze(1).index_select(-2, SELECTOR[-3:]), split_sizes, dim=0)
-                split_actions = [
-                    m.get_policy(obs, keys=None, verbose=2 if DEBUG and i == 0 else False)
+                split_actions, split_log_probs = zip(*[
+                    m.get_action(obs, keys=None, verbose=2 if DEBUG and i == 0 else False)
                     for i, (m, obs) in enumerate(zip(MODELS, split_states))
-                ]
+                ])
                 # Actions shape (genomes, inputs)
-                actions = torch.cat(split_actions, dim=0).squeeze(1)
+                actions = torch.cat(split_actions, dim=0).squeeze(1) # Group and remove batch
+                log_probs = torch.cat(split_log_probs, dim=0).squeeze(1)
                 if DEBUG:
                     print(f"\nsplit_states =>\n{split_states[0]}\n\tshape = {split_states[0].shape}")
                     print(f"\nsplit_actions =>\n{split_actions[0]}\n\tshape = {split_actions[0].shape}")
                     print(f"\nactions =>\n{actions}\n\tshape = {actions.shape}")
 
                 # Get rewards
-                next_states, rewards, _, done, _ = ENV.step(actions)
+                _actions = torch.tanh(actions) if not DISCRETE else actions
+                next_states, rewards, _, done, _ = ENV.step(_actions)
+                next_states, rewards = _T(next_states), _T(rewards)
                 if DEBUG:
                     print(f"\nrewards =>\n{rewards}\n\tshape = {rewards.shape}")
 
                 # Updated buffers
-                terminate = trainer.update(states, actions, rewards, done, done)
+                terminate = trainer.update(states, actions, rewards, log_probs, done, done)
 
                 # CMDLine rendering
-                alive = round(ENV.birds.active_num)
+                alive = ENV.players.active_total
                 max_score = round(rewards.max().item(), 2)
                 print(
                     f"\r{CM('Executing', Fore.GREEN)}: "
                     f"time_elapsed = {round(clock.perf_counter()-gts)}s, "
                     f"alive = {alive}, max_rew = {max_score}, "
                     f"sd={trainer.steps_done}, "
-                    f"bl={trainer.primary.max_size()}", end=''
+                    f"bl={trainer.primary.max_size()}     ", end=''
                 )
 
                 states = next_states
@@ -385,9 +525,10 @@ def evaluate(population: neat.Population, **options):
         print(f"Episodes Secondary = {trainer.secondary.episodes()}")
         print("----------------------------------------------------------------------------")
 
-        l_lim, u_lim = 10, ENV.floor.y * 1.05
-        for idx, (score, genome) in enumerate(zip(ENV.birds.get_reward(), population.genomes.values())):
-            genome.fitness = score.item()
+        l_lim, u_lim = 10, ENV.world.floor_y * 1.05 # Delete genomes that go beyond the game's y-limits
+        for key, idx in cons_mapping.items():       # bird index -> genome by the mapping, not by dict order
+            genome = population.genomes[key]
+            genome.fitness = float(ENV.players.fitness[idx])
             y_position = ENV.birds.y[idx]
             died_beyond_limits = y_position <= l_lim or y_position >= u_lim
             if died_beyond_limits:
@@ -395,9 +536,9 @@ def evaluate(population: neat.Population, **options):
 
         game_step += 1
     print(f"\n")
-    for model in MODELS:
-        model.train()
-        model.disable_cache()
+    for model in MODELS: 
+        model.train(); 
+        if CACHE: model.disable_cache()
     
     _, file_no = population.save(FILE_NAME, FILE_DIR, FILE_NO, replace=population.generation != INIT_GEN)
     if population.generation == INIT_GEN:
@@ -417,20 +558,96 @@ def genome_debug(algorithm: neat.rl.NEAT):
         return f" {' ' * amount}{text} "
 
     print(f"Population Summary:")
-    ks = max(1, np.max(np.log10([g.key for g in population.genomes.values()])).item()) + 1
+    ks = max(len(str(g.key)) for g in population.genomes.values())
     gs = 3
-    fs = max(1, np.max(np.log10([g.actual_fitness for g in population.genomes.values()])).item()) + 4
+    fs = max(len(str(round(g.actual_fitness, 4))) for g in population.genomes.values())
     for i, genus in enumerate(population.genera):
-        genomes = sorted([g for g in population.genomes.values() if g.genus == genus], key=lambda g: g.fitness, reverse=True)[:COUNT]
+        genomes = sorted([g for g in population.genomes.values() if g.genus == genus], key=lambda g: g.actual_fitness, reverse=True)[:COUNT]
         for genome in genomes:
             print(f"\t{fill(genome.key, ks)}|{fill(genome.genus, gs)}|{fill(round(genome.actual_fitness, 4), fs)}")
         if i < len(population.genera) - 1:
             print(f"\t...")
 
 
+def test_best_network():
+    """Watch the surviving elites play on a harder, longer level (rendered)."""
+    elites = []
+    for gn_id, specie in enumerate(POPULATION.species_set.species.values()):
+        genomes = sorted(
+            [g for g in specie.members.values() if g.fitness is not None and not np.isnan(g.fitness)],
+            key=lambda g: g.fitness, reverse=True,
+        )
+        elites.extend(genomes[:TEST_ELITES])
+        print(f"\nElites [{gn_id}]: {[g.key for g in genomes[:TEST_ELITES]]}")
+    if not elites:
+        print("No evaluated genomes to test")
+        return
+    POPULATION.crop([e.key for e in elites], DEVICE)
+
+    env = Game(
+        render_mode='human', goal=TEST_GOAL, seq_len=SEQ_LEN, height=700, width=1000, # velocity=7,
+        state_type='full' if FULL_STATES else 'basic', pipe_speed_y=PIPE_Y_VELOCITY * 1., # .50,
+        spawn_width=SPAWN_WIDTH, gap_offset=GAP_OFFSET, # gap_size=tuple(int(s * 0.95) for s in GAP_SIZE),
+        fps=45,
+    )
+    split_mappings = POPULATION.get_mapping()
+    if len(POPULATION.genera) == 1: split_mappings = (split_mappings,)
+    split_sizes = [len(m) for m in split_mappings]
+    cons_mapping = POPULATION.get_mapping(consolidated=True)
+
+    for model in MODELS: model.eval()
+    try:
+        for i in range(TEST_RUNS):
+            print(f"Running test {i + 1}/{TEST_RUNS}")
+            done = False
+            states = _T(env.reset(mapping=cons_mapping)[0])
+            while not done:
+                with torch.no_grad():
+                    split_states = torch.split(states, split_sizes, dim=0)
+                    split_actions = [m.get_policy(obs.unsqueeze(1)) for m, obs in zip(MODELS, split_states)]
+                    actions = torch.cat(split_actions, dim=0).squeeze(1)
+                next_states, _, _, done, _ = env.step(torch.tanh(actions) if not DISCRETE else actions)
+                states = _T(next_states)
+                env.render()
+            print(f"Top score: {env.players.scores.max().item()}")
+    except KeyboardInterrupt:
+        print("\nTerminated")
+    finally:
+        for model in MODELS: model.train()
+
+
+def str_to_bool(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value.lower() in ("true", "1", "yes", "on"):
+        return True
+    if value.lower() in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(f"Cannot convert '{value}' to bool")
+
+
+def load_population(load: str | None) -> None:
+    """`load`: 'true' for the latest checkpoint, an integer for a file number, None/'false' to skip."""
+    global FILE_NO
+    if load is None or load.lower() in ("false", "none", "null", ""):
+        return
+    if load.lower() == "true":
+        FILE_NO = None
+        print("Will load the latest population checkpoint")
+    else:
+        try:
+            FILE_NO = int(load)
+        except ValueError:
+            sys.exit(f"--load must be 'true', 'false' or a file number, got '{load}'")
+        print(f"Will load population checkpoint from file number '{FILE_NO}'")
+    POPULATION.load(FILE_NAME, FILE_DIR, FILE_NO)
+
+
 def run():
-    parser = argparse.ArgumentParser(description='Run NEAT algorithm on Flappy Bird game (Sequential)')
-    parser.add_argument('--rm', type=str, default=None, 
+    global ENV, POPULATION, FILE_NO, INIT_GEN, MODELS, INPUTS, OUTPUTS
+
+    parser = argparse.ArgumentParser(description='Run NEAT algorithm on Flappy Bird game')
+    parser.add_argument('--rm', type=str, default=None,
                         help='Render mode for the game (e.g., "human", None)')
     parser.add_argument('--load', type=str, default=None,
                         help='Load a previously trained model (True for latest, or specify file number)')
@@ -438,148 +655,79 @@ def run():
                         help='Train the model (True/False or 1/0, default: True)')
     args = parser.parse_args()
 
-    global ENV, FILE_NO
+    ENV = Game(
+        render_mode=args.rm, goal=GOAL, seq_len=SEQ_LEN, height=700, width=700,
+        state_type='full' if FULL_STATES else 'basic', pipe_speed_y=PIPE_Y_VELOCITY,
+        spawn_width=SPAWN_WIDTH, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
+        fps=None if args.rm != 'human' else 60, lives=LIVES,
+    )
+
+    # Models are sized from the Env's spaces
+    INPUTS = int(ENV.observation_space.shape[-1])
+    OUTPUTS = 2 if DISCRETE else int(ENV.action_space.shape[-1])
+    MODELS = build_models()
     print(MODELS[0])
 
-    # Create the population, which is the top-level object for a NEAT run.
-    print(f"\ncreating population")
+    print("\ncreating population")
     POPULATION = neat.Population(GENOMES, MODELS[0], CONFIG, init_reporter=True)
     for model in MODELS[1:]:
         extra_population = neat.Population(GENOMES, model, CONFIG, init_reporter=True)
         POPULATION.absorb_population(extra_population)
-    if args.load is not None:
-        if args.load.lower() == 'true':
-            FILE_NO = None
-            print(f"Will load the latest population checkpoint")
-            POPULATION.load(FILE_NAME, FILE_DIR, FILE_NO)
-        else:
-            try:
-                FILE_NO = int(args.load)
-                print(f"Will load population checkpoint from file number '{FILE_NO}'")
-                POPULATION.load_dict(None, FILE_NAME, FILE_DIR, FILE_NO)
-            except ValueError:
-                if args.load.lower() not in ['false', 'none', 'null', '']:
-                    print(f"Error: --load argument must be a boolean, valid positive integer, null or empty; Got '{args.load}'")
-                    exit(1)
-
-    ENV = Game(
-        POPULATION.size, goal=GOAL, seq_len=SEQ_LEN,
-        height=800, width=800, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY,
-        spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
-        delay=DELAY, type2count=GENOMES, type2offset=0, device=DEVICE, dtype=DTYPE,
-        render_mode=args.rm,
-    )
-
-    def str_to_bool(value: str) -> bool:
-        if isinstance(value, bool):
-            return value
-        if value.lower() in ('true', '1', 'yes', 'on'):
-            return True
-        elif value.lower() in ('false', '0', 'no', 'off'):
-            return False
-        else:
-            raise ValueError(f"Cannot convert '{value}' to boolean")
+    print(POPULATION)
+    load_population(args.load)
+    INIT_GEN = None             # set by the first evaluate() call
+    FILE_NO = None
 
     if str_to_bool(args.train):
-        # trainer = neat.rl.NEAT(
-        trainer = neat.rl.Ghost(
+        print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
+        trainer = neat.rl.PPO(
             POPULATION,
-            ghosts={g: 0 for g in POPULATION.genera[1:]},
             schedulers=[
-                scheduler.CosineAnnealing(CONFIG, 20, 1.50, 'weight_mutate_power', False, True),
-                scheduler.BinaryAnnealing(CONFIG, 20, 0.10, 'cross_threshold'),
+                scheduler.CosineAnnealing(CONFIG, 20, 0.10, ['weight_mutate_power', 'weight_init_std'], True, True),
+                # scheduler.BinaryAnnealing(CONFIG, 20, 0.10, 'cross_threshold'),
+                scheduler.BinaryAnnealing(CONFIG, 5, 0.99, 'pol_reg'),
+                # scheduler.CosineAnnealing(CONFIG, 15, 0.67, 'loss_reg', True, True, phase=0),
+                # scheduler.CosineAnnealing(CONFIG, 15, 0.50, 'pol_reg', True, True, phase=0),
+                # scheduler.CosineAnnealing(CONFIG, 15, 0.75, 'ent_reg', True, True, phase=0),
             ],
             device=DEVICE, dtype=DTYPE,
             log_sub_dir='flappy_bird/',
-            log_name=f"{unix_to_datetime_file(clock.time())}-sequential_"
-                     f"seq{SEQ_LEN}_e{EMBED_SIZE}-l{LAYERS}_h{HEADS}-kv{KV_HEADS}-b{int(BIAS)}"
-                     f"g{round(GAMMA, 4)}-k{round(KAPPA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-"
-                     f"rn{REW_NORM}-p{round(POL_REG, 4)}-s{round(STD_REG, 4)}-d{round(DIV_REG, 4)}-c{round(CPY_REG, 4)}-"
+            log_name=f"sequential-{unix_to_datetime_file(clock.time())}-"
+                     f"seq{SEQ_LEN}-e{EMBED_SIZE}-l{LAYERS}-h{HEADS}-kv{KV_HEADS}-d{int(DIFFERENTIAL)}-"
+                     f"c{COEFFICIENTS}-fx{FWD_EXP}-b{int(BIAS)}-prob{int(PROBABILISTIC)}-"
+                     f"g{round(GAMMA, 4)}-k{round(KAPPA, 4)}-a{round(ALPHA, 4)}-ao{ALPHA_ORDER}-rn{REW_NORM}-"
+                     f"p{round(LOSS_REG, 4)}-v{round(VAL_REG, 4)}-m{round(POL_REG, 4)}-"
+                     f"s{round(ENT_REG, 4)}-d{round(DIV_REG, 4)}-c{round(CPY_REG, 4)}-"
                      f"mem{MEMORY_SIZE}-delay{DELAY}-type{int(DISCRETE)}-gt{GAME_TYPE}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
-            beta=fix(np.exp(np.log(0.50) / (MEMORY_SIZE - 1)), 1.0), beta_order=4, checks=3,
-            rew_reg=1.0, pol_reg=POL_REG, std_reg=STD_REG, div_reg=DIV_REG, cpy_reg=CPY_REG,
-            validate=False, segr_size=None,
-            max_episodes=MEMORY_SIZE,
+            rew_reg=REW_REG, loss_reg=LOSS_REG, val_reg=VAL_REG, pol_reg=POL_REG, ent_reg=ENT_REG,
+            div_reg=DIV_REG, cpy_reg=CPY_REG,
+            validate=True, segr_size=None, use_entropy=True, use_critic=False,
+            max_episodes=MEMORY_SIZE, max_steps=None,
         )
-        print(f"Ghost mapping = {trainer.ghosts}")
+        print("Regularizations:")
+        for name, value in vars(trainer).items():
+            if "_reg" in name and isinstance(value, (int, float)):
+                print(f"\t{name} => {value:.4f}")
         trainer.set_report_hook(genome_debug)
+        if DIFFERENTIAL and differential_attention_logger is not None:
+            # Compact stats (leak, beta, fitness correlation); charts are grouped in Tensorboard > Custom Scalars
+            trainer.add_log_source('diff_attn', differential_attention_logger(population=True, detail=False))
 
         print(f"starting evaluation: population={len(POPULATION.genomes)}")
         try:
             trainer.learn(
-                evaluate, STEPS, EPOCHS, 1380, 0.1,
-                'binary' if not DISCRETE else 'discrete', True
+                evaluate, STEPS, EPOCHS,
+                accuracy_error=0.1,
+                accuracy_type='binary' if not DISCRETE else 'discrete',
+                verbose=3,
+                batching='genome', record_batch_size=64, batch_size=2048, # NOTE: Reduce/Change if GPU/CPU memory cannot hold
             )
         except KeyboardInterrupt:
             pass
 
-    elites_limit = 10
-    elites_available = any([
-        g.fitness is not None and not np.isnan(g.fitness) 
-        for g in POPULATION.genomes.values()
-    ])
-    if elites_available:
-        elites = []
-        for gn_id, specie in enumerate(POPULATION.species_set.species.values()):
-            genomes = sorted(
-                [
-                    g for g in specie.members.values()
-                    if g.fitness is not None and not np.isnan(g.fitness)
-                ], 
-                key=lambda g: g.fitness, reverse=True
-            )
-            elites.extend(genomes[:elites_limit])
-            print(f"\nElites [{gn_id}]: {[g.key for g in genomes[:10]]}")
-        POPULATION.crop([e.key for e in elites], DEVICE)
-
-    last_genus = POPULATION.genera[-1]
-    last_genus_size = len([g for g in POPULATION.genomes.values() if g.genus == last_genus])
-    print(f"Last genus size: {last_genus_size}")
-    
-    env = Game(
-        POPULATION.size, goal=100, seq_len=SEQ_LEN,
-        height=800, width=1200, full_state=FULL_STATES, pipe_y_velocity=PIPE_Y_VELOCITY, # * 1.50,
-        spawn_width=SPAWN_WIDTH, tick=None, gap_offset=GAP_OFFSET, gap_size=GAP_SIZE,
-        delay=DELAY, render_mode='human',
-        type2count=last_genus_size, type2offset=0, device=DEVICE, dtype=DTYPE
-    )
-    
-    split_mappings = POPULATION.get_mapping()
-    if len(POPULATION.genera) == 1: split_mappings = (split_mappings,)
-    split_sizes = [len(m) for m in split_mappings]
-    cons_mapping = POPULATION.get_mapping(consolidated=True)
-    
-    # Disable cache for post-training evaluation to use full sequences
-    for model in MODELS: model.eval(); model.disable_cache()
-    
-    for i in range(5):
-        done = False
-        step = 0
-        states = env.reset()[0]
-        for model in MODELS: model.reset_cache()
-        while not done:            
-            # states[..., 6:] = 0.0
-            
-            # Get actions
-            with torch.no_grad():
-                # split_states = torch.split(states.unsqueeze(1).index_select(-2, SELECTOR[-SEQ_LEN_EVAL:]), split_sizes, dim=0)
-                split_states = torch.split(states.unsqueeze(1), split_sizes, dim=0)
-                split_actions = [
-                    m.get_policy(obs)
-                    for m, obs in zip(MODELS, split_states)
-                ]
-            actions = torch.cat(split_actions, dim=0).squeeze(1)
-
-            # Get rewards
-            next_states, rewards, _, done, _ = env.step(actions)
-            states = next_states
-            
-            env.render()
-            step += 1
-            
-    for model in MODELS: model.train()
+    test_best_network()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     run()

@@ -45,18 +45,6 @@ DASHBOARD_DIR = ROOT / "ModifiedNEAT" / "dashboard"
 DIST_DIR = DASHBOARD_DIR / "dist"
 
 
-def get_dependency_links() -> list[str]:
-    links = [
-        "https://pypi.org/simple",
-        "https://download.pytorch.org/whl/cpu",
-        "https://download.pytorch.org/whl/cu118",
-        "https://download.pytorch.org/whl/cu121",
-        "https://download.pytorch.org/whl/cu132",
-        "https://pypi.ngc.nvidia.com",
-    ]
-    return list(dict.fromkeys(links))
-
-
 def read_requirements(path: Path) -> list[str]:
     requirements: list[str] = []
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -69,6 +57,7 @@ def read_requirements(path: Path) -> list[str]:
 
 def should_skip_dashboard_build() -> bool:
     if "--skip-dashboard-build" in sys.argv:
+        sys.argv.remove("--skip-dashboard-build")  # setuptools rejects unknown options
         return True
     return os.environ.get("MODIFIEDNEAT_SKIP_DASHBOARD_BUILD", "").lower() in {
         "1",
@@ -80,42 +69,16 @@ def should_skip_dashboard_build() -> bool:
 
 def run_command(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     print(f"-> {' '.join(cmd)}")
+    exe = shutil.which(cmd[0])  # resolves npm.cmd etc. on Windows
+    if exe:
+        cmd = [exe, *cmd[1:]]
     return subprocess.run(cmd, cwd=str(cwd or ROOT), text=True, check=False)
 
 
-def run_install_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    if getattr(os, "geteuid", lambda: 0)() == 0:
-        return run_command(cmd)
-    if shutil.which("sudo"):
-        return run_command(["sudo", *cmd])
-    return run_command(cmd)
-
-
 def ensure_node_toolchain() -> str | None:
+    """Detect an existing JS toolchain. Never installs system packages during a build."""
     if shutil.which("bun"):
         return "bun"
-    if shutil.which("node") and shutil.which("npm"):
-        return "npm"
-
-    if sys.platform == "darwin" and shutil.which("brew"):
-        result = run_install_command(["brew", "install", "node"])
-        if result.returncode == 0 and shutil.which("node") and shutil.which("npm"):
-            return "npm"
-    elif os.name == "nt" and shutil.which("winget"):
-        result = run_install_command(["winget", "install", "OpenJS.NodeJS.LTS", "--source", "winget"])
-        if result.returncode == 0 and shutil.which("node") and shutil.which("npm"):
-            return "npm"
-    else:
-        if shutil.which("apt-get"):
-            run_install_command(["apt-get", "update"])
-            run_install_command(["apt-get", "install", "-y", "nodejs", "npm"])
-        elif shutil.which("dnf"):
-            run_install_command(["dnf", "install", "-y", "nodejs", "npm"])
-        elif shutil.which("pacman"):
-            run_install_command(["pacman", "-S", "--noconfirm", "nodejs", "npm"])
-        elif shutil.which("brew"):
-            run_install_command(["brew", "install", "node"])
-
     if shutil.which("node") and shutil.which("npm"):
         return "npm"
     return None
@@ -129,7 +92,8 @@ def build_dashboard() -> None:
     if not DASHBOARD_DIR.exists():
         return
 
-    if (DIST_DIR / "index.html").exists():
+    force = os.environ.get("MODIFIEDNEAT_FORCE_DASHBOARD_BUILD", "").lower() in {"1", "true", "yes", "on"}
+    if (DIST_DIR / "index.html").exists() and not force:
         print("Dashboard build artifacts already exist; skipping rebuild.")
         return
 
@@ -137,7 +101,7 @@ def build_dashboard() -> None:
         print("Dashboard package manifest not found; skipping build.")
         return
 
-    if not (DASHBOARD_DIR / "index.html").exists() and not (DASHBOARD_DIR / "src").exists():
+    if not (DASHBOARD_DIR / "src").exists():
         print("Dashboard source files not found; skipping build.")
         return
 
@@ -148,13 +112,13 @@ def build_dashboard() -> None:
 
     print(f"Building dashboard assets with {manager}...")
     if manager == "bun":
-        install_result = run_command(["bun", "install"], DASHBOARD_DIR)
+        install_result = run_command(["bun", "install", "--frozen-lockfile"] if (DASHBOARD_DIR / "bun.lock").exists() else ["bun", "install"], DASHBOARD_DIR)
         if install_result.returncode != 0:
             print("Dashboard dependency installation failed; skipping build.")
             return
         build_result = run_command(["bun", "run", "build"], DASHBOARD_DIR)
     else:
-        install_result = run_command(["npm", "install"], DASHBOARD_DIR)
+        install_result = run_command(["npm", "ci" if (DASHBOARD_DIR / "package-lock.json").exists() else "install"], DASHBOARD_DIR)
         if install_result.returncode != 0:
             print("Dashboard dependency installation failed; skipping build.")
             return
@@ -180,35 +144,29 @@ class DevelopWithDashboard(_develop):
 
 setup(
     name="ModifiedNEAT",
-    version="0.8.5",
+    version="0.9.0",
     description="Modified version of python NEAT algorithm that uses PyTorch modules",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     author="Bradley Odimmasi",
     author_email="bodimmasi@gmail.com",
     license="MIT",
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: MIT License",
+    ],
     python_requires=">=3.11",
-    packages=find_packages(include=["ModifiedNEAT", "ModifiedNEAT.*"]),
+    packages=find_packages(include=["ModifiedNEAT", "ModifiedNEAT.*"], exclude=["*.testing", "*.testing.*"]),
     include_package_data=True,
-    package_data={
-        "ModifiedNEAT.dashboard": [
-            "dist/**",
-            "index.html",
-            "package.json",
-            "postcss.config.js",
-            "tailwind.config.js",
-            "vite.config.ts",
-            "tsconfig*.json",
-            "eslint.config.js",
-            "backend/**/*",
-            "src/**/*",
-        ]
-    },
-    install_requires=(
-        read_requirements(ROOT / "requirements.txt") +
-        read_requirements(ROOT / "ModifiedNEAT" / "dashboard" / "backend" / "requirements.txt")
+    package_data={"ModifiedNEAT.dashboard": ["dist/**/*"]},  # built assets only; no frontend sources/configs
+    exclude_package_data={"": ["*.pyc", "*.map"]},
+    install_requires=sorted(
+        {
+            *read_requirements(ROOT / "requirements.txt"),
+            *read_requirements(ROOT / "ModifiedNEAT" / "dashboard" / "backend" / "requirements.txt"),
+        },
+        key=str.lower,
     ),
-    dependency_links=get_dependency_links(),
     extras_require={
         "cpu": [],
         "gpu": [

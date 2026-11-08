@@ -1,4 +1,5 @@
 from ...base import NeatModule, addindent
+from .dense import Linear, Polynomial, Embedding
 from ....util.fancy_text import CM, Fore
 
 from torch import Tensor
@@ -22,7 +23,7 @@ class Sequential(NeatModule):
                 # print(f"Module {m_idx} '{module.__class__.__name__}': input = {tensor.shape}")
                 if isinstance(module, NeatModule):
                     sig = inspect.signature(module.forward)
-                    if "verbose" in sig.parameters and not isinstance(module, (nn.Linear,)):
+                    if "verbose" in sig.parameters and not isinstance(module, (Linear, Polynomial)):
                         tensor = module(tensor, keys=keys, verbose=verbose)
                     else:
                         tensor = module(tensor, keys=keys)

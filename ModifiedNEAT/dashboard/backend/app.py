@@ -31,12 +31,13 @@ def create_app(base_dir: Path = None) -> FastAPI:
         version="1.0.0"
     )
 
-    # Add CORS middleware
+    # CORS: this server unpickles files from disk, so it must never be callable from arbitrary
+    # websites. Only local origins (the bundled dashboard / the Vite dev server) are allowed.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
         allow_headers=["*"],
     )
 
@@ -48,11 +49,11 @@ def create_app(base_dir: Path = None) -> FastAPI:
     @app.get("/api/info")
     async def get_info():
         """Get application info including source directory."""
-        from starlette.requests import Request
-        # Note: Request will be injected by FastAPI
+        # Must match ModuleHandler.list_pkl_files(): recursive, .module.pkl / .neat.pkl only
+        has_files = any(base_dir.rglob("*.module.pkl")) or any(base_dir.rglob("*.neat.pkl"))
         return {
             "source_dir": str(base_dir),
-            "has_files": any(base_dir.glob("*.pkl")), # TODO: Fix: Returns false even when .pkl files are available
+            "has_files": has_files,
         }
     
     @app.get("/api/config")

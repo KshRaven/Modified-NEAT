@@ -5,10 +5,12 @@ import numpy as np
 from numba import njit, prange
 from numpy import ndarray as Array
 
-from .config import RewardConfig
+from .config import RewardConfig, normalize_hiatus
 from .constants import NP_FLOAT, NP_INT
 
 __all__ = ["Players"]
+
+_NO_LIMIT = 1 << 60
 
 
 @njit(parallel=True, fastmath=True, cache=True)
@@ -22,7 +24,7 @@ def _update(
     shape_pos: Array, shape_neg: Array,
     # Scalars
     lives_total: int, max_hiatus: int, shaping: bool,
-    food_reward: float, death_penalty: float, complete_reward: float, reward_offset: float,
+    food_reward: float, death_penalty: float, complete_reward: float, reward_offset: float, crash_scale: float,
 ):
     """Update lives, scores and fitness of every player. Returns the mask of players that lost a life."""
     players_total = lives.shape[0]
@@ -61,7 +63,7 @@ def _update(
             fitness[t] += shape_pos[t] * _lives
             fitness[t] -= shape_neg[t] * _deaths
         if ate[t]:      fitness[t] += food_reward * _lives * (1.0 + 0.1 * scores[t])
-        if elim:        fitness[t] -= death_penalty * _deaths
+        if elim:        fitness[t] -= death_penalty * _deaths * crash_scale
         if finished[t]: fitness[t] += complete_reward * _lives
 
         frames_done[t] += 1
@@ -72,13 +74,13 @@ def _update(
 class Players:
     """Lives, deaths, score and fitness of every player, stored as arrays."""
 
-    def __init__(self, lives: int = 3, max_hiatus: int = 100, reward: RewardConfig | None = None):
+    def __init__(self, lives: int = 3, max_hiatus: int | None = 100, reward: RewardConfig | None = None):
         self.reward: RewardConfig = reward if reward is not None else RewardConfig()
         self.reward_scale:  float = float(self.reward.reward_scale)     # multiplies the reward from get_reward()
         self.reward_offset: float = float(self.reward.reward_offset)    # added to every living player's reward
         self.total:       int = 1
         self.lives_total: int = int(lives)
-        self.max_hiatus:  int = int(max_hiatus)
+        self.max_hiatus = max_hiatus                                    # None = a snake never starves
         self._init_arrays()
 
     def _init_arrays(self) -> None:
@@ -106,6 +108,20 @@ class Players:
         self.disqualified[mask] = False
 
     @property
+    def max_hiatus(self) -> int | None:
+        """Frames without food before a life is lost; None = no limit. None / inf / 0 all mean no limit."""
+        return self._max_hiatus
+
+    @max_hiatus.setter
+    def max_hiatus(self, value) -> None:
+        self._max_hiatus = normalize_hiatus(value)
+
+    @property
+    def hiatus_limit(self) -> int:
+        """Frames without food that cost a life, as an integer for the kernels (huge when there is no limit)."""
+        return int(self.max_hiatus) if self.max_hiatus is not None else _NO_LIMIT
+
+    @property
     def active(self) -> Array:
         """Players that still have lives left."""
         return self.lives > 0
@@ -125,6 +141,7 @@ class Players:
         shape_pos: Array | None = None,     # float (N,) dense positive shaping
         shape_neg: Array | None = None,     # float (N,) dense negative shaping
         verbose: bool = False,
+        crash_scale: float = 1.0,           # multiplier on the death penalty (curriculum)
     ) -> Array:
         """Advance lives, scores and fitness by one frame. Returns the mask of players that lost a life."""
         if shape_pos is None:
@@ -138,14 +155,14 @@ class Players:
             self.fitness, self.prev_fitness,
             ate, hit_wall, hit_self, finished, hiatus, length,
             shape_pos, shape_neg,
-            self.lives_total, self.max_hiatus, bool(rw.shaping),
-            float(rw.food_reward), float(rw.death_penalty), float(rw.complete_reward), float(self.reward_offset),
+            self.lives_total, self.hiatus_limit, bool(rw.shaping),
+            float(rw.food_reward), float(rw.death_penalty), float(rw.complete_reward), float(self.reward_offset), float(crash_scale),
         )
 
         if verbose:
             for name, flags in (
                 ("ate food", ate), ("hit a wall", hit_wall), ("hit themselves", hit_self),
-                ("starved", hiatus >= self.max_hiatus),
+                ("starved", hiatus >= self.hiatus_limit),
             ):
                 for index in np.flatnonzero(flags):
                     print(f"Index {index} {name}")
