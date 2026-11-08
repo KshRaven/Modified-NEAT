@@ -1,18 +1,17 @@
 """GPU distance kernels (numba.cuda). The species grouping lives in ``ModifiedNEAT.base.speciation``."""
 
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.nn.base import NeatModule
-from ModifiedNEAT.base.util import parameter_dtype, reshape_to_ndim
-from ModifiedNEAT.util.fancy_text import CM, Fore
-from .functional import calc_grid
-
-from numba import cuda
-from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 from typing import Union
 
-import numpy as np
 import cupy as cp
+import numpy as np
+from numba import cuda
+from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 
+from ModifiedNEAT.base.util import parameter_dtype, reshape_to_ndim
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.nn.base import NeatModule
+
+from .functional import calc_grid
 
 _Index  = Union[int, tuple[int, ...]]
 _Number = Union[float, int]

@@ -1,22 +1,18 @@
 """Utility functions for module and tensor processing."""
 
-from ModifiedNEAT.nn.base import NeatModule, NeatParameter, Model, PseudoModule
-from ModifiedNEAT.nn.modules.base import *
-from ModifiedNEAT.nn.genome import Genome
-from ModifiedNEAT.population import Population
-from ModifiedNEAT.util.storage import *
-from torch import Tensor
-from torch.nn import Parameter, Module as TorchModule
-from enum import Enum
-from numpy import ndarray as CPUArray
-from typing import Optional, Union, Tuple, Any
-
-import torch
-import torch.nn as nn
-import numpy as np
 import logging
+from enum import Enum
+from typing import Any, Optional, Tuple, Union
 
-from .models import ModuleInfo, ModuleNode, ModuleEdge
+import numpy as np
+import torch
+from numpy import ndarray as CPUArray
+from torch import Tensor
+from torch.nn import Module as TorchModule
+
+from ModifiedNEAT.nn.base import NeatModule, PseudoModule
+
+from .models import ModuleEdge, ModuleInfo, ModuleNode
 
 logger = logging.getLogger(__name__.split(".")[-1]+".py")
 

@@ -5,13 +5,13 @@ Nothing in here imports cupy / numba.cuda, so it is safe on machines without a G
 module (`xp`, i.e. numpy or cupy) from the active backend.
 """
 
-from ModifiedNEAT.config import Config
-
-from torch import Tensor
 from typing import Union
 
 import numpy as np
 import torch
+from torch import Tensor
+
+from ModifiedNEAT.config import Config
 
 
 def init_type_code(config: Config) -> int:

@@ -1,10 +1,10 @@
-from ...base import NeatModule, NeatParameter
-
-from torch import Tensor
-from typing import Union, Iterable
+import numbers
+from typing import Iterable, Union
 
 import torch
-import numbers
+from torch import Tensor
+
+from ...base import NeatModule, NeatParameter
 
 
 class LayerNorm(NeatModule):

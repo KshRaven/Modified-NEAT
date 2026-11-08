@@ -1,12 +1,12 @@
 
-from ModifiedNEAT.cuda.functional import clamp, prob, get_value, set_value, normal
-from ModifiedNEAT.cuda.initialization import initialize_genome
-
-from numba import cuda
-from numba.cuda.cudadrv.devicearray import DeviceNDArray
 from typing import Union
 
 import cupy as cp
+from ModifiedNEAT.cuda.initialization import initialize_genome
+from numba import cuda
+from numba.cuda.cudadrv.devicearray import DeviceNDArray
+
+from ModifiedNEAT.cuda.functional import clamp, get_value, normal, prob, set_value
 
 GPUArray = Union[DeviceNDArray, cp.ndarray]
 

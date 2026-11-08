@@ -1,31 +1,31 @@
 """FastAPI route handlers for the dashboard backend."""
 
-import sys
-import pickle
 import logging
-from pathlib import Path
+import pickle
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
-from fastapi import HTTPException
 
-import torch
-import torch.nn as nn
 import numpy as np
+import torch.nn as nn
+from fastapi import HTTPException
 
 from ModifiedNEAT.nn.base import NeatModule, PseudoModule
 from ModifiedNEAT.population import Population
 
+from .models import (
+    ModuleGraph,
+    TensorData,
+    TensorResponse,
+)
 from .utils import (
-    build_graph_from_metadata,
     build_graph,
-    reconstruct_module_from_metadata,
+    build_graph_from_metadata,
     compute_tensor_stats,
     get_tensor_slice,
     numpy_to_torch,
-)
-from .models import (
-    SliceRequest, FileInfo, TensorResponse, TensorData,
-    ModuleGraph, ModuleNode, ModuleEdge,
+    reconstruct_module_from_metadata,
 )
 
 # Set up logging

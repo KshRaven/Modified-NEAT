@@ -5,12 +5,12 @@ Device specific counterparts (RNG sampling helpers, element accessors, ...) live
 ``cpu/functional`` and ``gpu/functional``.
 """
 
+import math
+
+import numpy as np
 from numba import njit
 
-import math
-import numpy as np
-
-from ModifiedNEAT.base.seeding import set_seed, get_seed  # noqa: F401  (set_seed re-exported for compatibility)
+from ModifiedNEAT.base.seeding import get_seed, set_seed  # noqa: F401  (set_seed re-exported for compatibility)
 
 
 def __getattr__(name):

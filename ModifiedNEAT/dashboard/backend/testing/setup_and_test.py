@@ -3,11 +3,11 @@
 
 import subprocess
 import sys
-import os
-from pathlib import Path
 import time
-import requests
+from pathlib import Path
 from typing import Tuple
+
+import requests
 
 
 def run_command(cmd: list, description: str, cwd: str = None) -> Tuple[bool, str]:

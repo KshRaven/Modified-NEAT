@@ -1,11 +1,7 @@
 """Pydantic models for the dashboard API."""
 
-from ModifiedNEAT.nn.base import NeatModule, NeatParameter, Model
-from ModifiedNEAT.nn.modules.base import *
-from ModifiedNEAT.nn.genome import Genome
-from ModifiedNEAT.population import Population
-from ModifiedNEAT.util.storage import *
 from typing import Optional
+
 from pydantic import BaseModel
 
 

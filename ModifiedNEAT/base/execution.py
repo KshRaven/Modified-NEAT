@@ -1,15 +1,15 @@
 
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.nn import NeatModule, Genome
-from ModifiedNEAT.species import SpeciesSet
-from ModifiedNEAT.stagnation import Stagnation
-from ModifiedNEAT.reporter import ReporterSet
-from ModifiedNEAT.base import cpu
-
 import os
-import torch
 import warnings
 
+import torch
+
+from ModifiedNEAT.base import cpu
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.nn import Genome, NeatModule
+from ModifiedNEAT.reporter import ReporterSet
+from ModifiedNEAT.species import SpeciesSet
+from ModifiedNEAT.stagnation import Stagnation
 
 # Environment variables for configuration
 DEVICE_ENV_NAME = 'MODIFIEDNEAT_DEVICE'
@@ -50,8 +50,8 @@ def get_device():
 def cuda_is_available():
     """Check if the GPU backend can be used (numba.cuda with a usable device, and cupy installed)."""
     try:
-        from numba import cuda
         import cupy  # noqa: F401  (required by the GPU backend)
+        from numba import cuda
         return bool(cuda.is_available())
     except Exception as e:  # missing packages or a broken driver/toolkit: never crash a CPU-only machine
         warnings.warn(message=f"CUDA backend unavailable: {e}", category=ImportWarning, stacklevel=2)

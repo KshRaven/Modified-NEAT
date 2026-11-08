@@ -1,6 +1,5 @@
 """Sample NEAT model for testing the visualizer."""
-import sys, os
-import pickle
+import sys
 from pathlib import Path
 
 # Ensure the backend module can be imported
@@ -9,10 +8,10 @@ print(f"Testing directory = {TEST_DIR}")
 if TEST_DIR not in sys.path:
     sys.path.insert(0, TEST_DIR)
 
-import ModifiedNEAT as meat
-import ModifiedNEAT.nn as mn
 import torch.nn as nn
 
+import ModifiedNEAT as meat
+import ModifiedNEAT.nn as mn
 
 if __name__ == "__main__":
     meat.util.storage.set_storage_location("./")

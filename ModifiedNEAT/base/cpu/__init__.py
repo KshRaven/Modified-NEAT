@@ -6,14 +6,19 @@ from ModifiedNEAT.base import initialization as _initialization
 from ModifiedNEAT.base import reproduction as _reproduction
 from ModifiedNEAT.base import speciation as _speciation
 from ModifiedNEAT.config import Config
-from ModifiedNEAT.nn import NeatModule, Genome
+from ModifiedNEAT.nn import Genome, NeatModule
+from ModifiedNEAT.reporter import ReporterSet
 from ModifiedNEAT.species import SpeciesSet
 from ModifiedNEAT.stagnation import Stagnation
-from ModifiedNEAT.reporter import ReporterSet
 
 from . import initialization, mutation, reproduction, speciation
 from .backend import BACKEND, CpuBackend
 from .mutation import mutate
+
+__all__ = [
+    'BACKEND', 'CpuBackend', 'initialize', 'initialization', 'mutate', 'mutation',
+    'reproduce', 'reproduction', 'speciate', 'speciation',
+]
 
 
 def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):

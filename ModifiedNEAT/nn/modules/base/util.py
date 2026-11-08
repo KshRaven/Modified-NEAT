@@ -1,14 +1,12 @@
-from ...base import NeatModule, NeatParameter, addindent
-from ....util.fancy_text import CM, Fore
-
-import torch
-import torch.nn as nn
-import numpy as np
 import inspect
 import math
 
+import numpy as np
+import torch
+import torch.nn as nn
 from torch import Tensor
-from typing import Union, Iterable
+
+from ....util.fancy_text import CM, Fore
 
 
 def model_size(model: nn.Module):

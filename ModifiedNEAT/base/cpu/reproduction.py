@@ -1,11 +1,10 @@
 """CPU crossover kernel (numba, prange). The orchestration lives in ``ModifiedNEAT.base.reproduction``."""
 
-from .functional import prob
-
+import numpy as np
 from numba import njit, prange
 from numpy import ndarray as CPUArray
 
-import numpy as np
+from .functional import prob
 
 
 @njit(cache=True)

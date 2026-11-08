@@ -1,16 +1,32 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Iterable, Union
+from typing import Iterable, Union
 
 import torch
 import torch.nn as nn
-from torch import Tensor, device as DEVICE, dtype as DTYPE
+from torch import Tensor
+from torch import device as DEVICE
+from torch import dtype as DTYPE
 
 from ...util.fancy_text import CM, Fore
 from ...util.qol import manage_params
 from ..base import NeatModule, NeatParameter
-from .base import *
+from .base import (
+    Conv1d,
+    Conv2d,
+    Conv3d,
+    Embedding,
+    GroupNorm,
+    Identity,
+    LayerNorm,
+    Linear,
+    Polynomial,
+    RMSNorm,
+    calc_padding,
+    display,
+    get_tensor_info,
+)
 
 __all__ = [
     'InvalidValueError',
@@ -34,6 +50,15 @@ __all__ = [
     'ConverBlock',
     'ConverBase',
 ]
+
+
+def _get_convolution_class(dimensions: int | Iterable[int]):
+    dimension_count = dimensions if isinstance(dimensions, int) else len(dimensions)
+    convolution_classes = {1: Conv1d, 2: Conv2d, 3: Conv3d}
+    try:
+        return convolution_classes[dimension_count]
+    except KeyError as error:
+        raise ValueError(f"Unsupported number of image dimensions '{dimension_count}'") from error
 
 
 class InvalidValueError(ValueError):
@@ -242,8 +267,6 @@ class BufferEmbedding(NeatModule):
             self.embedding = Linear(features, embed_size, bias, device, dtype)
         elif type == 'discrete':
             raise NotImplementedError(f"nn.Embedding not yet implemented for NEAT modules")
-            self.padding_idx: int | None = manage_params(options, 'padding_idx', None)
-            self.embedding = Embedding(features, embed_size, padding_idx=self.padding_idx, device=device, dtype=dtype)
         else:
             raise NotImplementedError(f"Unsupported embedding type: '{type}'")
 
@@ -1506,7 +1529,8 @@ class ConvCrossAttention(NeatModule):
         self.pre_norm = GroupNorm(
             self.norm_groups, dim_size, self.epsilon, self.affine, False, device=device, dtype=dtype
         ) if self.norm_groups else None
-        Convolution, CrossConvolution = get_conv(max_pixels), get_conv(cross_max_pixels)
+        Convolution = _get_convolution_class(max_pixels)
+        CrossConvolution = _get_convolution_class(cross_max_pixels)
         self.mult = 1+differential if differential else 1
         self.query_proj = Convolution(dim_size, heads * self.head_dim * self.mult, kernel_size=kernel_size,
                                       padding=self.padding, padding_mode=self.padding_mode,
@@ -1773,7 +1797,7 @@ class ConvSwiGLU(NeatModule):
         self.pre_norm = GroupNorm(
             self.norm_groups, dim_size, self.epsilon, self.affine, False, device=device, dtype=dtype
         ) if self.norm_groups else None
-        Convolution = get_conv(self.image_ndim)
+        Convolution = _get_convolution_class(self.image_ndim)
         self.inp_proj = Convolution(dim_size, hidden_size, kernel_size, stride=self.stride, dilation=self.dilation,
                                     padding=self.padding, padding_mode=self.padding_mode,
                                     bias=bias, device=device, dtype=dtype)

@@ -1,11 +1,12 @@
 
+import time as clock
+
+import numpy as np
+
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.genome import Genome
 from ModifiedNEAT.reporter.base import BaseReporter
 from ModifiedNEAT.util.fancy_text import CM, Fore
-
-import time as clock
-import numpy as np
 
 
 class StdOutReporter(BaseReporter):

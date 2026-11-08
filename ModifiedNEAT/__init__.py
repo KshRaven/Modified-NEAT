@@ -1,28 +1,30 @@
 
 # Core imports - these are imported immediately
-from . import config
-from . import util
+# Initialize device early
+from . import base, config, util
+from .base import (
+    cuda_is_available,
+    get_device,
+    get_tpb,
+    initialize,
+    reproduce,
+    set_device,
+    set_tpb,
+    speciate,
+)
 
 # Import key utilities first (no dependencies on other NEAT modules)
 from .config import Config
-from .util.fancy_text import CM, Fore
-
-# Initialize device early
-from . import base
-from .base import (
-    cuda_is_available, set_device, get_device, 
-    set_tpb, get_tpb,
-    initialize, reproduce, speciate
-)
 
 # Standard imports for commonly used components
-from .nn import modules, activations, NeatModule, NeatParameter, Model, Genome
-from .reporter import BaseReporter, ReporterSet, StdOutReporter
+from .nn import Genome, Model, NeatModule, NeatParameter, activations, modules
 from .population import Population
+from .reporter import BaseReporter, ReporterSet, StdOutReporter
 from .reproduction import Reproduction
+from .rl import NEAT, PPO
 from .species import Species, SpeciesSet
 from .stagnation import Stagnation
-from .rl import NEAT, PPO
+from .util.fancy_text import CM, Fore
 
 # Lazy imports for less commonly used modules
 _lazy_modules = {
@@ -36,6 +38,15 @@ _lazy_modules = {
     'stagnation': 'ModifiedNEAT.stagnation',
     'multproc': 'ModifiedNEAT.multproc',
 }
+
+__all__ = [
+    'BaseReporter', 'CM', 'Config', 'Fore', 'Genome', 'Model', 'NEAT', 'NeatModule',
+    'NeatParameter', 'PPO', 'Population', 'ReporterSet', 'Reproduction', 'Species',
+    'SpeciesSet', 'Stagnation', 'StdOutReporter', 'activations', 'base',
+    'config', 'cuda_is_available', 'get_device', 'get_tpb', 'initialize', 'modules',
+    'multproc', 'nn', 'optim', 'population', 'reproduce', 'reporter', 'reproduction',
+    'rl', 'set_device', 'set_tpb', 'species', 'speciate', 'stagnation', 'util',
+]
 
 def __getattr__(name):
     """Lazy import for less commonly used submodules."""

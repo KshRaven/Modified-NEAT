@@ -1,11 +1,9 @@
-from ModifiedNEAT.base import seeding
-from ModifiedNEAT.base.functional import set_seed, clamp, threads_total
-
+import cupy as cp
 from numba import cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 
-import numpy as np
-import cupy as cp
+from ModifiedNEAT.base import seeding
+from ModifiedNEAT.base.functional import threads_total
 
 
 def get_rng_states(kernel_shape: tuple, seed: int = None, get_normal=True, use_cuda=True) -> tuple[cp.ndarray, int]:

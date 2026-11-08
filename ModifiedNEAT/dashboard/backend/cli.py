@@ -1,12 +1,13 @@
 """CLI module for neatboard command."""
 
-import sys
 import argparse
-import uvicorn
-import socket
-import os
 import logging
+import os
+import socket
+import sys
 from pathlib import Path
+
+import uvicorn
 
 # Global variable to store base_dir for use in get_app() during reload
 _NEATBOARD_BASE_DIR = None

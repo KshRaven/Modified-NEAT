@@ -8,29 +8,34 @@ Reproduction, written once for every device.
 * ``reproduce`` drives a whole generation.
 """
 
-from ModifiedNEAT.nn.base import NeatModule, check_for_illegal_zeros
-from ModifiedNEAT.nn.genome import Genome
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.species import Species, SpeciesSet, FLOAT, INT, SPECIES
-from ModifiedNEAT.stagnation import Stagnation
-from ModifiedNEAT.reporter.base import ReporterSet
+import math
+import time as clock
+
+import numpy as np
+import torch
+from numba import njit, prange, types
+from numba.typed import Dict, List
+
+from ModifiedNEAT.base import seeding
 from ModifiedNEAT.base.backend import Backend
 from ModifiedNEAT.base.functional import calc_grid, threads_total
-from ModifiedNEAT.base import seeding
 from ModifiedNEAT.base.mutation import mutation_arguments
 from ModifiedNEAT.base.util import (
-    init_type_code, parameter_dtype, reshape_to_ndim, check_param_compatibility,
-    effective_epsilon, clamp_to_epsilon, repair_zero_sources
+    check_param_compatibility,
+    clamp_to_epsilon,
+    effective_epsilon,
+    init_type_code,
+    parameter_dtype,
+    repair_zero_sources,
+    reshape_to_ndim,
 )
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.nn.base import NeatModule, check_for_illegal_zeros
+from ModifiedNEAT.nn.genome import Genome
+from ModifiedNEAT.reporter.base import ReporterSet
+from ModifiedNEAT.species import FLOAT, INT, SPECIES, Species, SpeciesSet
+from ModifiedNEAT.stagnation import Stagnation
 from ModifiedNEAT.util.fancy_text import CM, Fore
-
-from numba import njit, types, prange
-from numba.typed import List, Dict
-
-import torch
-import numpy as np
-import time as clock
-import math
 
 NP_FLOAT = float # np.float64
 GENOME   = Genome.class_type.instance_type

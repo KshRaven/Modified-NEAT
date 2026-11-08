@@ -1,13 +1,15 @@
-from ModifiedNEAT.base.backend import Backend
+import gc
+
+import numpy as np
+
 from ModifiedNEAT.base import seeding
+from ModifiedNEAT.base.backend import Backend
+
 from .functional import get_rng_states
 from .initialization import initialize as _initialize_kernel
 from .mutation import mutate as _mutate_kernel
 from .reproduction import crossover as _crossover_kernel
 from .speciation import compute_distances as _compute_distances
-
-import gc
-import numpy as np
 
 
 class CpuBackend(Backend):

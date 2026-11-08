@@ -1,10 +1,8 @@
-from ModifiedNEAT.base.functional import calc_grid, calc
-
-from numba import cuda
-from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 from typing import Union
 
 import numpy as np
+from numba import cuda
+from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 
 
 @cuda.jit(device=True)

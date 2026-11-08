@@ -1,20 +1,25 @@
 
+from typing import Iterable, Union
+
+import torch
+import torch.nn as nn
+from torch import Tensor
+
+from ...util.qol import manage_params
 from ..base import Model, NeatModule
-from . import SequenceEncoding, BufferEncoding, BufferEmbedding, TransformerBase
-from . import Sequential, Linear, Transpose, Ignore
-from . import Conv1d, Conv2d, Conv3d, ResidualBlock, ConverBase
-from . import LayerNorm, RMSNorm, GroupNorm, BatchNorm
+from .base import (
+    GroupNorm,
+    Ignore,
+    Linear,
+    RMSNorm,
+    Sequential,
+    Transpose,
+)
+from .base.convolution import Conv1d
+
 # from .base import get_conv
 from .base.util import get_tensor_info
-from ...util.qol import manage_params
-from ...util.fancy_text import CM, Fore
-
-from torch import Tensor
-from typing import Union, Iterable
-
-import torch.nn as nn
-import torch.nn.functional as F
-import torch
+from .sub import ConverBase, ResidualBlock
 
 
 class Transformer(NeatModule):
@@ -131,16 +136,15 @@ class Conver(NeatModule):
         self.pri_actv = self.activation = manage_params(options, ['activation', 'actv', 'pri_actv'], nn.SiLU())
         self.sec_actv = manage_params(options, 'sec_actv', None)
         options['image_ndim'] = 1
-        Convolution = get_conv((max_seq_len,))
         self.feedback_gain = Sequential(
             Transpose(),
-            Convolution(self.feedback, dim_size, 1, stride=1, padding=-1,
-                        padding_mode=manage_params(options, 'padding_mode', 'zeros'),
-                        bias=True, device=device, dtype=dtype),
+             Conv1d(self.feedback, dim_size, 1, stride=1, padding=-1,
+                 padding_mode=manage_params(options, 'padding_mode', 'zeros'),
+                 bias=True, device=device, dtype=dtype),
             GroupNorm(dim_size, dim_size, self.epsilon, self.affine, False, device, dtype),
-            Convolution(dim_size, self.feedback, 1, stride=1, padding=-1,
-                        padding_mode=manage_params(options, 'padding_mode', 'zeros'),
-                        bias=bias, device=device, dtype=dtype),
+             Conv1d(dim_size, self.feedback, 1, stride=1, padding=-1,
+                 padding_mode=manage_params(options, 'padding_mode', 'zeros'),
+                 bias=bias, device=device, dtype=dtype),
             nn.Tanh(),
             Transpose(),
         ) if self.feedback and manage_params(options, 'feedback_gain', False) else None

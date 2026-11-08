@@ -1,14 +1,16 @@
-from ModifiedNEAT.base.backend import Backend
+import gc
+
+import cupy as cp
+
 from ModifiedNEAT.base import seeding
+from ModifiedNEAT.base.backend import Backend
 from ModifiedNEAT.base.cpu.reproduction import crossover as _crossover_cpu
+
 from .functional import get_rng_states
 from .initialization import _execute as _initialize_kernel
 from .mutation import mutate as _mutate_kernel
 from .reproduction import crossover as _crossover_kernel
 from .speciation import compute_distances as _compute_distances
-
-import gc
-import cupy as cp
 
 
 class GpuBackend(Backend):

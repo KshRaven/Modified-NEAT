@@ -1,5 +1,72 @@
-from .genome import Genome # TODO: Remove -> , Network, Connection, NODE, initialize_genome, load_genome, load_network
-from .base import NeatParameter, NeatModule, Model, PseudoModule
+from . import activations, base, genome, modules
+from .base import Model, NeatModule, NeatParameter, PseudoModule
+from .genome import (
+    Genome,  # TODO: Remove -> , Network, Connection, NODE, initialize_genome, load_genome, load_network
+)
+# from .modules import (
+#     Attention,
+#     AvgPool1d,
+#     AvgPool2d,
+#     AvgPool3d,
+#     AvgPooling,
+#     BatchNorm,
+#     BatchNorm1d,
+#     BatchNorm2d,
+#     BatchNorm3d,
+#     BufferEmbedding,
+#     BufferEncoding,
+#     Conv1d,
+#     Conv2d,
+#     Conv3d,
+#     ConvCrossAttention,
+#     Conver,
+#     ConverBase,
+#     Convolution,
+#     ConvSelfAttention,
+#     ConvSwiGLU,
+#     Embedding,
+#     GroupNorm,
+#     Identity,
+#     Ignore,
+#     LayerNorm,
+#     Linear,
+#     MaxPool1d,
+#     MaxPool2d,
+#     MaxPool3d,
+#     MaxPooling,
+#     Permute,
+#     Polynomial,
+#     Pooling,
+#     Reformer,
+#     ResidualBlock,
+#     RMSNorm,
+#     SequenceEncoding,
+#     Sequential,
+#     SwiGLU,
+#     Transformer,
+#     TransformerBase,
+#     Transpose,
+#     calc_padding,
+#     display,
+#     get_tensor_info,
+#     has_parameter,
+#     model_params,
+#     model_size,
+# )
 from .modules import *
 
-from . import genome, base, modules
+# __all__ = [
+#     'Genome', 'Model', 'NeatModule', 'NeatParameter', 'PseudoModule',
+#     'activations', 'base', 'genome', 'modules',
+#     'Attention', 'AvgPool1d', 'AvgPool2d', 'AvgPool3d', 'AvgPooling',
+#     'BatchNorm', 'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d',
+#     'BufferEmbedding', 'BufferEncoding', 'Conv1d', 'Conv2d', 'Conv3d',
+#     'ConvCrossAttention', 'Conver', 'ConverBase', 'Convolution',
+#     'ConvSelfAttention', 'ConvSwiGLU', 'Embedding', 'get_tensor_info',
+#     'GroupNorm', 'has_parameter', 'Identity', 'Ignore', 'LayerNorm', 'Linear',
+#     'MaxPool1d', 'MaxPool2d', 'MaxPool3d', 'MaxPooling', 'model_params',
+#     'model_size', 'Permute', 'Polynomial', 'Pooling', 'Reformer',
+#     'ResidualBlock', 'RMSNorm', 'Sequential', 'SequenceEncoding', 'SwiGLU',
+#     'Transformer', 'TransformerBase', 'Transpose', 'calc_padding', 'display',
+# ]
+# TODO: To be expanded for a larger module library

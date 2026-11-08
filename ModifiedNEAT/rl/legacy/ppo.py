@@ -1,18 +1,17 @@
-from ModifiedNEAT.nn.base import Model
-from ModifiedNEAT.population import Population
-from ModifiedNEAT.rl.base import Algorithm, TensorDict, NEATAlgoWarning
-from ModifiedNEAT.optim.scheduler import Scheduler
-from ModifiedNEAT.util.datetime import eta, clock
-from ModifiedNEAT.util.qol import manage_params
-from ModifiedNEAT.util.fancy_text import CM, Fore
-
-from torch import Tensor
-from typing import Union, Iterable
-
-import torch
-import numpy as np
-import warnings
 import math
+import warnings
+from typing import Iterable, Union
+
+import numpy as np
+import torch
+from torch import Tensor
+
+from ModifiedNEAT.optim.scheduler import Scheduler
+from ModifiedNEAT.population import Population
+from ModifiedNEAT.rl.base import Algorithm, NEATAlgoWarning, TensorDict
+from ModifiedNEAT.util.datetime import clock
+from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.qol import manage_params
 
 
 class PPO(Algorithm):

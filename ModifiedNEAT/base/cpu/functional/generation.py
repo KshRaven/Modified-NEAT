@@ -1,10 +1,9 @@
-from ModifiedNEAT.base import seeding
-from ModifiedNEAT.base.functional import set_seed, clamp, threads_total
-
+import numpy as np
 from numba import njit
 from numpy import ndarray as CPUArray
 
-import numpy as np
+from ModifiedNEAT.base import seeding
+from ModifiedNEAT.base.functional import threads_total
 
 
 def get_rng_states(kernel_shape: tuple, seed: int = None, get_normal=True, dtype=np.float64) -> tuple[np.ndarray, int]:

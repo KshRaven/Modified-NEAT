@@ -1,9 +1,6 @@
-from ModifiedNEAT.base.functional import calc_grid, calc
-
+import numpy as np
 from numba import njit
 from numpy import ndarray as CPUArray
-
-import numpy as np
 
 
 @njit

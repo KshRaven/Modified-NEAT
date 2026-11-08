@@ -14,12 +14,12 @@ from torch.utils.tensorboard import SummaryWriter
 from ModifiedNEAT.nn.base import Model, NeatModule
 from ModifiedNEAT.optim.scheduler import Scheduler
 from ModifiedNEAT.population import Population
-from ModifiedNEAT.util.datetime import clock, eta, unix_to_datetime_file
+from ModifiedNEAT.util.datetime import clock, unix_to_datetime_file
 from ModifiedNEAT.util.fancy_text import CM, Fore
 from ModifiedNEAT.util.qol import manage_params
 
 from .functional import EpisodeRuns, get_rl_backend
-from .replay import LogBuffer, ReplayBuffer, RolloutBuffer
+from .replay import LogBuffer, RolloutBuffer
 
 __all__ = ['Algorithm', 'NEATAlgoWarning', 'TensorDict', 'TensorboardLogger', 'TerminalReporter']
 

@@ -1,11 +1,10 @@
 """CPU initialization kernels (numba, prange). The orchestration lives in ``ModifiedNEAT.base.initialization``."""
 
-from .functional import clamp, normal, uniform
-
+import numpy as np
 from numba import njit, prange
 from numpy import ndarray as CPUArray
 
-import numpy as np
+from .functional import clamp, normal, uniform
 
 
 @njit(cache=True)

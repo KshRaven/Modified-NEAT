@@ -1,21 +1,21 @@
-from ModifiedNEAT.nn.genome import Genome, INT
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.util.storage import save, load
-from ModifiedNEAT.nn.dist import SharpCategorical
-
-from torch import Tensor
-from itertools import count
-from numba import njit, prange, types
-from numpy import ndarray as CPUArray
-from typing import Union, Iterable, Any
-
-import torch
-import torch.nn as nn
-import numpy as np
+import copy
 import sys
 import traceback
 import warnings
-import copy
+from itertools import count
+from typing import Any, Iterable, Union
+
+import numpy as np
+import torch
+import torch.nn as nn
+from numba import njit, prange
+from numpy import ndarray as CPUArray
+from torch import Tensor
+
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.nn.dist import SharpCategorical
+from ModifiedNEAT.nn.genome import Genome
+from ModifiedNEAT.util.storage import load, save
 
 # GPU packages are never imported here (CPU-only machines may not have them). A cupy / numba.cuda array can only
 # exist if its package is already loaded, so it is enough to look it up in sys.modules.

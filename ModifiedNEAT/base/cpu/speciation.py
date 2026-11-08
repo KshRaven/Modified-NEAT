@@ -1,13 +1,12 @@
 """CPU distance kernels (numba, prange). The species grouping lives in ``ModifiedNEAT.base.speciation``."""
 
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.nn.base import NeatModule
-from ModifiedNEAT.base.util import parameter_dtype, reshape_to_ndim
-
+import numpy as np
 from numba import njit, prange
 from numpy import ndarray as CPUArray
 
-import numpy as np
+from ModifiedNEAT.base.util import parameter_dtype, reshape_to_ndim
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.nn.base import NeatModule
 
 
 @njit(cache=True)

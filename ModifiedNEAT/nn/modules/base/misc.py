@@ -1,8 +1,8 @@
-from torch import Tensor
-from typing import Union, Iterable
+from typing import Iterable, Union
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 
 class Identity(nn.Module):

@@ -1,10 +1,9 @@
 
-from torch import Tensor
 from typing import Union
-from torch.nn import ReLU, SiLU
 
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 
 # TODO: Refactor the modules below since PyTorch uses radians instead of degrees

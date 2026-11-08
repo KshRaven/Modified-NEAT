@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import math
+import os
+
 from ModifiedNEAT.config.base import Configuration
 from ModifiedNEAT.util.storage import STORAGE_DIR
-
-import os
-import math
 
 
 class GeneralConfig(Configuration):

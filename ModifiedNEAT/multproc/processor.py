@@ -1,12 +1,14 @@
 
 # from .wrapper import ModelWrapper
 # from torch import Tensor
+import warnings
+from typing import Union
+
 import torch
 import torch.multiprocessing as mp
+
 # from multproc import Manager
 from torch.nn import Module
-from typing import Union
-import warnings
 
 
 # ---------------- CPU worker ----------------

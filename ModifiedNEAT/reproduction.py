@@ -1,13 +1,13 @@
+from numba import types
+from numba.typed import Dict
+
+from ModifiedNEAT.base import get_tpb, initialize
 from ModifiedNEAT.config import Config
 from ModifiedNEAT.nn.base import NeatModule
-from ModifiedNEAT.nn.genome import Genome, INT
+from ModifiedNEAT.nn.genome import INT, Genome
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.stagnation import Stagnation
 from ModifiedNEAT.util.qol import Indexer
-from ModifiedNEAT.base import initialize, get_tpb
-
-from numba import types
-from numba.typed import Dict
 
 GENOME  = Genome.class_type.instance_type
 GENOME_TUPLE = types.Tuple([GENOME, GENOME])

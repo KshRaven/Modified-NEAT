@@ -1,12 +1,11 @@
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.constants import INT, FLOAT, BOOL
-from ModifiedNEAT.species import SpeciesSet, Species, SPECIES
-from ModifiedNEAT.reporter.base import ReporterSet
-
-from numba import types, njit
-from numba.typed import List, Dict
-
 import numpy as np
+from numba import njit, types
+from numba.typed import Dict, List
+
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.constants import BOOL, FLOAT, INT
+from ModifiedNEAT.reporter.base import ReporterSet
+from ModifiedNEAT.species import SPECIES, Species, SpeciesSet
 
 
 class Stagnation(object):

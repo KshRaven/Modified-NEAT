@@ -1,11 +1,11 @@
 """CPU mutation kernels (numba, prange). See ``ModifiedNEAT.base.mutation`` for the notes on how mutation works."""
 
-from .functional import clamp, prob, normal
-from .initialization import initialize_genome
-
 import numpy as np
 from numba import njit, prange
 from numpy import ndarray as CPUArray
+
+from .functional import clamp, normal, prob
+from .initialization import initialize_genome
 
 
 @njit(cache=True)

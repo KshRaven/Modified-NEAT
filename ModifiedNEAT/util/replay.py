@@ -1,10 +1,10 @@
 
-from torch import Tensor
-from typing import Union, Any
-from numpy import ndarray
+from typing import Any, Union
 
 import numpy as np
 import torch
+from numpy import ndarray
+from torch import Tensor
 
 
 class ReplayBuffer(object):

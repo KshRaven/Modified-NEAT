@@ -1,17 +1,23 @@
+from numbers import Real
+from typing import Union
+
+import numpy as np
+from numba import optional, types
+from numba.experimental import jitclass
+from numba.typed import Dict, List
+from numpy import ndarray as CPUArray
+
 from ModifiedNEAT.config import Config
-from ModifiedNEAT.constants import INT, SPECIES_FLOAT, NP_SPECIES_FLOAT, NP_DISTANCE_FLOAT, DISTANCE_FLOAT
+from ModifiedNEAT.constants import (
+    DISTANCE_FLOAT,
+    INT,
+    NP_DISTANCE_FLOAT,
+    NP_SPECIES_FLOAT,
+    SPECIES_FLOAT,
+)
 from ModifiedNEAT.nn.genome import Genome
 from ModifiedNEAT.reporter.base import ReporterSet
 from ModifiedNEAT.util.qol import Indexer
-
-from numba import types, optional
-from numba.experimental import jitclass
-from numba.typed import List, Dict
-from numbers import Real
-from typing import Union
-from numpy import ndarray as CPUArray
-
-import numpy as np
 
 # Names other modules import from here (``from ModifiedNEAT.species import FLOAT``): species statistics use float32
 FLOAT    = SPECIES_FLOAT

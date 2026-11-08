@@ -1,12 +1,12 @@
 """GPU crossover kernel (numba.cuda). The orchestration lives in ``ModifiedNEAT.base.reproduction``."""
 
-from .functional import prob, get_value, set_value
-
-from numba import cuda
-from numba.cuda.cudadrv.devicearray import DeviceNDArray
 from typing import Union
 
 import cupy as cp
+from numba import cuda
+from numba.cuda.cudadrv.devicearray import DeviceNDArray
+
+from .functional import get_value, prob, set_value
 
 GPUArray = Union[DeviceNDArray, cp.ndarray]
 

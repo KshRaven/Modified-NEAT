@@ -1,9 +1,9 @@
-from ...base import NeatModule, NeatParameter
-
-from torch import Tensor
-from typing import Union, Iterable
+from typing import Iterable, Union
 
 import torch
+from torch import Tensor
+
+from ...base import NeatModule, NeatParameter
 
 
 class Linear(NeatModule):

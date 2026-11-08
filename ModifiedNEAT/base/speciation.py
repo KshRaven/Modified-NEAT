@@ -4,20 +4,20 @@ Speciation, written once for every device. Only the distance computation (``cpu/
 on genome objects and is identical on both devices.
 """
 
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.nn.base import NeatModule
-from ModifiedNEAT.nn.genome import Genome, INT
-from ModifiedNEAT.species import Species, SpeciesSet, GenomeDistanceCache, get_ct
-from ModifiedNEAT.base.backend import Backend
-from ModifiedNEAT.base import seeding
-from ModifiedNEAT.base.util import check_distinct_genomes
-from ModifiedNEAT.util.fancy_text import CM, Fore
-
-from numba import types, njit
-from numba.typed import List, Dict
+import time as clock
 
 import numpy as np
-import time as clock
+from numba import njit, types
+from numba.typed import Dict, List
+
+from ModifiedNEAT.base import seeding
+from ModifiedNEAT.base.backend import Backend
+from ModifiedNEAT.base.util import check_distinct_genomes
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.nn.base import NeatModule
+from ModifiedNEAT.nn.genome import INT, Genome
+from ModifiedNEAT.species import GenomeDistanceCache, Species, SpeciesSet, get_ct
+from ModifiedNEAT.util.fancy_text import CM, Fore
 
 
 def update_distances_cache(backend: Backend, config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,

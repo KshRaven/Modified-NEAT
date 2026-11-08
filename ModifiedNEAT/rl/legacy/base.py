@@ -1,25 +1,25 @@
-from ModifiedNEAT.nn.base import NeatModule, Model
-from ModifiedNEAT.population import Population
-from ModifiedNEAT.optim.scheduler import Scheduler
-from ModifiedNEAT.util.replay import ReplayBuffer
-from ModifiedNEAT.util.datetime import eta, clock
-# from ModifiedNEAT.util.storage import save, load
-from ModifiedNEAT.util.qol import manage_params
-from ModifiedNEAT.util.datetime import unix_to_datetime_file
-from ModifiedNEAT.util.fancy_text import CM, Fore
-
-from torch import Tensor
-from torch.utils.tensorboard import SummaryWriter
-from numba import njit
-from numpy import ndarray
-from typing import Any, Union, Iterable, Callable
-from itertools import count
-
-import torch
+import math
 import random
 import warnings
+from itertools import count
+from typing import Any, Callable, Iterable, Union
+
 import numpy as np
-import math
+import torch
+from numba import njit
+from numpy import ndarray
+from torch import Tensor
+from torch.utils.tensorboard import SummaryWriter
+
+from ModifiedNEAT.nn.base import Model, NeatModule
+from ModifiedNEAT.optim.scheduler import Scheduler
+from ModifiedNEAT.population import Population
+from ModifiedNEAT.util.datetime import clock, eta, unix_to_datetime_file
+from ModifiedNEAT.util.fancy_text import CM, Fore
+
+# from ModifiedNEAT.util.storage import save, load
+from ModifiedNEAT.util.qol import manage_params
+from ModifiedNEAT.util.replay import ReplayBuffer
 
 
 class NEATAlgoWarning(Warning):

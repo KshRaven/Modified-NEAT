@@ -1,10 +1,10 @@
 
-from numba import cuda
-from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
+import math
 from typing import Union
 
-import math
 import numpy as np
+from numba import cuda
+from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
 
 
 def calc_grid(*block_sizes: int, tpb: int = 4, multiplier: float = None):

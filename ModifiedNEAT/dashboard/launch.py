@@ -6,12 +6,13 @@ It can be run directly or through the neatboard CLI command.
 """
 
 import argparse
+import logging
 import socket
 import sys
-import logging
 from pathlib import Path
-from backend.app import create_app
+
 import uvicorn
+from backend.app import create_app
 
 
 def find_available_port(start_port: int = 8000, max_attempts: int = 10) -> int:

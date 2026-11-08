@@ -1,10 +1,11 @@
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.config.base import Configuration
+import warnings
 from copy import deepcopy
 from typing import Union
 
 import numpy as np
-import warnings
+
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.config.base import Configuration
 
 
 class Scheduler(object):
@@ -216,9 +217,8 @@ class BinaryAnnealing(Scheduler):
 
 
 if __name__ == '__main__':
-    import matplotlib.pyplot as plt
     import matplotlib
-    import torch.optim as optim
+    import matplotlib.pyplot as plt
 
     matplotlib.use('tkagg')
 

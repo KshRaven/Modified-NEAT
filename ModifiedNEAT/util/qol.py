@@ -1,6 +1,6 @@
 
 
-from typing import Union, Any
+from typing import Any, Union
 
 
 def manage_params(dictionary: dict[str, Any], param: Union[str, list[str]], default: Any = None):

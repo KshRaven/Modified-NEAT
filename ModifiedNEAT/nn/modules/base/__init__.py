@@ -1,21 +1,36 @@
 from __future__ import annotations
 
 from .container import Sequential
-from .dense import Linear, Polynomial, Embedding
+from .convolution import Conv1d, Conv2d, Conv3d, Convolution
+from .dense import Embedding, Linear, Polynomial
+from .misc import Identity, Ignore, Permute, Transpose
 from .normalization import (
-    LayerNorm, RMSNorm, GroupNorm, BatchNorm,
-    BatchNorm1d, BatchNorm2d, BatchNorm3d
+    BatchNorm,
+    BatchNorm1d,
+    BatchNorm2d,
+    BatchNorm3d,
+    GroupNorm,
+    LayerNorm,
+    RMSNorm,
 )
-from .convolution import Convolution, Conv1d, Conv2d, Conv3d
 from .pooling import (
+    AvgPool1d,
+    AvgPool2d,
+    AvgPool3d,
+    AvgPooling,
+    MaxPool1d,
+    MaxPool2d,
+    MaxPool3d,
+    MaxPooling,
     Pooling,
-    MaxPooling, MaxPool1d, MaxPool2d, MaxPool3d, 
-    AvgPooling, AvgPool1d, AvgPool2d, AvgPool3d,
 )
-from .misc import Identity, Transpose, Ignore, Permute
 from .util import (
-    calc_padding, display, # get_conv, 
-    has_parameter, model_size, model_params, get_tensor_info
+    calc_padding,
+    display,
+    get_tensor_info,
+    has_parameter,
+    model_params,
+    model_size,
 )
 
 __all__ = [

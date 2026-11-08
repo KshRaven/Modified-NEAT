@@ -144,21 +144,20 @@ class DevelopWithDashboard(_develop):
 
 setup(
     name="ModifiedNEAT",
-    version="0.9.0",
+    version="0.9.1",
     description="Modified version of python NEAT algorithm that uses PyTorch modules",
     long_description=(ROOT / "README.md").read_text(encoding="utf-8"),
     long_description_content_type="text/markdown",
     author="Bradley Odimmasi",
     author_email="bodimmasi@gmail.com",
-    license="MIT",
+    license_expression="MIT",
     classifiers=[
         "Programming Language :: Python :: 3",
-        "License :: OSI Approved :: MIT License",
     ],
     python_requires=">=3.11",
     packages=find_packages(include=["ModifiedNEAT", "ModifiedNEAT.*"], exclude=["*.testing", "*.testing.*"]),
-    include_package_data=True,
-    package_data={"ModifiedNEAT.dashboard": ["dist/**/*"]},  # built assets only; no frontend sources/configs
+    include_package_data=False,
+    package_data={"ModifiedNEAT.dashboard": ["dist/*", "dist/assets/*"]},  # built assets only
     exclude_package_data={"": ["*.pyc", "*.map"]},
     install_requires=sorted(
         {

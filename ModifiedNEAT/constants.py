@@ -6,9 +6,8 @@ genome float" or "the distance matrix float" imports it instead of redefining it
 genomes and ``float32`` species ended up mixed before). Change a dtype here and every user follows.
 """
 
-from numba import types
-
 import numpy as np
+from numba import types
 
 # ---------- General (genome / parameters / typed containers) ---------- #
 FLOAT, NP_FLOAT = types.float64, np.float64

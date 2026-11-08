@@ -1,4 +1,4 @@
-from numba import types, typeof, optional, objmode
+from numba import objmode, optional, typeof, types
 from numba.experimental import jitclass
 from numba.typed import Dict
 

@@ -3,16 +3,23 @@ Parameter initialization, written once for every device. Only the init kernel (`
 ``gpu/initialization.py``) and the array/RNG handling of the :class:`~ModifiedNEAT.base.backend.Backend` differ.
 """
 
-from ModifiedNEAT.nn.base import NeatModule
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.base.backend import Backend
-from ModifiedNEAT.base.functional import calc_grid
-from ModifiedNEAT.base import seeding
-from ModifiedNEAT.base.util import init_type_code, parameter_dtype, reshape_to_ndim, effective_epsilon, clamp_to_epsilon
-from ModifiedNEAT.util.fancy_text import CM, Fore
+import time as clock
 
 import torch
-import time as clock
+
+from ModifiedNEAT.base import seeding
+from ModifiedNEAT.base.backend import Backend
+from ModifiedNEAT.base.functional import calc_grid
+from ModifiedNEAT.base.util import (
+    clamp_to_epsilon,
+    effective_epsilon,
+    init_type_code,
+    parameter_dtype,
+    reshape_to_ndim,
+)
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.nn.base import NeatModule
+from ModifiedNEAT.util.fancy_text import CM, Fore
 
 
 def initialize(backend: Backend, config: Config, module: NeatModule, tpb=1, verbose: int = None):

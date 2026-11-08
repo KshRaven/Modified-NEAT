@@ -1,13 +1,13 @@
 """GPU mutation kernels (numba.cuda). See ``ModifiedNEAT.base.mutation`` for the notes on how mutation works."""
 
-from .functional import clamp, prob, get_value, set_value, normal
-from .initialization import initialize_genome
-
-from numba import cuda
-from numba.cuda.cudadrv.devicearray import DeviceNDArray
 from typing import Union
 
 import cupy as cp
+from numba import cuda
+from numba.cuda.cudadrv.devicearray import DeviceNDArray
+
+from .functional import clamp, get_value, normal, prob, set_value
+from .initialization import initialize_genome
 
 GPUArray = Union[DeviceNDArray, cp.ndarray]
 

@@ -1,31 +1,32 @@
 """Implements the core evolution algorithm."""
 
-from ModifiedNEAT.nn.base import NeatModule, NeatParameter
-from ModifiedNEAT.nn.genome import Genome, load_genome, INT
-from ModifiedNEAT.config import Config
-from ModifiedNEAT.species import SpeciesSet, load_species, GENOME, SPECIES
-from ModifiedNEAT.reporter.base import ReporterSet
-from ModifiedNEAT.reporter.reporters import StdOutReporter
-from ModifiedNEAT.reproduction import Reproduction
-from ModifiedNEAT.base import reproduce, speciate, get_tpb
-from ModifiedNEAT.util.qol import manage_params, Indexer
-from ModifiedNEAT.util import storage as storage_util
-from ModifiedNEAT.util.storage import save, load
-# from ModifiedNEAT.util.fancy_text import CM, Fore
-from ModifiedNEAT.util.datetime import eta, clock
-from ModifiedNEAT.util.replay import ReplayBuffer
-
-from typing import Union, Iterable, Any
-from collections.abc import Mapping
-from pathlib import Path
-from os import PathLike
 import copy
 import shutil
-from numba import njit
-from numba.typed import List, Dict
+from collections.abc import Mapping
+from os import PathLike
+from pathlib import Path
+from typing import Any, Iterable, Union
 
 import numpy as np
 import torch
+from numba import njit
+from numba.typed import Dict, List
+
+from ModifiedNEAT.base import get_tpb, reproduce, speciate
+from ModifiedNEAT.config import Config
+from ModifiedNEAT.nn.base import NeatModule
+from ModifiedNEAT.nn.genome import INT, Genome, load_genome
+from ModifiedNEAT.reporter.base import ReporterSet
+from ModifiedNEAT.reporter.reporters import StdOutReporter
+from ModifiedNEAT.reproduction import Reproduction
+from ModifiedNEAT.species import GENOME, SPECIES, SpeciesSet, load_species
+from ModifiedNEAT.util import storage as storage_util
+
+# from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.datetime import clock, eta
+from ModifiedNEAT.util.qol import Indexer, manage_params
+from ModifiedNEAT.util.replay import ReplayBuffer
+from ModifiedNEAT.util.storage import load, save
 
 
 class CompleteExtinctionException(Exception):

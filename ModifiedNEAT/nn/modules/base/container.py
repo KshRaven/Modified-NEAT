@@ -1,12 +1,12 @@
-from ...base import NeatModule, addindent
-from .dense import Linear, Polynomial, Embedding
-from ....util.fancy_text import CM, Fore
-
-from torch import Tensor
-from typing import Union, Iterable
+import inspect
+from typing import Iterable, Union
 
 import torch.nn as nn
-import inspect
+from torch import Tensor
+
+from ....util.fancy_text import CM, Fore
+from ...base import NeatModule, addindent
+from .dense import Linear, Polynomial
 
 
 class Sequential(NeatModule):

@@ -1,11 +1,12 @@
 """FastAPI application factory."""
 
+import mimetypes
 from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import mimetypes
+from fastapi.staticfiles import StaticFiles
 
 from .handlers import ModuleHandler, TensorHandler
 from .models import SliceRequest

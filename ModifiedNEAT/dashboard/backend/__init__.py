@@ -3,14 +3,14 @@
 from .app import create_app
 from .handlers import ModuleHandler, TensorHandler
 from .models import (
-    SliceRequest,
-    ModuleInfo,
-    TensorData,
-    ModuleNode,
+    FileInfo,
     ModuleEdge,
     ModuleGraph,
+    ModuleInfo,
+    ModuleNode,
+    SliceRequest,
+    TensorData,
     TensorResponse,
-    FileInfo,
 )
 
 __all__ = [

@@ -1,8 +1,8 @@
 
-from colorama import Fore, Style
 from typing import Any
 
 import colorama
+from colorama import Fore, Style
 
 
 def CM(text: Any, color: colorama.Fore = Fore.GREEN, style: colorama.Style = Style.BRIGHT):

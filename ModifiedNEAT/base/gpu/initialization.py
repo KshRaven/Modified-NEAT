@@ -1,9 +1,9 @@
 """GPU initialization kernels (numba.cuda). The orchestration lives in ``ModifiedNEAT.base.initialization``."""
 
-from .functional import clamp, normal, uniform
-
 from numba import cuda
 from numba.cuda.cudadrv.devicearray import DeviceNDArray as GPUArray
+
+from .functional import clamp, normal, uniform
 
 
 @cuda.jit(device=True)

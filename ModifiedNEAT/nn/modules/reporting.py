@@ -12,7 +12,6 @@ from typing import Any, Callable
 import numpy as np
 import torch
 
-
 __all__ = ['differential_attention_logger']
 
 SECTION = 'diff_attn'
@@ -78,7 +77,9 @@ def differential_attention_logger(population: bool = True, detail: bool = False)
     state = {'layout_done': False}
 
     def source(trainer) -> dict[str, dict[str, Any]]:
-        from .sub import AttentionLambda  # lazy: keeps this module importable without the nn package
+        from .sub import (
+            AttentionLambda,  # lazy: keeps this module importable without the nn package
+        )
 
         out: dict[str, Any] = {}
         layers_out: dict[str, Any] = {}

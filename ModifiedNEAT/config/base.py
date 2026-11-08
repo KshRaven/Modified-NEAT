@@ -1,9 +1,9 @@
-from ModifiedNEAT.util.fancy_text import CM, Fore
-from ModifiedNEAT.util.qol import manage_params
-
-from typing import Union, Any
 import json
 import os
+from typing import Any, Union
+
+from ModifiedNEAT.util.fancy_text import CM, Fore
+from ModifiedNEAT.util.qol import manage_params
 
 
 class Configuration:

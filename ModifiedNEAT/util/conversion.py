@@ -1,5 +1,5 @@
 
-from numba import njit, float64, int32, typeof
+from numba import njit, typeof
 
 STR = typeof('str')
 

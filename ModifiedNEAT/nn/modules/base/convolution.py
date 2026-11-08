@@ -1,11 +1,11 @@
-from ...base import NeatModule, NeatParameter
-from .util import calc_padding
-
-from torch import Tensor
-from typing import Union, Iterable
+from typing import Iterable, Union
 
 import torch
 import torch.nn.functional as F
+from torch import Tensor
+
+from ...base import NeatModule, NeatParameter
+from .util import calc_padding
 
 
 class Convolution(NeatModule):
