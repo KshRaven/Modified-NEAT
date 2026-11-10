@@ -53,8 +53,8 @@ class NEAT(Algorithm):
         :keyword target_kl: Optional target KL-divergence (currently unused, reserved).
         :keyword max_steps: Maximum steps kept in the secondary buffer (default 1024).
         :keyword max_episodes: Maximum episodes kept in the secondary buffer (default None).
-        :keyword log_dir: Directory tensorboard logs are written under.
-        :keyword log_name: Name of this run's tensorboard log.
+        :keyword log_dir: Directory logs are written under.
+        :keyword log_name: Name of this run's log.
         """
         if ghosts is not None:
             if population.genera is None or len(population.genera) <= 1:
@@ -716,7 +716,7 @@ class NEAT(Algorithm):
                     std=std, policy_acc=policy_acc, # explained_variance=explained_variance,
                 )
 
-                # Population stats shared by both the tensorboard log and the terminal report
+                # Population stats shared by both the dashboard log and the terminal report
                 survival_rate = len([key for key in valid_keys if key not in self.population.to_delete]) / len(self.population.genomes)
                 best_genome = self.population.genomes[best_genome_key]
                 if self.prev_valid_keys is None:

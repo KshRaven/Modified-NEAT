@@ -4,9 +4,9 @@
 # Core dependencies (CPU-compatible, always installed)
 numpy
 numba
-matplotlib
-tensorboard
 torch
+matplotlib
+runlytics
 
 # # Optional GPU/CUDA dependencies
 # cuda-python

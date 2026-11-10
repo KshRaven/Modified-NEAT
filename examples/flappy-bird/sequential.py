@@ -114,6 +114,9 @@ class BaseModelSeq(mn.Model):
         self.fwd_exp: int       = options.get('fwd_exp', 1)
         self.constant: int      = options.get('constant', 1000)
         self.differential: bool | int = options.get('differential', False)
+        self.diff_mode: str     = options.get('diff_mode', 'energy')     # 'energy' | 'softmax' (see Attention)
+        self.branch_mode: str   = options.get('branch_mode', 'free')     # 'free' | 'tied'
+        self.share_kv: bool     = options.get('share_kv', False)         # exact cache == full sequence (no pol_reg needed)
         self.epsilon            = options.get('epsilon', 1e-9)
         
         if activation is None:
@@ -138,6 +141,7 @@ class BaseModelSeq(mn.Model):
         transformer = mn.TransformerBase(
             max_seq_len, dim_size, layers, heads, kv_heads,
             differential=self.differential, causal_mask=True, 
+            diff_mode=self.diff_mode, branch_mode=self.branch_mode, share_kv=self.share_kv,
             bias=self.attn_bias, ff=feed_fwd, 
             auto_single=True, fwd_exp=self.fwd_exp, proj_coeffs=self.coefficients,
             residual=True, constant=self.constant, normalize=self.normalize,
@@ -210,9 +214,9 @@ class BaseModelSeq(mn.Model):
         return std
 
     def get_action(self, state: Tensor, keys: int | list[int] = None, **options) -> tuple[Tensor, Tensor]:
-        assert state.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len, features) but got {state.shape}"
+        assert state.ndim >= 4, f"Latent shape should be (genomes, *batch/processes, seq_len, features) but got {state.shape}"
         latent      = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False))
-        assert latent.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
+        assert latent.ndim >= 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
         latent      = latent.squeeze(-2) # Since single token mode should be enabled
         mean, std   = self._get_mean_std(latent, keys=keys)
         dist: torch.distributions.Distribution = self.dist(mean, std)
@@ -235,9 +239,9 @@ class BaseModelSeq(mn.Model):
         return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-        assert state.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len, features) but got {state.shape}"
+        assert state.ndim >= 4, f"Latent shape should be (genomes, *batch/processes, seq_len, features) but got {state.shape}"
         latent      = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False))
-        assert latent.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
+        assert latent.ndim >= 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
         latent      = latent.squeeze(-2) # Since single token mode should be enabled
         mean, std   = self._get_mean_std(latent, keys=keys)
         action = mean
@@ -250,25 +254,25 @@ class BaseModelSeq(mn.Model):
         return action
 
     # def get_value(self, state: Tensor, keys: Union[int, list[int]] = None, **options) -> Tensor:
-    #     assert state.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len, features) but got {state.shape}"
+    #     assert state.ndim >= 4, f"Latent shape should be (genomes, *batch/processes, seq_len, features) but got {state.shape}"
     #     latent = self.lat_proj(state, keys=keys, verbose=options.get('verbose', False))
-    #     assert latent.ndim == 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
+    #     assert latent.ndim >= 4, f"Latent shape should be (genomes, batch/processes, seq_len=1, features) but got {latent.shape}"
     #     latent = latent.squeeze(-2) # Since single token mode should be enabled
     #     value  = self.val_proj(latent, keys=keys)
     #     return value
     
     def get_mean(self, state: Tensor, keys: Union[int, list[int], None] = None):
-        assert state.ndim == 4 # state(1, batch_size, seq_len, features)
+        assert state.ndim >= 4 # state(1, batch_size, seq_len, features)
         latent = self.lat_proj(state, keys=keys)
-        assert latent.ndim == 4
+        assert latent.ndim >= 4
         latent = latent.squeeze(-2) # Remove seq_len dim
         mean   = self._get_mean_std(latent, keys=keys)[0] # , raw=True)[0]
         return mean
     
     def get_std(self, state: Tensor, keys: Union[int, list[int], None] = None):
-        assert state.ndim == 4 # state(1, batch_size, seq_len, features)
+        assert state.ndim >= 4 # state(1, batch_size, seq_len, features)
         latent = self.lat_proj(state, keys=keys)
-        assert latent.ndim == 4
+        assert latent.ndim >= 4
         latent = latent.squeeze(-2) # Remove seq_len dim
         std    = self._get_std(latent, keys=keys, raw=True)
         return std
@@ -305,30 +309,36 @@ LIVES               = 15
 #       would allow you get genomes that don't just learn to constantly end themselves
 
 # Model properties
-GENOMES             = 50
-MAX_SEQ_LEN         = 16
+GENOMES             = 100
+MAX_SEQ_LEN         = 32
 SEQ_LEN             = MAX_SEQ_LEN // 1
 SEQ_LEN_TRAIN       = min(max(1, 1), SEQ_LEN)
 SEQ_LEN_EVAL        = min(max(SEQ_LEN, 1), SEQ_LEN)
 INPUTS              = None   # set in run() from ENV.observation_space
 OUTPUTS             = None   # set in run() from ENV.action_space
 EMBED_SIZE          = 32
-COEFFICIENTS        = 2
-LAYERS              = 2
+COEFFICIENTS        = 1
+LAYERS              = 1
 HEADS               = 1
 KV_HEADS            = None
 FWD_EXP             = 1
-DIFFERENTIAL        = True
+DIFFERENTIAL        = 2
+DIFF_MODE           = 'softmax'  # 'energy' = subtract before softmax (== one wider attention) | 'softmax' = subtract the maps
+SHARE_KV            = True       # K/V from input tokens only: cached rollout == full-sequence pass exactly
+BRANCH_MODE         = 'tied'     # 'free' = independent q/k per branch | 'tied' = shared projection + per-branch gains
 BIAS                = True
 PROBABILISTIC       = False
 PROJ_NORM           = True
 CONSTANT            = 1000
-TEST_ACTIVATION     = nn.Tanh()
+TEST_ACTIVATION     = nn.SiLU()
 SWIGLU              = False
 CLIP_MIN            = -13
 CLIP_MAX            = +0
 DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
 MODEL_NUM           = 2
+GENERA              = 1   # >1: ONE model shared by this many genera (Population(genera=N), GENOMES per genus); 1: MODEL_NUM separate models
+if GENERA > 1: MODEL_NUM = 1
+SHARED              = GENERA > 1
 CACHE               = True
 
 # Trainer properties
@@ -341,9 +351,12 @@ REW_NORM            = 4
 REW_REG             = 1.00
 LOSS_REG            = 0.00
 VAL_REG             = 0.00
-POL_REG             = 0.75 if (PROBABILISTIC or CACHE) else 0.0
+POL_REG             = 0.98 if (PROBABILISTIC or (CACHE and not SHARE_KV)) else 0.0   # SHARE_KV: parity is exact, no regularizer
 ENT_REG             = 0.00
 DIV_REG             = 0.00
+NOISE_REG           = 0.25   # fitness weight of low measured attention noise (0 = no pressure)
+NOISE_SIGMA         = 0.10   # probe: relative input perturbation
+NOISE_LOG           = True   # measure + log noise even when NOISE_REG == 0 (baseline comparison)
 CPY_REG             = 0.00
 
 # Post-training test
@@ -367,21 +380,42 @@ def build_models() -> list:
             MAX_SEQ_LEN, INPUTS, OUTPUTS, EMBED_SIZE, LAYERS, HEADS, KV_HEADS,
             activation, PROBABILISTIC, BIAS, DEVICE, DTYPE,
             clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
-            constant=CONSTANT, differential=DIFFERENTIAL, attn_bias=BIAS, 
+            constant=CONSTANT, attn_bias=BIAS, 
+            differential=DIFFERENTIAL, diff_mode=DIFF_MODE, branch_mode=BRANCH_MODE, share_kv=SHARE_KV,
             use_swiglu=SWIGLU, fwd_exp=FWD_EXP, normalize=PROJ_NORM,
             coefficients=COEFFICIENTS,
         )
         for activation in [TEST_ACTIVATION for _ in range(MODEL_NUM)]
     ]
 
+
+def shared_call(model, method: str, obs: Tensor, mapping: dict[int, int], **kw) -> list[Tensor]:
+    """
+    One call of a model shared by several genera. `obs` is (rows, batch, ...) in `mapping` (consolidated) row order;
+    the model wants its rows in its own order, so rows are gathered by genome key, run once (a KV cache needs a fixed
+    batch of genomes) and scattered back to the consolidated order.
+    """
+    keys = sorted(mapping, key=lambda k: model.mapping[k])
+    rows = torch.as_tensor([mapping[k] for k in keys], device=obs.device, dtype=torch.long)
+    out = getattr(model, method)(obs.index_select(0, rows), keys=keys, **kw)
+    out = out if isinstance(out, (tuple, list)) else (out,)
+    result = []
+    for r in out:
+        full = r.new_zeros((len(mapping), *r.shape[1:]))
+        full[rows] = r
+        result.append(full)
+    return result
+
 GAME_TYPE = 0 if not FULL_STATES else (1 if PIPE_Y_VELOCITY == 0 else 2)
 BASE_NAME: str = (
-    f"GT{GAME_TYPE}_DC{int(DISCRETE)}_T{MODEL_NUM}_"
+    f"GT{GAME_TYPE}_DC{int(DISCRETE)}_T{MODEL_NUM}{f'G{GENERA}' if GENERA > 1 else ''}_"
     f"MSL{MAX_SEQ_LEN}_E{EMBED_SIZE}_L{LAYERS}_"
     f"H{HEADS}_K{KV_HEADS}_C{COEFFICIENTS}_"
     f"A-{TEST_ACTIVATION.__class__.__name__}_B{int(BIAS)}_"
     f"F{FWD_EXP}_D{int(DIFFERENTIAL)}_Con{CONSTANT}_"
     f"S{int(SWIGLU)}{f'_R-{CLIP_MIN}~{CLIP_MAX}' if PROBABILISTIC else ''}"
+    f"{'_skv' if SHARE_KV else ''}"
+    f"{f'_{DIFF_MODE}-{BRANCH_MODE}' if DIFFERENTIAL and (DIFF_MODE, BRANCH_MODE) != ('energy', 'free') else ''}"
 )
 FILE_NAME: str = f"FlappyBirdModelSeq-{BASE_NAME}"
 FILE_DIR: str | None = "flappy-bird/sequential"
@@ -413,7 +447,7 @@ CONFIG.reproduction.cross_threshold         = 0.00
 CONFIG.species.compatibility_threshold      = np.inf
 CONFIG.stagnation.max_stagnation            = 1
 CONFIG.stagnation.species_elitism           = 2
-CONFIG.reproduction.darwin_multiplier       = 0.05 # 0.33
+CONFIG.reproduction.darwin_multiplier       = 0.15 # 0.33
 CONFIG.reproduction.cross_multiplier        = 0.75
 CONFIG.reproduction.preserve_elite          = False
 CONFIG.save()
@@ -471,13 +505,19 @@ def evaluate(population: neat.Population, **options):
 
                 # Get actions with forced cache enabled during training
                 # States could be instances or sequences of shape (genomes, *seq_len, inputs)
-                if CACHE: split_states = torch.split(states.unsqueeze(1).select(-2, -1).unsqueeze(-2), split_sizes, dim=0)
+                if SHARED:   # ONE model, every genus in one call
+                    obs = states.unsqueeze(1).select(-2, -1).unsqueeze(-2) if CACHE else states.unsqueeze(1)
+                    split_states = (obs,)
+                    a_all, lp_all = shared_call(MODELS[0], 'get_action', obs, cons_mapping, verbose=2 if DEBUG else False)
+                    split_actions, split_log_probs = (a_all,), (lp_all,)
+                elif CACHE: split_states = torch.split(states.unsqueeze(1).select(-2, -1).unsqueeze(-2), split_sizes, dim=0)
                 else:     split_states = torch.split(states.unsqueeze(1), split_sizes, dim=0)
                 # split_states = torch.split(states.unsqueeze(1).index_select(-2, SELECTOR[-3:]), split_sizes, dim=0)
-                split_actions, split_log_probs = zip(*[
-                    m.get_action(obs, keys=None, verbose=2 if DEBUG and i == 0 else False)
-                    for i, (m, obs) in enumerate(zip(MODELS, split_states))
-                ])
+                if not SHARED:
+                    split_actions, split_log_probs = zip(*[
+                        m.get_action(obs, keys=None, verbose=2 if DEBUG and i == 0 else False)
+                        for i, (m, obs) in enumerate(zip(MODELS, split_states))
+                    ])
                 # Actions shape (genomes, inputs)
                 actions = torch.cat(split_actions, dim=0).squeeze(1) # Group and remove batch
                 log_probs = torch.cat(split_log_probs, dim=0).squeeze(1)
@@ -588,7 +628,7 @@ def test_best_network():
         render_mode='human', goal=TEST_GOAL, seq_len=SEQ_LEN, height=700, width=1000, # velocity=7,
         state_type='full' if FULL_STATES else 'basic', pipe_speed_y=PIPE_Y_VELOCITY * 1., # .50,
         spawn_width=SPAWN_WIDTH, gap_offset=GAP_OFFSET, # gap_size=tuple(int(s * 0.95) for s in GAP_SIZE),
-        fps=45,
+        fps=45, max_frames=np.inf, lives=1,
     )
     split_mappings = POPULATION.get_mapping()
     if len(POPULATION.genera) == 1: split_mappings = (split_mappings,)
@@ -604,7 +644,10 @@ def test_best_network():
             while not done:
                 with torch.no_grad():
                     split_states = torch.split(states, split_sizes, dim=0)
-                    split_actions = [m.get_policy(obs.unsqueeze(1)) for m, obs in zip(MODELS, split_states)]
+                    if SHARED:
+                        split_actions = shared_call(MODELS[0], 'get_policy', states.unsqueeze(1), cons_mapping)
+                    else:
+                        split_actions = [m.get_policy(obs.unsqueeze(1)) for m, obs in zip(MODELS, split_states)]
                     actions = torch.cat(split_actions, dim=0).squeeze(1)
                 next_states, _, _, done, _ = env.step(torch.tanh(actions) if not DISCRETE else actions)
                 states = _T(next_states)
@@ -643,7 +686,8 @@ def load_population(load: str | None) -> None:
     POPULATION.load(FILE_NAME, FILE_DIR, FILE_NO)
 
 
-def run():
+def run(argv: list[str] | None = None, test: bool = True):
+    """argv: CLI args (None = sys.argv); test: run the rendered test of the best genomes after training."""
     global ENV, POPULATION, FILE_NO, INIT_GEN, MODELS, INPUTS, OUTPUTS
 
     parser = argparse.ArgumentParser(description='Run NEAT algorithm on Flappy Bird game')
@@ -653,7 +697,7 @@ def run():
                         help='Load a previously trained model (True for latest, or specify file number)')
     parser.add_argument('--train', type=str, default='true',
                         help='Train the model (True/False or 1/0, default: True)')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     ENV = Game(
         render_mode=args.rm, goal=GOAL, seq_len=SEQ_LEN, height=700, width=700,
@@ -669,10 +713,13 @@ def run():
     print(MODELS[0])
 
     print("\ncreating population")
-    POPULATION = neat.Population(GENOMES, MODELS[0], CONFIG, init_reporter=True)
-    for model in MODELS[1:]:
-        extra_population = neat.Population(GENOMES, model, CONFIG, init_reporter=True)
-        POPULATION.absorb_population(extra_population)
+    if GENERA > 1:     # one model, GENERA genera of GENOMES genomes each
+        POPULATION = neat.Population(GENOMES * GENERA, MODELS[0], CONFIG, init_reporter=True, genera=GENERA)
+    else:
+        POPULATION = neat.Population(GENOMES, MODELS[0], CONFIG, init_reporter=True)
+        for model in MODELS[1:]:
+            extra_population = neat.Population(GENOMES, model, CONFIG, init_reporter=True)
+            POPULATION.absorb_population(extra_population)
     print(POPULATION)
     load_population(args.load)
     INIT_GEN = None             # set by the first evaluate() call
@@ -685,7 +732,7 @@ def run():
             schedulers=[
                 scheduler.CosineAnnealing(CONFIG, 20, 0.10, ['weight_mutate_power', 'weight_init_std'], True, True),
                 # scheduler.BinaryAnnealing(CONFIG, 20, 0.10, 'cross_threshold'),
-                scheduler.BinaryAnnealing(CONFIG, 5, 0.99, 'pol_reg'),
+                *([scheduler.BinaryAnnealing(CONFIG, 5, 0.99, 'pol_reg')] if POL_REG > 0 else []),   # a scheduler would re-enable pol_reg
                 # scheduler.CosineAnnealing(CONFIG, 15, 0.67, 'loss_reg', True, True, phase=0),
                 # scheduler.CosineAnnealing(CONFIG, 15, 0.50, 'pol_reg', True, True, phase=0),
                 # scheduler.CosineAnnealing(CONFIG, 15, 0.75, 'ent_reg', True, True, phase=0),
@@ -701,7 +748,7 @@ def run():
                      f"mem{MEMORY_SIZE}-delay{DELAY}-type{int(DISCRETE)}-gt{GAME_TYPE}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
             rew_reg=REW_REG, loss_reg=LOSS_REG, val_reg=VAL_REG, pol_reg=POL_REG, ent_reg=ENT_REG,
-            div_reg=DIV_REG, cpy_reg=CPY_REG,
+            div_reg=DIV_REG, cpy_reg=CPY_REG, noise_reg=NOISE_REG, noise_sigma=NOISE_SIGMA, noise_log=NOISE_LOG,
             validate=True, segr_size=None, use_entropy=True, use_critic=False,
             max_episodes=MEMORY_SIZE, max_steps=None,
         )
@@ -710,7 +757,7 @@ def run():
             if "_reg" in name and isinstance(value, (int, float)):
                 print(f"\t{name} => {value:.4f}")
         trainer.set_report_hook(genome_debug)
-        if DIFFERENTIAL and differential_attention_logger is not None:
+        if (DIFFERENTIAL or NOISE_REG > 0 or NOISE_LOG) and differential_attention_logger is not None:
             # Compact stats (leak, beta, fitness correlation); charts are grouped in Tensorboard > Custom Scalars
             trainer.add_log_source('diff_attn', differential_attention_logger(population=True, detail=False))
 
@@ -726,7 +773,8 @@ def run():
         except KeyboardInterrupt:
             pass
 
-    test_best_network()
+    if test:
+        test_best_network()
 
 
 if __name__ == "__main__":

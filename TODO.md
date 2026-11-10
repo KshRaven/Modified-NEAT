@@ -1,27 +1,12 @@
 # TODO
 
-## Population and reproduction
-- Support reproduction between modules with unequal numbers of `NeatModule` instances or incompatible `NeatParameter` counts/shapes.
-- Implement saving and loading of reinforcement-learning algorithms.
-
-## Packaging and release
-- Run `scripts/pypimgr` option **F** locally, then upload to TestPyPI and install from it to confirm the dashboard (`neatboard`) serves `dist` correctly.
-- Resolve the legacy `ModifiedNEAT/cuda/` package: `cuda/mutation.py` imports a missing `ModifiedNEAT.cuda.initialization`, and the directory is not packaged or used. Delete it or complete it.
-- Remove the unused `@supabase/supabase-js` dependency from the dashboard with `bun remove` so the Bun lockfile stays synchronized.
-- Keep `ModifiedNEAT/dashboard/bun.lock` committed so dashboard builds are reproducible.
-- Consider PyPI Trusted Publishing through GitHub Actions instead of API tokens.
-- Consider moving to `pyproject.toml`-only metadata and removing the custom `setup.py` build commands.
-- Complete the CUDA installer TODOs in `install_cuda.py`, including resolving compatible CUDA, PyTorch, CuPy, and numba-cuda versions.
-- Add installation of operating-system dependencies required by CUDA libraries, including C++ build tools and the CUDA Toolkit.
-
-## Dashboard
-- Hide `/api/config` and `/api/info` values that expose the absolute `source_dir` and request host, or require authentication when hosted remotely.
-- Address the arbitrary-code execution risk from pickle loading, for example with a restricted loader or authentication for `neatboard --host`.
-- Fix `dashboard/launch.py` importing `backend.app` so it works outside the dashboard directory, or keep it explicitly as a development helper.
-- Clarify the verbose levels in `cli.py` and `launch.py`, which are still subject to change.
-
-## Tests
-- Categorize the test suite by area and purpose.
-
-## Implemented
-- `Population` initialization accepts a genus count or explicit genus IDs and creates all genomes in one shared module parameter batch. Genus-specific mappings, speciation, reproduction, cropping, and save/load preserve genus identity; population absorption remains available.
+- Run the flappy-bird example with `NOISE_LOG=True, NOISE_REG=0` for the baseline noise level, then `NOISE_REG=0.25`; compare `diff_attn/m*/noise_*`.
+- Attention noise probe measures sensitivity of the maps to input noise; consider a task-grounded variant (mass on tokens that do not change the action).
+- `share_kv` gives exact cache/full-sequence parity but older tokens are never contextualised by later layers; evaluate whether a banded (streaming) variant with full-history evaluation is worth it.
+- ConvSelfAttention / ConvCrossAttention do not have diff_mode / branch_mode / noise probe yet.
+- Examples other than flappy-bird/sequential.py are not wired to the new options.
+- With `SHARE_KV=True` the policy-accuracy pass is skipped (`POL_REG=0`); run it once with `pol_reg>0` as a parity audit (policy_accuracy should stay at 1.0 up to float error).
+- Attention folds extra dims into one batch axis, so a KV cache needs the same extra dims on every call (a change re-initialises it). ConvSelfAttention / ConvCrossAttention still expect their original layout.
+- Notebook: the rendered `test_best_network` is skipped (needs a window); add a headless replay (frames to a GIF) if wanted.
+- Public GitHub copy is behind the working tree (runlytics logger, `GENERA` support); push the tree or use `modified-neat-sync.zip` via `PATCH_ZIP`.
+- `GENERA > 1` in `main.py` calls the shared model once per genus with explicit keys; `sequential.py` makes one call for all genera (needed by the KV cache).

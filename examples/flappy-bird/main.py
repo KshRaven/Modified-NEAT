@@ -220,6 +220,8 @@ CLIP_MIN            = -13
 CLIP_MAX            = +0
 DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
 MODEL_NUM           = 2
+GENERA              = 1   # >1: ONE model shared by this many genera (Population(genera=N), GENOMES per genus); 1: MODEL_NUM separate models
+if GENERA > 1: MODEL_NUM = GENERA   # the same model object is listed once per genus
 
 # Trainer properties
 MEMORY_SIZE         = 5
@@ -259,12 +261,12 @@ def build_models() -> list:
             clip_min=CLIP_MIN, clip_max=CLIP_MAX, distribution=DISTRIBUTION,
             fwd_exp=FWD_EXP, normalize=NORMALIZE, coefficients=COEFFICIENTS
         )
-        for activation in [TEST_ACTIVATION for _ in range(MODEL_NUM)]
+        for activation in [TEST_ACTIVATION for _ in range(1 if GENERA > 1 else MODEL_NUM)]
     ]
 
 GAME_TYPE = 0 if not FULL_STATES else (1 if PIPE_Y_VELOCITY == 0 else 2)
 BASE_NAME: str = (
-    f"GT{GAME_TYPE}_DC{int(DISCRETE)}_T{MODEL_NUM}_"
+    f"GT{GAME_TYPE}_DC{int(DISCRETE)}_T{MODEL_NUM}{f'G{GENERA}' if GENERA > 1 else ''}_"
     f"E{EMBED_SIZE}_L{LAYERS}_C{COEFFICIENTS}_"
     f"A-{TEST_ACTIVATION.__class__.__name__}_B{int(BIAS)}" # fwd_exp
     f"{f'_R-{CLIP_MIN}~{CLIP_MAX}' if PROBABILISTIC else ''}"
@@ -371,7 +373,8 @@ def evaluate(population: neat.Population, **options):
                             split_keys[mi] = list(split_mappings[mi].keys())
                             split_indices[mi] = list(split_mappings[mi].values())
                 else:
-                    split_keys = [None for _ in MODELS]
+                    # a shared model holds every genus' genomes, so it must be told which rows each call is for
+                    split_keys = [list(m.keys()) if GENERA > 1 else None for m in split_mappings]
                     split_indices = [list(m.values()) for m in split_mappings]
 
                 # Get actions and their log-probabilities # NOTE: Dense layers don't need batch dimension
@@ -566,7 +569,8 @@ def load_population(load: str | None) -> None:
     POPULATION.load(FILE_NAME, FILE_DIR, FILE_NO)
 
 
-def run():
+def run(argv: list[str] | None = None, test: bool = True):
+    """argv: CLI args (None = sys.argv); test: run the rendered test of the best genomes after training."""
     global ENV, POPULATION, FILE_NO, INIT_GEN, MODELS, INPUTS, OUTPUTS
 
     parser = argparse.ArgumentParser(description='Run NEAT algorithm on Flappy Bird game')
@@ -576,7 +580,7 @@ def run():
                         help='Load a previously trained model (True for latest, or specify file number)')
     parser.add_argument('--train', type=str, default='true',
                         help='Train the model (True/False or 1/0, default: True)')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     ENV = Game(
         render_mode=args.rm, goal=GOAL, seq_len=None, height=700, width=700,
@@ -589,13 +593,17 @@ def run():
     INPUTS = int(ENV.observation_space.shape[-1])
     OUTPUTS = 2 if DISCRETE else int(ENV.action_space.shape[-1])
     MODELS = build_models()
+    if GENERA > 1: MODELS = MODELS * GENERA   # one shared model, one entry per genus
     print(MODELS[0])
 
     print("\ncreating population")
-    POPULATION = neat.Population(GENOMES, MODELS[0], CONFIG, init_reporter=True)
-    for model in MODELS[1:]:
-        extra_population = neat.Population(GENOMES, model, CONFIG, init_reporter=True)
-        POPULATION.absorb_population(extra_population)
+    if GENERA > 1:     # one model, GENERA genera of GENOMES genomes each
+        POPULATION = neat.Population(GENOMES * GENERA, MODELS[0], CONFIG, init_reporter=True, genera=GENERA)
+    else:
+        POPULATION = neat.Population(GENOMES, MODELS[0], CONFIG, init_reporter=True)
+        for model in MODELS[1:]:
+            extra_population = neat.Population(GENOMES, model, CONFIG, init_reporter=True)
+            POPULATION.absorb_population(extra_population)
     print(POPULATION)
     load_population(args.load)
     INIT_GEN = None             # set by the first evaluate() call
@@ -641,8 +649,9 @@ def run():
         except KeyboardInterrupt:
             pass
 
-    test_best_network()
+    if test:
+        test_best_network()
 
 
 if __name__ == "__main__":
-    run()
+    run()

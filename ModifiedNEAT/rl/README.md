@@ -49,7 +49,7 @@ For a one-off write, use `trainer.log_now(custom={"score": score})`; this writes
 Start TensorBoard with the parent directory containing your run folders:
 
 ```bash
-tensorboard --logdir runs/
+runlytics --logdir runs/
 ```
 
 Open the local URL printed by TensorBoard (usually `http://localhost:6006`). If using the default trainer path, set `--logdir storage/neat_rl_logs/` instead.

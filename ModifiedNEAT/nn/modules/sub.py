@@ -40,6 +40,7 @@ __all__ = [
     'RoPE',
     'Repositioning',
     'AttentionLambda',
+    'BranchGain',
     'Attention',
     'ConvSelfAttention',
     'ConvCrossAttention',
@@ -560,7 +561,7 @@ class Repositioning(NeatModule):
     def __init__(
             self, max_seq_len: int, embed_size: int, layer_idx: int = None, bias: bool = True,
             rope: RoPE | None = None, device: DEVICE = 'cpu', dtype: DTYPE = torch.float32,
-            coefficients: int = 1, **options
+            coefficients: int = 1, exact: bool = False, **options
     ):
         # TODO: Is the the normalization even necessary. I don't think encoded tensors could have considerable
         #       value ranges beyond what is returned from QKV projection. The hope should just be that the 
@@ -572,6 +573,9 @@ class Repositioning(NeatModule):
         self.embed_size  = embed_size
         self.coefficients = coefficients
         self.layer_idx   = layer_idx if layer_idx is not None else 1
+        # exact: the cached tensors are a pure function of ONE token (no cross-token mixing), so a shift is only a RoPE
+        #        re-rotation (keys) / identity (values): nothing to learn, no learned parameters are built.
+        self.exact       = bool(exact)
         self.bias        = bias
         self.rope        = rope
         self.epsilon     = manage_params(options, ['eps', 'epsilon'], 1e-9)
@@ -579,11 +583,12 @@ class Repositioning(NeatModule):
         self.device      = device
         self.dtype       = dtype
 
-        self.embedder   = Embedding(max_seq_len, embed_size, None, device, dtype)
-        self.norm       = RMSNorm(embed_size, self.epsilon, self.affine, device, dtype)
-        # coefficients > 1: Polynomial converter (only used by the learned path: layer_idx > 0, or no RoPE)
-        self.converter  = Linear(embed_size, embed_size, bias, device, dtype) if coefficients <= 1 else \
-            Polynomial(embed_size, embed_size, coefficients, bias, device, dtype)
+        if not self.exact:
+            self.embedder   = Embedding(max_seq_len, embed_size, None, device, dtype)
+            self.norm       = RMSNorm(embed_size, self.epsilon, self.affine, device, dtype)
+            # coefficients > 1: Polynomial converter (only used by the learned path: layer_idx > 0, or no RoPE)
+            self.converter  = Linear(embed_size, embed_size, bias, device, dtype) if coefficients <= 1 else \
+                Polynomial(embed_size, embed_size, coefficients, bias, device, dtype)
 
 
     def forward(self, tensor: Tensor, offset: int, keys: int | Iterable[int] = None, verbose: int = None):
@@ -596,11 +601,11 @@ class Repositioning(NeatModule):
         """
         if tensor.numel() == 0 or offset == 0: # No need for model to learn to guess the same values
             return tensor
-        if self.layer_idx == 0 and self.rope is None:
+        if (self.layer_idx == 0 or self.exact) and self.rope is None:
             # Layer-0 values carry no RoPE and no positional info, so a shift leaves them unchanged (exact)
             return tensor
 
-        if self.layer_idx == 0 and self.rope is not None:
+        if (self.layer_idx == 0 or self.exact) and self.rope is not None:
             # NOTE: This assumes input is most probably idx(1:max_seq_len-1) being shifted to idx(0:max_seq_len-2)
             #       that was being cached somewhere
             # TODO: Decode RoPE then get the next ascending positions' encoding
@@ -800,9 +805,39 @@ class AttentionLambda(NeatModule):
         return scalars.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
 
 
+class BranchGain(NeatModule):
+    """
+    'Tied' differential branches: every extra branch is the SAME q/k projection as branch 0 with its own per-head-dim
+    multiplicative gain, ``g = exp(strength * tanh(s))`` in [exp(-strength), exp(strength)] (saturation-safe).
+
+    Why: with independent q/k projections per branch nothing makes the branches share a component, so there is no
+    'common mode' to reject; noise entering the input hits all branches identically only when they share a projection.
+    Here it does by construction, and the extra parameters are tiny vectors (heads * branches * head_dim) that NEAT mutates well.
+
+    forward: (genomes, batch, seq, heads, head_dim) -> (genomes, batch, seq, heads, (1 + branches) * head_dim)
+    """
+
+    def __init__(self, heads: int, head_dim: int, branches: int, strength: float = 0.7,
+                 device: DEVICE = 'cpu', dtype: DTYPE = torch.float32):
+        super().__init__(heads=heads, head_dim=head_dim, branches=branches)
+        self.heads, self.head_dim, self.branches, self.strength = heads, head_dim, branches, strength
+        self.scalars = NeatParameter((heads, branches, head_dim), requires_grad=False, device=device, dtype=dtype)
+        for param in self.neat_parameters(recurse=False):
+            with torch.no_grad():
+                param.data.normal_(0.0, 0.5)
+
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None):
+        gain = torch.exp(self.strength * torch.tanh(self.scalars[keys]))      # (genomes, heads, branches, head_dim)
+        gain = gain.unsqueeze(1).unsqueeze(1)                                  # (genomes, 1, 1, heads, branches, head_dim)
+        base = tensor.unsqueeze(-2)                                            # (g, b, s, heads, 1, head_dim)
+        out  = torch.cat([base, base * gain], dim=-2)                          # (g, b, s, heads, 1 + branches, head_dim)
+        return out.reshape(*tensor.shape[:-1], (1 + self.branches) * self.head_dim)
+
+
 class Attention(NeatModule):
     """
     Multi-head (grouped-query) self-attention with:
+      - Arbitrary extra dims: (genomes, *extra_dims, seq_len, dim)
       - RoPE positional embeddings
       - Optional differential attention (λ-weighted multi-head combination)
       - Optional KV-cache with dequeue-based overflow handling
@@ -840,11 +875,22 @@ class Attention(NeatModule):
         outputs: int        = manage_params(options, 'outputs', None)
         self.repo_enabled   = manage_params(options, 'reposition', True)
         self.lambda_mode    = manage_params(options, 'lambda_mode', 'simplex')   # 'simplex' | 'legacy'
+        # diff_mode 'energy': e_0 + sum(l_k e_k) BEFORE the softmax. NOTE: with free branch projections this is algebraically
+        #   one ordinary attention with a (1+L)x wider head (beta/lambda are absorbed by the k weights): only extra parameters.
+        # diff_mode 'softmax': softmax(e_0) + sum(l_k softmax(e_k)), l_k < 0 (paper form). Cannot be written as one softmax
+        #   (signed weights, cancels the diffuse background of the maps), so it is a functional difference.
+        self.diff_mode      = manage_params(options, 'diff_mode', 'energy')
+        # branch_mode 'free': independent q/k projection per branch | 'tied': one projection + BranchGain per branch
+        self.branch_mode    = manage_params(options, 'branch_mode', 'free')
+        # kv_exact: K/V of a cached token depend on that token alone (see TransformerBase share_kv): shifts are exact
+        self.kv_exact       = manage_params(options, ['kv_exact', 'exact_cache'], False)
         self.qk_norm        = manage_params(options, 'qk_norm', False)           # RMS-normalise q/k per branch before RoPE
         self.branch_rope    = manage_params(options, 'branch_rope', True)        # rotate every differential branch with the SAME frequencies
         self.proj_coeffs    = int(manage_params(options, ['proj_coeffs', 'coefficients'], 1))   # >1: Polynomial instead of Linear
         self.poly_projs     = manage_params(options, 'poly_projs', 'qkvo')       # which projections: letters of q, k, v, o
         self.repo_coeffs    = int(manage_params(options, 'repo_coeffs', self.proj_coeffs))      # >1: Polynomial in the cache Repositioning converters
+        if self.diff_mode not in ('energy', 'softmax') or self.branch_mode not in ('free', 'tied'):
+            raise ValueError(f"diff_mode must be 'energy'|'softmax' and branch_mode 'free'|'tied', got '{self.diff_mode}'/'{self.branch_mode}'")
         if self.proj_coeffs < 1 or self.repo_coeffs < 1:
             raise ValueError(f"proj_coeffs/repo_coeffs must be >= 1, got {self.proj_coeffs}/{self.repo_coeffs}")
 
@@ -861,9 +907,15 @@ class Attention(NeatModule):
         self.mult              = 1 if not differential else 1 + int(differential)
         self.att_coeff_num     = None if not differential else 1 + int(differential)
         self.att_coeff_indices = None if not differential else torch.arange(differential, device=device) + 1
+        self.tied              = bool(differential) and self.branch_mode == 'tied'
+        self.proj_mult         = 1 if self.tied else self.mult   # q/k projection width multiplier (tied: expanded after)
         self.layer_idx = 0 if layer_idx is None else layer_idx
         self.device = device
         self.dtype  = dtype
+        # noise probe (see set_noise_probe)
+        self.probe_sigma = 0.0
+        self.noise_sink = None
+        self._probing = False
 
         # ---- sub-modules ---------------------------------------------------
         in_dim  = dim_size if inputs  is None else inputs
@@ -872,8 +924,8 @@ class Attention(NeatModule):
         # self.pre_norm = RMSNorm(dim_size, self.epsilon, self.affine, device, dtype) if self.normalize else None
         self.pre_norm = LayerNorm(dim_size, self.epsilon, self.affine, bias, device, dtype) if self.normalize else None
 
-        self.query_proj = self._projection('q', in_dim, heads * self.head_dim * self.mult, bias, device, dtype)
-        self.key_proj   = self._projection('k', in_dim, kv_heads * self.head_dim * self.mult, bias, device, dtype)
+        self.query_proj = self._projection('q', in_dim, heads * self.head_dim * self.proj_mult, bias, device, dtype)
+        self.key_proj   = self._projection('k', in_dim, kv_heads * self.head_dim * self.proj_mult, bias, device, dtype)
         self.value_proj = self._projection('v', in_dim, kv_heads * self.head_dim, bias, device, dtype)
         self.out_proj   = self._projection('o', dim_size, out_dim, bias, device, dtype)
 
@@ -888,15 +940,17 @@ class Attention(NeatModule):
             heads, self.head_dim, layer_idx, differential, 0.0, 0.1, 2.0, True, self.epsilon, 
             mode=self.lambda_mode, device=device, dtype=dtype,
         ) if differential else None
+        self.gain_q = BranchGain(heads, self.head_dim, differential, device=device, dtype=dtype) if self.tied else None
+        self.gain_k = BranchGain(kv_heads, self.head_dim, differential, device=device, dtype=dtype) if self.tied else None
 
         # Repositioning helpers for KV-cache dequeue. Keys are RoPE-rotated, values are not.
         self.repo_k = Repositioning(
             max_seq_len, self.head_dim * self.mult, self.layer_idx, bias, self.rotary_embedding, device, dtype,
-            coefficients=self.repo_coeffs, **options
+            coefficients=self.repo_coeffs, exact=self.kv_exact, **options
         ) if self.cache else None
         self.repo_v = Repositioning(
             max_seq_len, self.head_dim, self.layer_idx, bias, None, device, dtype,
-            coefficients=self.repo_coeffs, **options
+            coefficients=self.repo_coeffs, exact=self.kv_exact, **options
         ) if self.cache else None
 
         # ---- KV-cache state ------------------------------------------------
@@ -997,6 +1051,30 @@ class Attention(NeatModule):
     # GQA helper
     # ------------------------------------------------------------------
 
+    def set_noise_probe(self, sigma: float = 0.0, sink=None):
+        """
+        Attention-noise probe for full-sequence passes: with ``sigma > 0`` every (uncached) forward also runs once on an
+        input perturbed by ``sigma * token_std * N(0, 1)`` and reports ``sink(keys, noise, batch)`` where ``noise`` is
+        (genomes,): mean total-variation distance 0.5 * sum_k |scores - scores_noisy| of the attention maps.
+        0 = the maps ignore the perturbation, larger = noise moves the attention. Works for plain and differential
+        attention alike, so 'does differential attention reduce noise' is a direct comparison.
+        """
+        self.probe_sigma = float(sigma)
+        self.noise_sink = sink if sigma > 0 else None
+
+    @torch.no_grad()
+    def _probe(self, tensor: Tensor, prompt: Tensor | None, keys, pos_idx: int, scores: Tensor):
+        self._probing = True
+        try:
+            sigma = self.probe_sigma
+            noisy = tensor + sigma * tensor.std(-1, keepdim=True) * torch.randn_like(tensor)
+            nprompt = None if prompt is None else prompt + sigma * prompt.std(-1, keepdim=True) * torch.randn_like(prompt)
+            _, noisy_scores = self.forward(noisy, keys=keys, prompt=nprompt, pos_idx=pos_idx, get=True)
+        finally:
+            self._probing = False
+        tv = 0.5 * (scores - noisy_scores).abs().sum(-1)            # (g, b, h, q)
+        self.noise_sink(keys, tv.mean(dim=(1, 2, 3)).float(), tensor.shape[1])
+
     def _projection(self, tag: str, inputs: int, outputs: int, bias: bool, device, dtype):
         """Linear, or Polynomial(proj_coeffs) for the projections listed in poly_projs.
         Polynomial(1 coefficient) is exactly a Linear layer, so proj_coeffs=1 keeps Linear."""
@@ -1062,17 +1140,18 @@ class Attention(NeatModule):
         if verbose:
             print(get_tensor_info(energy, 'Energy', verbose))
 
+        softmax_diff = bool(self.differential) and self.diff_mode == 'softmax'
         if self.differential:
             lambdas: Tensor = self.diff_lambda(keys)
             if verbose and verbose >= 2:
                 print(get_tensor_info(torch.round(lambdas, decimals=4), 'Lambdas', verbose+2))
                 print(get_tensor_info(self.att_coeff_indices, 'Coeff Indices', verbose+2))
-            # Index '-3' is the lambdas' coefficients dimension
-            # Collapse the coefficient dimension: (g, b, h, c, q, k) -> (g, b, h, q, k)
-            # energy = self.softmax(energy) #  / math.sqrt(self.head_dim))
-            energy = torch.select(energy, dim=-3, index=0) + torch.sum(
-                torch.index_select(energy, dim=-3, index=self.att_coeff_indices) * lambdas, dim=-3
-            )
+            if not softmax_diff:
+                # Index '-3' is the lambdas' coefficients dimension
+                # Collapse the coefficient dimension: (g, b, h, c, q, k) -> (g, b, h, q, k)
+                energy = torch.select(energy, dim=-3, index=0) + torch.sum(
+                    torch.index_select(energy, dim=-3, index=self.att_coeff_indices) * lambdas, dim=-3
+                )
 
         if mask:
             q_len, k_len = energy.shape[-2:]
@@ -1087,6 +1166,11 @@ class Attention(NeatModule):
 
         # Get the softmax of the energy: scores is always (g, b, h, q, k) at this point
         scores = self.softmax(energy / math.sqrt(self.head_dim))
+        if softmax_diff:
+            # scores (g, b, h, c, q, k): one map per branch -> map_0 + sum_k lambda_k * map_k  (lambda_k <= 0)
+            scores = torch.select(scores, dim=-3, index=0) + torch.sum(
+                torch.index_select(scores, dim=-3, index=self.att_coeff_indices) * lambdas, dim=-3
+            )
         if verbose:
             print(get_tensor_info(torch.round(scores, decimals=4), 'Attention Score', verbose))
 
@@ -1110,6 +1194,30 @@ class Attention(NeatModule):
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, prompt: Tensor = None,
                 pos_idx: int | None = 0, verbose: int = None, get: bool = False):
         """
+        Accepts (genomes, *extra_dims, seq_len, dim) for any number of extra dims (batch, processes, ...): attention only
+        mixes along seq_len, so every extra dim is an independent batch. They are folded into one batch axis for the
+        computation (and for the KV cache, which therefore needs the same extra dims on every call) and restored on the
+        output. `prompt` must carry the same extra dims. With ``get`` the returned scores are
+        (genomes, *extra_dims, heads, q_len, k_len).
+        """
+        if tensor.ndim < 4:
+            raise ValueError(f"Attention expects (genomes, *extra_dims, seq_len, dim) with at least one extra dim, got {tuple(tensor.shape)}")
+        if tensor.ndim == 4:
+            return self._forward(tensor, keys, prompt, pos_idx, verbose, get)
+        g, extra = tensor.shape[0], tuple(tensor.shape[1:-2])
+        if prompt is not None:
+            if tuple(prompt.shape[:-2]) != (g, *extra):
+                raise ValueError(f"prompt dims {tuple(prompt.shape[:-2])} must match the input's leading dims {(g, *extra)}")
+            prompt = prompt.reshape(g, -1, *prompt.shape[-2:])
+        out = self._forward(tensor.reshape(g, -1, *tensor.shape[-2:]), keys, prompt, pos_idx, verbose, get)
+        if get:
+            out, scores = out
+            return out.reshape(g, *extra, *out.shape[-2:]), scores.reshape(g, *extra, *scores.shape[2:])
+        return out.reshape(g, *extra, *out.shape[-2:])
+
+    def _forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, prompt: Tensor = None,
+                 pos_idx: int | None = 0, verbose: int = None, get: bool = False):
+        """
         tensor:  (genomes, batch, seq_len, dim)  -> supplies K and V (and Q unless `prompt` is given)
         prompt:  optional (genomes, batch, q_len, dim) with q_len <= seq_len; they are the LAST q_len queries
         pos_idx: absolute position of the first query token (negative = relative to seq_len).
@@ -1119,6 +1227,7 @@ class Attention(NeatModule):
         if self.auto_single and prompt is None:
             prompt = tensor.select(-2, -1).unsqueeze(-2)
         seq_len = tensor.shape[-2]
+        raw_tensor, raw_prompt = tensor, prompt
         if pos_idx is None:
             pos_idx = 0
         elif pos_idx < 0:
@@ -1150,9 +1259,11 @@ class Attention(NeatModule):
 
         # Reshape Q, K, V for each rep head
         g, b, q_len, _ = query.shape
-        query   = query.view(g, b, q_len, self.heads, self.head_dim*self.mult)
-        key     = key.view(g, b, -1, self.kv_heads, self.head_dim*self.mult)
+        query   = query.view(g, b, q_len, self.heads, self.head_dim*self.proj_mult)
+        key     = key.view(g, b, -1, self.kv_heads, self.head_dim*self.proj_mult)
         value   = value.view(g, b, -1, self.kv_heads, self.head_dim)
+        if self.tied:   # one projection, (1 + L) gain-scaled branches -> (.., head_dim * mult)
+            query, key = self.gain_q(query, keys), self.gain_k(key, keys)
         if verbose:
             print(get_tensor_info(query, 'Q after Reshaping', verbose))
             print(get_tensor_info(key, 'K after Reshaping', verbose))
@@ -1210,6 +1321,9 @@ class Attention(NeatModule):
             tensor = tensor + residue
         if verbose:
             print(get_tensor_info(tensor, 'Output Projection', verbose))
+
+        if self.probe_sigma > 0 and self.noise_sink is not None and not self._probing and not use_cache:
+            self._probe(raw_tensor, raw_prompt, keys, pos_idx, attention_scores)
 
         # Store attention for debugging
         return tensor if not get else (tensor, attention_scores)
@@ -1905,9 +2019,16 @@ class TransformerBase(NeatModule):
         self.differential   = differential
         self.dropout        = manage_params(options, 'dropout', 0)
         self.auto_single    = manage_params(options, 'auto_single', False)
+        # share_kv: every layer attends to K/V projected from the INPUT tokens (a shared, per-token memory) and only the
+        # newest token's state flows through the layers (it re-reads the memory once per layer). A cached K/V is then a
+        # pure function of one token, so deque + RoPE re-rotation is EXACT: the cached rollout and the full-sequence
+        # pass give the same output by construction, with no repositioning to learn and no policy-accuracy term needed.
+        self.share_kv       = bool(manage_params(options, ['share_kv', 'memory_kv'], False))
 
         # BUILD
         options['auto_single'] = False # NOTE: Disables the auto-single directly used in the Attention module
+        if self.share_kv:
+            options['kv_exact'] = True
         self.layers: list[TransformerBlock] = nn.ModuleList()
         for layer_idx in range(layers):
             # if layer_idx == layers-1:
@@ -1935,6 +2056,18 @@ class TransformerBase(NeatModule):
         elif ndim == 3: # No batch or sequence dim (assume sequence is missing)
             rem_seq = True
             tensor = tensor.unsqueeze(2)
+        if self.share_kv:
+            # memory = the (embedded) input tokens; state = newest token, (genomes, batch, 1, dim). `prompt` is ignored.
+            memory = tensor
+            tensor = torch.select(memory, -2, -1).unsqueeze(-2)
+            for layer in self.layers:
+                tensor = layer(memory, keys=keys, prompt=tensor, context=context,
+                               pos_idx=memory.shape[-2] - 1, verbose=verbose, get=get)
+            if rem_seq:
+                tensor = tensor.squeeze(2)
+            if rem_batch:
+                tensor = tensor.squeeze(1)
+            return tensor
         # Pass through the encoder blocks
         for layer_idx, layer in enumerate(self.layers):
             # Single mode is only when on final layer and instance (seq_len=1) output is required
@@ -1945,7 +2078,7 @@ class TransformerBase(NeatModule):
             )
             # shape (genomes, batch_size, seq_len, dim_size)
             if single_fetch:
-                assert tensor.ndim == 4
+                assert tensor.ndim >= 4, f"expected (genomes, *extra_dims, seq_len, dim), got {tuple(tensor.shape)}"
                 # Using last token index in sequence to get the next token
                 # shape (genomes, batch_size, seq_len, dim_size)
                 set_prompt = torch.select(tensor, -2, -1).unsqueeze(-2)

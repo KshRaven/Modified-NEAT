@@ -58,8 +58,8 @@ class PPO(Algorithm):
         :keyword validate: Whether to restrict training to genomes not flagged for deletion (default False).
         :keyword max_steps: Maximum steps kept in the secondary buffer (default 1024).
         :keyword max_episodes: Maximum episodes kept in the secondary buffer (default None).
-        :keyword log_dir: Directory tensorboard logs are written under.
-        :keyword log_name: Name of this run's tensorboard log.
+        :keyword log_dir: Directory logs are written under.
+        :keyword log_name: Name of this run's log.
         """
         for var in ['schedulers', 'device', 'dtype']:
             if var in options:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from contextlib import nullcontext
 from typing import Iterable, Union
 
 import numpy as np
@@ -64,8 +65,8 @@ class PPO(Algorithm):
         :keyword max_episodes: Maximum episodes kept in the secondary buffer (default None).
         :keyword batching: ``'genome'`` (genomes one by one, ``batch_size`` records per batch) or ``'record'`` (all
             genomes of a genus at once, ``record_batch_size`` records per batch, default 1).
-        :keyword log_dir: Directory tensorboard logs are written under.
-        :keyword log_name: Name of this run's tensorboard log.
+        :keyword log_dir: Directory logs are written under.
+        :keyword log_name: Name of this run's log.
         """
         for var in ['schedulers', 'device', 'dtype']:
             if var in options:
@@ -86,6 +87,13 @@ class PPO(Algorithm):
         self.val_reg: float     = manage_params(options, 'val_reg', 0.0)
         self.pol_reg: float     = manage_params(options, 'pol_reg', 0.33)
         self.ent_reg: float     = manage_params(options, 'ent_reg', 1.0)
+        # Attention-noise pressure (plain and differential attention alike; no backprop):
+        #   noise_reg weight of (1 - normalized attention noise) in the fitness (0 = off), noise_sigma = probe size,
+        #   noise_log = measure/log it even when noise_reg == 0 (baseline comparisons). See Attention.set_noise_probe.
+        self.noise_reg: float   = manage_params(options, 'noise_reg', 0.0)
+        self.noise_sigma: float = manage_params(options, 'noise_sigma', 0.1)
+        self.noise_log: bool    = manage_params(options, 'noise_log', False)
+        self.attention_noise: dict[int, float] = {}
         self.div_reg: float     = manage_params(options, 'div_reg', 0.01)
         self.use_entropy: bool  = manage_params(options, 'use_entropy', True)
         self.use_critic: bool   = manage_params(options, 'use_critic', use_critic)
@@ -138,12 +146,13 @@ class PPO(Algorithm):
 
     @staticmethod
     def _clean(metrics: dict) -> dict:
-        """Drops NaN metrics so they do not clutter tensorboard / the terminal."""
+        """Drops NaN metrics so they do not clutter the dashboard / the terminal."""
         return {k: v for k, v in metrics.items()
                 if not (isinstance(v, (float, np.floating)) and np.isnan(v))}
 
     def set_scores(self, returns: dict[int, float], policy_loss: dict[int, float], std: dict[int, float] | None = None,
-                   mean: dict[int, float] | None = None, value_loss: dict[int, float] | None = None):
+                   mean: dict[int, float] | None = None, value_loss: dict[int, float] | None = None,
+                   noise: dict[int, float] | None = None):
         """
         Normalizes and combines each genome's return and (inverted) policy loss into a final fitness.
         No accuracy-threshold term is used here (unlike NEAT): the mean and std-dev that would normally
@@ -176,6 +185,11 @@ class PPO(Algorithm):
         if use_value:
             assert value_loss is not None and all(key in value_loss for key in returns.keys())
 
+        use_noise = self.noise_reg > 0. and bool(noise)
+        if use_noise:   # genomes the probe did not reach get the mean noise (neutral)
+            fill = float(np.mean(list(noise.values())))
+            noise = {k: noise.get(k, fill) for k in returns.keys()}
+        norm_noise = {k: 1 - v for k, v in self.normalize_array(noise, genus_separated=True).items()} if use_noise else None
         norm_returns = self.normalize_array(returns, genus_separated=True)
         # Policy loss is minimized, so its normalized value is inverted before being combined additively
         norm_loss = {k: 1 - v for k, v in self.normalize_array(policy_loss, genus_separated=True).items()} if use_loss else None
@@ -192,12 +206,14 @@ class PPO(Algorithm):
                      + (self.ent_reg * norm_std[key] if use_std else 0.0)
                      + (self.pol_reg * norm_mean[key] if use_mean else 0.0)
                      + (self.val_reg * norm_value[key] if use_value else 0.0)
+                     + (self.noise_reg * norm_noise[key] if use_noise else 0.0)
                 for key in returns.keys()
             }.items(),
             key=sort_key, reverse=True
         ))
 
         global_norm_returns = self.normalize_array(returns)
+        global_norm_noise = {k: 1 - v for k, v in self.normalize_array(noise).items()} if use_noise else None
         global_norm_loss  = {k: 1 - v for k, v in self.normalize_array(policy_loss).items()} if use_loss else None
         global_norm_std   = {k: 1 - v for k, v in self.normalize_array(std).items()} if use_std else None
         global_norm_mean  = {k: 1 - v for k, v in self.normalize_array(mean).items()} if use_mean else None
@@ -208,6 +224,7 @@ class PPO(Algorithm):
                      + (self.ent_reg * global_norm_std[key] if use_std else 0.0)
                      + (self.pol_reg * global_norm_mean[key] if use_mean else 0.0)
                      + (self.val_reg * global_norm_value[key] if use_value else 0.0)
+                     + (self.noise_reg * global_norm_noise[key] if use_noise else 0.0)
                 for key in returns.keys()
             }.items(),
             key=sort_key, reverse=True
@@ -310,15 +327,21 @@ class PPO(Algorithm):
             need_std = use_ent and not self.use_entropy
             zeros = np.zeros((G, prim.max_size()), np.float64)
             ppo_rec = sq_rec = ent_rec = zeros
+            measure_noise = self.noise_reg > 0 or self.noise_log
             if need_eval:
-                new_log_prob, entropy = self.forward_pass(
-                    'evaluate_action', ['state', 'action'], valid_keys, strict=True
-                )[:2]
+                # the full-sequence pass also carries the attention-noise probe (no extra pass)
+                with (self.noise_probe(valid_keys) if measure_noise else nullcontext()):
+                    new_log_prob, entropy = self.forward_pass(
+                        'evaluate_action', ['state', 'action'], valid_keys, strict=True
+                    )[:2]
                 ppo_rec, sq_rec, ent_rec = self.ops.ppo_terms(
                     new_log_prob, prim.data['log_prob'], advantages, entropy, lengths, rows
                 )
                 if not np.isfinite(ppo_rec[rows]).all():
                     raise ValueError(f"found NaN/Inf in PPO loss")
+            elif measure_noise:
+                with self.noise_probe(valid_keys):
+                    self.forward_pass('get_policy', ['state'], valid_keys)
             if need_std:  # std-dev from the module instead of the entropy
                 std_out = self.forward_pass('get_std', ['state'], valid_keys, strict=True)[0]
                 ent_rec = -self.ops.record_mean(std_out, lengths, rows)
@@ -404,7 +427,8 @@ class PPO(Algorithm):
 
             # Calculate and set scores
             best_genome_key, fitness_stats = self.set_scores(
-                returns_score, loss_score, pol_std_score, pol_mean_score, value_loss_score
+                returns_score, loss_score, pol_std_score, pol_mean_score, value_loss_score,
+                self.attention_noise if self.noise_reg > 0 else None
             )
             ts = self._tick(verbose, "set scores", ts)
 

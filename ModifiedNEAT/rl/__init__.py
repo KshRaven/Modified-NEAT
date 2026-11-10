@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from . import base, functional, neat, ppo, replay
-from .base import Algorithm, TensorboardLogger, TerminalReporter
+from .base import Algorithm, RunlyticsLogger, TensorboardLogger, TerminalReporter
 from .functional import CpuRLBackend, CudaRLBackend, EpisodeRuns, get_rl_backend
 from .neat import NEAT, Ghost
 from .ppo import PPO
@@ -13,7 +13,7 @@ __all__ = [
     # algorithms
     'Algorithm', 'NEAT', 'Ghost', 'PPO',
     # logging
-    'TensorboardLogger', 'TerminalReporter',
+    'RunlyticsLogger', 'TensorboardLogger', 'TerminalReporter',
     # buffers
     'ReplayBuffer', 'RolloutBuffer', 'LogBuffer', 'read_replay', 'write_replay',
     # backend

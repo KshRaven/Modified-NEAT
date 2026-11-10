@@ -9,7 +9,6 @@ import torch
 from numba import njit
 from numpy import ndarray
 from torch import Tensor
-from torch.utils.tensorboard import SummaryWriter
 
 from ModifiedNEAT.nn.base import Model, NeatModule
 from ModifiedNEAT.optim.scheduler import Scheduler
@@ -21,56 +20,14 @@ from ModifiedNEAT.util.fancy_text import CM, Fore
 from ModifiedNEAT.util.qol import manage_params
 from ModifiedNEAT.util.replay import ReplayBuffer
 
+from ..logger import RunlyticsLogger, SummaryWriter, TensorboardLogger
+
 
 class NEATAlgoWarning(Warning):
     pass
 
 
 TensorDict = dict[int, Tensor]
-
-
-class TensorboardLogger:
-    """
-    Groups scalars into named sections (eg. ``rollout``, ``policy``) and writes them all to a single
-    Tensorboard ``SummaryWriter`` in one call, so algorithms build a plain dict per section instead of
-    repeating ``writer.add_scalar(...)`` for every metric.
-    """
-
-    def __init__(self, log_path: str):
-        """
-        :param log_path: Directory ``SummaryWriter`` will write its event files to.
-        """
-        self.log_path = log_path
-        self.writer: SummaryWriter | None = None
-
-    def init(self):
-        """Creates the underlying ``SummaryWriter`` the first time it's needed, and returns it."""
-        if self.writer is None:
-            self.writer = SummaryWriter(self.log_path)
-        return self.writer
-
-    def log(self, step: int, **sections: dict[str, Any]):
-        """
-        Writes every scalar of every section under ``'<section>/<name>'``.
-
-        :param step: Shared x-axis step used for every scalar logged this call.
-        :param sections: One kwarg per section (eg. ``rollout={'ep_len_mean': 12.0}``). A ``None``
-            value for a scalar or an empty/``None`` section is skipped, so optional metrics (eg. only
-            present for some algorithms) can be passed unconditionally.
-        """
-        self.init()
-        for section, scalars in sections.items():
-            if not scalars:
-                continue
-            for name, value in scalars.items():
-                if value is None:
-                    continue
-                self.writer.add_scalar(f"{section}/{name}", value, step)
-
-    def flush(self):
-        """Flushes any buffered events to disk."""
-        if self.writer is not None:
-            self.writer.flush()
 
 
 class TerminalReporter:
@@ -155,7 +112,7 @@ class Algorithm(object):
         self.episode_mapping: dict[int, int] = {}
         self.episode_lengths: dict[int, int] = {}
         self._global_mean = self._global_std = self._global_min = self._global_max = None
-        # ------------------------------ Tensorboard logging ------------------------------ #
+        # ------------------------------ Runlytics logging ------------------------------ #
         from ModifiedNEAT.util.storage import STORAGE_DIR
 
         self.log_dir: str = manage_params(options, ['log_dir', 'log_directory'], STORAGE_DIR+f"neat_rl_logs/{self.__class__.__name__}/")
@@ -163,7 +120,7 @@ class Algorithm(object):
         self.log_name: str = manage_params(options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
         self.log_path: str = self.log_dir+self.log_sub_dir+self.log_name
         self.writer: SummaryWriter | None = None
-        self.tb: TensorboardLogger = TensorboardLogger(self.log_path)
+        self.tb: RunlyticsLogger = RunlyticsLogger(self.log_path)
         self.reporter: TerminalReporter = TerminalReporter()
         self._report_hook: Callable = None
         # ------------------------------ Scheduling ------------------------------ #
@@ -189,7 +146,7 @@ class Algorithm(object):
             scheduler.bind(self)
 
     def _init_writer(self):
-        """Lazily creates the Tensorboard writer. Kept for backwards compatibility; prefer ``self.tb``."""
+        """Lazily creates the runlytics writer. Kept for backwards compatibility; prefer ``self.tb``."""
         if self.writer is None:
             self.writer = self.tb.init()
 

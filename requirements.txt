@@ -5,9 +5,9 @@
 #   python setup.py develop
 numpy
 numba
-matplotlib
-tensorboard
 torch
+matplotlib
+runlytics
 gymnasium
 pygame-ce>=2.5.8
 colorama

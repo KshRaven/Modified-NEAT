@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections import defaultdict
+from contextlib import contextmanager
 from itertools import count
 from typing import Any, Callable, Iterable, Union
 
@@ -9,7 +11,6 @@ import numpy as np
 import torch
 from numpy import ndarray
 from torch import Tensor
-from torch.utils.tensorboard import SummaryWriter
 
 from ModifiedNEAT.nn.base import Model, NeatModule
 from ModifiedNEAT.optim.scheduler import Scheduler
@@ -19,9 +20,10 @@ from ModifiedNEAT.util.fancy_text import CM, Fore
 from ModifiedNEAT.util.qol import manage_params
 
 from .functional import EpisodeRuns, get_rl_backend
+from .logger import RunlyticsLogger, SummaryWriter, TensorboardLogger, _scalar
 from .replay import LogBuffer, RolloutBuffer
 
-__all__ = ['Algorithm', 'NEATAlgoWarning', 'TensorDict', 'TensorboardLogger', 'TerminalReporter']
+__all__ = ['Algorithm', 'NEATAlgoWarning', 'TensorDict', 'RunlyticsLogger', 'TensorboardLogger', 'TerminalReporter']
 
 
 class NEATAlgoWarning(Warning):
@@ -30,73 +32,6 @@ class NEATAlgoWarning(Warning):
 
 # Kept for imports of the former Torch based API; the trainers now work on arrays shaped (genomes, records, *features)
 TensorDict = dict[int, Tensor]
-
-
-def _scalar(value):
-    """Converts Tensor / numpy / python numbers to something SummaryWriter.add_scalar accepts."""
-    if isinstance(value, Tensor):
-        value = value.detach().cpu()
-        return value.item() if value.numel() == 1 else value.numpy()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, bool):
-        return int(value)
-    return value
-
-
-class TensorboardLogger:
-    """
-    Groups scalars into named sections (eg. ``rollout``, ``policy``) and writes them all to a single
-    Tensorboard ``SummaryWriter`` in one call, so algorithms build a plain dict per section instead of
-    repeating ``writer.add_scalar(...)`` for every metric.
-
-    Values that are arrays with more than one element are written as histograms instead of scalars, and ``call`` gives
-    raw access to any other ``SummaryWriter`` method (text, images, figures, hparams ...).
-    """
-
-    def __init__(self, log_path: str):
-        """
-        :param log_path: Directory ``SummaryWriter`` will write its event files to.
-        """
-        self.log_path = log_path
-        self.writer: SummaryWriter | None = None
-
-    def init(self):
-        """Creates the underlying ``SummaryWriter`` the first time it's needed, and returns it."""
-        if self.writer is None:
-            self.writer = SummaryWriter(self.log_path)
-        return self.writer
-
-    def log(self, step: int, **sections: dict[str, Any]):
-        """
-        Writes every scalar of every section under ``'<section>/<name>'``.
-
-        :param step: Shared x-axis step used for every scalar logged this call.
-        :param sections: One kwarg per section (eg. ``rollout={'ep_len_mean': 12.0}``). A ``None``
-            value for a scalar or an empty/``None`` section is skipped, so optional metrics (eg. only
-            present for some algorithms) can be passed unconditionally.
-        """
-        self.init()
-        for section, scalars in sections.items():
-            if not scalars:
-                continue
-            for name, value in scalars.items():
-                if value is None:
-                    continue
-                value = _scalar(value)
-                if isinstance(value, np.ndarray):
-                    self.writer.add_histogram(f"{section}/{name}", value, step)
-                else:
-                    self.writer.add_scalar(f"{section}/{name}", value, step)
-
-    def call(self, method: str, *args, **kwargs):
-        """Calls any ``SummaryWriter`` method, eg. ``tb.call('add_text', 'env/notes', 'hello', step)``."""
-        return getattr(self.init(), method)(*args, **kwargs)
-
-    def flush(self):
-        """Flushes any buffered events to disk."""
-        if self.writer is not None:
-            self.writer.flush()
 
 
 class TerminalReporter:
@@ -169,7 +104,8 @@ class Algorithm(object):
     def __init__(self, population: Population, schedulers: list[Scheduler] = None,
                  device=None, dtype: torch.dtype = torch.float32, **options):
         # ------------------------------ Handle input ------------------------------ #
-        models = list(population.modules.values())
+        # genera can share ONE module (Population(genera=N)): each distinct module is processed once
+        models = list({id(m): m for m in population.modules.values()}.values())
         if isinstance(models, NeatModule):
             models = [models]
         if schedulers is None:
@@ -209,7 +145,7 @@ class Algorithm(object):
         self.episode_lengths: dict[int, int] = {}
         self.key_genus: dict[int, int]  = {}
         self.row_genus: np.ndarray      = np.zeros(0, np.int64)
-        # ------------------------------ Tensorboard logging ------------------------------ #
+        # ------------------------------ Logging ------------------------------ #
         from ModifiedNEAT.util.storage import STORAGE_DIR
 
         self.log_dir: str = manage_params(options, ['log_dir', 'log_directory'], STORAGE_DIR+f"neat_rl_logs/{self.__class__.__name__}/")
@@ -217,7 +153,7 @@ class Algorithm(object):
         self.log_name: str = manage_params(options, 'log_name', f"log~{unix_to_datetime_file(clock.time())}")
         self.log_path: str = self.log_dir+self.log_sub_dir+self.log_name
         self.writer: SummaryWriter | None = None
-        self.tb: TensorboardLogger = TensorboardLogger(self.log_path)
+        self.tb: RunlyticsLogger = RunlyticsLogger(self.log_path)
         self.reporter: TerminalReporter = TerminalReporter()
         self._report_hook: Callable = None
         self._log_sources: dict[str, tuple[Callable | dict, bool]] = {}
@@ -246,7 +182,7 @@ class Algorithm(object):
             scheduler.bind(self)
 
     def _init_writer(self):
-        """Lazily creates the Tensorboard writer. Kept for backwards compatibility; prefer ``self.tb``."""
+        """Lazily creates the runlytics writer. Kept for backwards compatibility; prefer ``self.tb``."""
         if self.writer is None:
             self.writer = self.tb.init()
 
@@ -260,34 +196,47 @@ class Algorithm(object):
         self._report_hook = hook
 
     # ============================================================================================== #
-    #                                  External logging (Tensorboard)                                #
+    #                                  External logging (runlytics)                                  #
     # ============================================================================================== #
-    def add_log_source(self, section: str, source: Callable[['Algorithm'], dict] | dict, report: bool = False):
+    def add_log_source(self, section: str, source: Callable[['Algorithm'], dict] | dict, report: bool = False,
+                       hints: dict[str, str] | None = None):
         """
-        Registers an external source that is written to Tensorboard under ``section`` every update (e.g. how your
+        Registers an external source that is written to the runlytics dashboard under ``section`` every update (e.g. how your
         environment's goals are changing).
 
-        :param section: Tensorboard section (``'<section>/<name>'``) the source's scalars are written under.
+        :param section: Dashboard section (``'<section>/<name>'``) the source's scalars are written under.
         :param source: Either a callable ``fn(trainer) -> {name: value}`` evaluated once per update, or a dict that is
             read (so it can be mutated by the environment) every update. A callable may also return
             ``{section: {name: value}}`` to write several sections. Arrays with more than one element become histograms.
         :param report: Also print the source's values in the terminal report.
+        :param hints: Optional ``{name: text}`` shown behind each card's "i" button (or ``{'<section>/<name>': text}``
+            for a callable that writes several sections).
         """
+        if hints:
+            self.describe_log(section, **hints)
         self._log_sources[section] = (source, report)
+
+    def describe_log(self, section: str, **hints: str):
+        """
+        Sets card hints (the dashboard's "i" button, Markdown allowed) for tags of ``section``, eg.
+        ``trainer.describe_log('env', goal="Current goal distance.")``. Call before the tag is first logged. A name
+        that already contains ``/`` is taken as a full tag.
+        """
+        self.tb.describe({(n if '/' in n else f"{section}/{n}"): t for n, t in hints.items()})
 
     def remove_log_source(self, section: str):
         self._log_sources.pop(section, None)
 
     def log_external(self, section: str, **scalars):
         """
-        Queues scalars from anywhere (eg. your evaluation function) for the next update's Tensorboard write, e.g.
+        Queues scalars from anywhere (eg. your evaluation function) for the next update's dashboard write, e.g.
         ``trainer.log_external('env', goal=ENV.goal, difficulty=ENV.difficulty)``. Later values of the same name
         within one epoch overwrite earlier ones.
         """
         self._pending_logs.setdefault(section, {}).update(scalars)
 
     def log_now(self, step: int | None = None, **sections: dict[str, Any]):
-        """Writes sections to Tensorboard immediately (``step`` defaults to the number of updates done)."""
+        """Writes sections to the dashboard immediately (``step`` defaults to the number of updates done)."""
         self.tb.log(self.updates_done if step is None else step, **sections)
         self.tb.flush()
 
@@ -505,6 +454,35 @@ class Algorithm(object):
         if not isinstance(result, (tuple, list)):
             result = (result,)
         return [self._to_numpy(r) for r in result]
+
+    @contextmanager
+    def noise_probe(self, keys: Iterable[int]):
+        """
+        Context manager: every full-sequence Attention pass inside it also measures how much its attention maps move under
+        a small input perturbation (``noise_sigma``). On exit ``self.attention_noise`` = {genome key: mean noise over layers
+        and records}. Cheap: the extra work is one attention forward per probed layer and only inside the block.
+        """
+        from ModifiedNEAT.nn.modules.sub import Attention   # lazy: rl does not otherwise depend on the modules
+        acc: dict[int, list[float]] = defaultdict(list)
+        attns: list = []
+        for module, _ in self._module_groups(keys):
+            order = sorted(module.mapping, key=module.mapping.get)
+
+            def sink(k, v, n, _order=order):
+                ks = _order if k is None else ([int(k)] if isinstance(k, (int, np.integer)) else [int(x) for x in k])
+                for key, val in zip(ks, v.cpu().numpy().tolist()):
+                    acc[key].append(val)
+
+            for attn in module.modules():
+                if isinstance(attn, Attention):
+                    attn.set_noise_probe(self.noise_sigma, sink)
+                    attns.append(attn)
+        try:
+            yield acc
+        finally:
+            for attn in attns:
+                attn.set_noise_probe(0.0)
+            self.attention_noise = {k: float(np.mean(v)) for k, v in acc.items() if v}
 
     def forward_pass(
             self, method: str, inputs: list[str | np.ndarray], keys: Iterable[int], lengths: np.ndarray = None,
