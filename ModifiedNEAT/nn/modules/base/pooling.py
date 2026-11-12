@@ -54,8 +54,8 @@ class Pooling(NeatModule):
         # Max-pool pads with -inf so padded cells never win the max; avg-pool pads with 0
         self.pad_value      = float('-inf') if mode == 'max' else 0.0
 
-    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
-        verbose = verbose is not None and verbose >= 3
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: bool | int = False):
+        verbose = verbose >= 3
         # 'keys' is accepted (but unused - pooling has no learnable parameters) purely so this
         # layer's call signature matches other NeatModules for Sequential/container compatibility.
         if verbose:

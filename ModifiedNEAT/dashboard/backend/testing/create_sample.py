@@ -42,8 +42,8 @@ if __name__ == "__main__":
     # NOTE: Run python file from dashboard directory
     save_dir = f"backend/testing/files"
     
-    models[0].save(filename='grouped_sample', directory=save_dir, replace=True, debug=True)
-    models[0].load(filename='grouped_sample', directory=save_dir, strict=True, debug=True)
+    models[0].save(filename='grouped_sample', directory=save_dir, replace=True, verbose=True)
+    models[0].load(filename='grouped_sample', directory=save_dir, strict=True, verbose=True)
     
     config = meat.Config('test', './')
     population = meat.Population(50, models[0], config=config)
@@ -52,5 +52,5 @@ if __name__ == "__main__":
     for m in models[0].neat_modules():
         print(list(m.parameters(False)))
     
-    population.save('grouped_sample', directory=save_dir, replace=True, debug=True)
-    population.load('grouped_sample', directory=save_dir, debug=True)
+    population.save('grouped_sample', directory=save_dir, replace=True, verbose=True)
+    population.load('grouped_sample', directory=save_dir, verbose=True)

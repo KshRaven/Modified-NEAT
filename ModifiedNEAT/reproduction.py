@@ -29,7 +29,7 @@ class Reproduction:
 
     def create_new(
         self, genus: int | list[int], pop_size: int | dict[int, int], module: NeatModule,
-        tpb: int = None, verbose: int = None
+        tpb: int = None, verbose: bool | int = False
     ) -> dict[int, Genome]:
         if isinstance(genus, int):
             genus_sizes = {genus: pop_size}

@@ -170,7 +170,7 @@ class TokenEmbedding(nn.Module):
         self.device: DEVICE = device
         self.dtype: DTYPE   = dtype
 
-    def forward(self, tensor: Tensor, debug=False):
+    def forward(self, tensor: Tensor, verbose: bool | int = False):
         # # Check if input is a tensor
         # if not isinstance(tensor, Tensor):
         #     raise InvalidValueError(f"Input Sequence entered is not a Tensor.")
@@ -180,8 +180,8 @@ class TokenEmbedding(nn.Module):
         if self.reduction is not None:
             # Convert (batch_size, seq_len, features, embed_size) to (batch_size, seq_len, embed_size)
             tensor = self.reduction(torch.transpose(tensor, -1, -2)).squeeze(-1)
-        if debug:
-            print(debug)
+        if verbose:
+            print(verbose)
             print(f"\nEmbedded Data =>\n{tensor}\n\tdim = {tensor.shape}")
 
         return tensor
@@ -204,14 +204,14 @@ class SinusoidalEncoding(nn.Module):
         self.device: DEVICE = device
         self.dtype: DTYPE   = dtype
 
-    def forward(self, tensor: Tensor, debug: bool = False):
+    def forward(self, tensor: Tensor, verbose: bool | int = False):
         # Get the dimension shape of the input
         records, seq_length, embed_size = tensor.size()
         # Expanding positional encoding to shape of input
         positional_encoding = self.positional_encoding.expand(records, -1, embed_size)
         # Add encoding to tensor
         tensor = tensor + positional_encoding[:, :seq_length]
-        if debug:
+        if verbose:
             print(f"\nPositional Encoding =>\n{positional_encoding}\n\tdim = {positional_encoding.shape}")
             print(f"\nEncoded Sequences =>\n{tensor}\n\tdim = {tensor.shape}")
 
@@ -280,7 +280,7 @@ class BufferEmbedding(NeatModule):
         self.device = device
         self.dtype  = dtype
 
-    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, verbose: int = None):
+    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, verbose: bool | int = False):
         # Expand input to embedding space; [batch_size, sequence, *features] to [batch_size, sequence, embed_size]
         # print(f"forward={self.embedding.weights.data.shape, tensor.shape}")
         tensor = self.embedding(tensor, keys=keys)
@@ -322,7 +322,7 @@ class BufferEncoding(NeatModule):
         self.device  = device
         self.dtype   = dtype
 
-    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, offset: tuple[int, int] = None, verbose: int = None, hold=False):
+    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, offset: tuple[int, int] = None, verbose: bool | int = False, hold=False):
         if offset is None:
             offset = 0
         if verbose and verbose >= 2:
@@ -378,7 +378,7 @@ class SequenceEncoding(NeatModule):
         self.device  = device
         self.dtype   = dtype
 
-    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, offset: tuple[int, int] = None, verbose: int = None, hold=False):
+    def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, offset: tuple[int, int] = None, verbose: bool | int = False, hold=False):
         if offset is None:
             offset = [0 for _ in range(self.ndim)]
         if verbose and verbose >= 2:
@@ -445,7 +445,7 @@ class RoPE(NeatModule):
         )
 
     # @staticmethod
-    def _generate_encoding(self, seq_length: int, head_dim: int, constant: float = 10000.0, verbose: bool | int = None):
+    def _generate_encoding(self, seq_length: int, head_dim: int, constant: float = 10000.0, verbose: bool | int = False):
         # Dimensions of embedding must be even
         assert head_dim % 2 == 0, "head_dim must be divisible by 2"
         # Get theta where theta_i = 10000 ^ (-2 * (i-1) / embedding) for i = [1, 2, ..., dim / 2]; [head_dim / 2]
@@ -463,7 +463,7 @@ class RoPE(NeatModule):
             print(f"\nComplex Frequencies init =>\n{cf}\n\tdim = {cf.shape}")
         return cf
 
-    def forward(self, tensor: Tensor, pos_idx: int = 0, verbose: int = None): # encode
+    def forward(self, tensor: Tensor, pos_idx: int = 0, verbose: bool | int = False): # encode
         """
         Args:
             tensor:  (batch_size, seq_len, heads, head_dim)
@@ -487,9 +487,9 @@ class RoPE(NeatModule):
         try:
             rotated_tensor = complex_tensor * complex_frequencies
         except Exception as e:
-            print(get_tensor_info(self.complex_frequencies, 'Complex Frequencies Default Debugging', verbose))
-            print(get_tensor_info(complex_frequencies, 'Complex Frequencies Debugging', verbose))
-            print(get_tensor_info(complex_tensor, 'Complex Tensor Debugging', verbose))
+            print(get_tensor_info(self.complex_frequencies, 'Complex Frequencies', verbose))
+            print(get_tensor_info(complex_frequencies, 'Selected Complex Frequencies', verbose))
+            print(get_tensor_info(complex_tensor, 'Complex Tensor', verbose))
             raise e
         # [genomes, batch_size, sequence, heads, head_dim / 2] -> [genomes, batch_size, sequence, heads, head_dim / 2, 2]
         split_tensor = torch.view_as_real(rotated_tensor).to(self.dtype)
@@ -505,7 +505,7 @@ class RoPE(NeatModule):
 
         return tensor
 
-    def decode(self, tensor: Tensor, pos_idx: int = 0, verbose: int = None):
+    def decode(self, tensor: Tensor, pos_idx: int = 0, verbose: bool | int = False):
         """Invert a RoPE-encoded tensor (multiply by complex conjugate)."""
         if tensor.numel() == 0:
             return tensor
@@ -591,7 +591,7 @@ class Repositioning(NeatModule):
                 Polynomial(embed_size, embed_size, coefficients, bias, device, dtype)
 
 
-    def forward(self, tensor: Tensor, offset: int, keys: int | Iterable[int] = None, verbose: int = None):
+    def forward(self, tensor: Tensor, offset: int, keys: int | Iterable[int] = None, verbose: bool | int = False):
         """
         Args:
             tensor: (batch_size, seq_len, embed_size)
@@ -726,7 +726,7 @@ class AttentionLambda(NeatModule):
         #     return self.init
         return 0.0
 
-    def post_attention_shift(self, keys: Union[int, list[int], None], offset: int | None = None, verbose: int = False):
+    def post_attention_shift(self, keys: Union[int, list[int], None], offset: int | None = None, verbose: bool | int = False):
         """Returns a scalar/tensor broadcastable with attended (batch, q_len, heads, head_dim)."""
         # # TODO: Fix the parameterized implementation of init
         # # return self.init if not isinstance(self.init, NeatParameter) else self.expand(self.init[keys], tensor, offset=offset, keys=keys)
@@ -1090,7 +1090,7 @@ class Attention(NeatModule):
         tensor = tensor * torch.rsqrt(tensor.pow(2).mean(-1, keepdim=True) + self.epsilon)
         return tensor.reshape(shape)
 
-    def _rope(self, tensor: Tensor, pos_idx: int, verbose: int = None):
+    def _rope(self, tensor: Tensor, pos_idx: int, verbose: bool | int = False):
         """RoPE over (g, b, seq, heads, head_dim * mult); with branch_rope every branch gets its own full set of frequencies."""
         if not self.branch_rope or self.mult == 1:
             return self.rotary_embedding(tensor, pos_idx, verbose)
@@ -1117,7 +1117,7 @@ class Attention(NeatModule):
 
     def attention(
         self, query: Tensor, key: Tensor, value: Tensor,
-        keys: Union[int, Iterable[int]], mask: bool, verbose: int = None
+        keys: Union[int, Iterable[int]], mask: bool, verbose: bool | int = False
     ):
         """
         Args:
@@ -1192,7 +1192,7 @@ class Attention(NeatModule):
     # ------------------------------------------------------------------
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, prompt: Tensor = None,
-                pos_idx: int | None = 0, verbose: int = None, get: bool = False):
+                pos_idx: int | None = 0, verbose: bool | int = False, get: bool = False):
         """
         Accepts (genomes, *extra_dims, seq_len, dim) for any number of extra dims (batch, processes, ...): attention only
         mixes along seq_len, so every extra dim is an independent batch. They are folded into one batch axis for the
@@ -1216,7 +1216,7 @@ class Attention(NeatModule):
         return out.reshape(g, *extra, *out.shape[-2:])
 
     def _forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, prompt: Tensor = None,
-                 pos_idx: int | None = 0, verbose: int = None, get: bool = False):
+                 pos_idx: int | None = 0, verbose: bool | int = False, get: bool = False):
         """
         tensor:  (genomes, batch, seq_len, dim)  -> supplies K and V (and Q unless `prompt` is given)
         prompt:  optional (genomes, batch, q_len, dim) with q_len <= seq_len; they are the LAST q_len queries
@@ -1448,7 +1448,7 @@ class ConvSelfAttention(NeatModule):
         # Return shape (genomes, batch_size, channels, *pixels)
         return tensor.transpose(-1, -2).contiguous().view(-1, batch_size, channels, *pixels)
 
-    def attention(self, query: Tensor, key: Tensor, value: Tensor, keys: Union[int, Iterable[int]], mask: bool, verbose: int = None):
+    def attention(self, query: Tensor, key: Tensor, value: Tensor, keys: Union[int, Iterable[int]], mask: bool, verbose: bool | int = False):
         if self.differential:
             query   = query.view(*query.shape[:-1], self.att_coeff_num, -1)
             key     = key.view(*key.shape[:-1], self.att_coeff_num, -1)
@@ -1501,7 +1501,7 @@ class ConvSelfAttention(NeatModule):
         return scores, attention
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, 
-                pretext: Tensor = None, pos_idx: int = None, verbose: int = None, get=False):
+                pretext: Tensor = None, pos_idx: int = None, verbose: bool | int = False, get=False):
         if self.auto_single and len(self.pixels) == 1 and pretext is None:
             pretext = tensor.select(-1, -1).unsqueeze(-1)
         if pos_idx is not None:
@@ -1688,7 +1688,7 @@ class ConvCrossAttention(NeatModule):
     def revert(tensor: Tensor, batch_size: int, channels: int, pixels: list[int]):
         return tensor.transpose(-1, -2).view(-1, batch_size, channels, *pixels)
 
-    def attention(self, query: Tensor, key: Tensor, value: Tensor, keys: Union[int, Iterable[int]], mask: bool, verbose: int = None):
+    def attention(self, query: Tensor, key: Tensor, value: Tensor, keys: Union[int, Iterable[int]], mask: bool, verbose: bool | int = False):
         if self.differential:
             query   = query.view(*query.shape[:-1], self.att_coeff_num, -1)
             key     = key.view(*key.shape[:-1], self.att_coeff_num, -1)
@@ -1741,7 +1741,7 @@ class ConvCrossAttention(NeatModule):
         return scores, attention
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None,
-                context: Tensor = None, pos_idx: int = None, verbose: int = None, get=False):
+                context: Tensor = None, pos_idx: int = None, verbose: bool | int = False, get=False):
         if pos_idx is not None and len(self.pixels) == 1:
             pos_idx = self.pixels_total + pos_idx if pos_idx < 0 else pos_idx
             assert 0 < pos_idx < self.pixels_total
@@ -1975,7 +1975,7 @@ class TransformerBlock(NeatModule):
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None,
                 prompt: Tensor = None, context: Tensor = None,
-                pos_idx: int = None, verbose: int = None, get=False):
+                pos_idx: int = None, verbose: bool | int = False, get=False):
         # Normalize then get the self attention
         attention = self.self_attention(
                 tensor, keys=keys, prompt=prompt, pos_idx=pos_idx, verbose=verbose, get=get
@@ -2047,7 +2047,7 @@ class TransformerBase(NeatModule):
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None,
                 prompt: Tensor = None, context: Tensor = None, pos_idx: int = None,
-                verbose: int = None, get=False, single=False):
+                verbose: bool | int = False, get=False, single=False):
         ndim = tensor.ndim
         rem_batch = rem_seq = False
         if ndim == 2: # No batch and sequence dim
@@ -2154,7 +2154,7 @@ class ConverBlock(NeatModule):
         self.dtype: DTYPE   = dtype
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, pretext: Tensor = None, context: Tensor = None,
-                pos_idx: int = None, verbose: int = None, get=False):
+                pos_idx: int = None, verbose: bool | int = False, get=False):
         # Normalize then get the self attention
         attention = self.self_attention(
                 tensor, keys=keys, pretext=pretext, pos_idx=pos_idx, verbose=verbose, get=get
@@ -2223,7 +2223,7 @@ class ConverBase(NeatModule):
         self.dtype      = dtype
 
     def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, pretext: Tensor = None, context: Tensor = None, pos_idx: int = None,
-                verbose: int = None, get=False, single=False):
+                verbose: bool | int = False, get=False, single=False):
         # Pass through the encoder blocks
         for layer_idx, layer in enumerate(self.layers):
             # Single mode is only when on final layer, pixels span 1 dimension and tensor has 3 dimensions only

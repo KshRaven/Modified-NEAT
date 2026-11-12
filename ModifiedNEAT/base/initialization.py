@@ -22,7 +22,7 @@ from ModifiedNEAT.nn.base import NeatModule
 from ModifiedNEAT.util.fancy_text import CM, Fore
 
 
-def initialize(backend: Backend, config: Config, module: NeatModule, tpb=1, verbose: int = None):
+def initialize(backend: Backend, config: Config, module: NeatModule, tpb=1, verbose: bool | int = False):
     seeding.configure(config.general.seed)
     ts = clock.perf_counter()
     init_type = init_type_code(config)

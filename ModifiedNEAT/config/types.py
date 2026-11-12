@@ -125,18 +125,18 @@ class Config:
         self.reproduction = ReproductionConfig()
         self.rl           = RLConfig()
 
-    def save(self, debug=True):
+    def save(self, verbose: bool | int = True):
         create = not os.path.exists(self.dir)
         if create:
             os.makedirs(self.dir, exist_ok=True)
-        self.general.create(self.path, debug=debug)
-        self.genome.create(self.path, debug=debug)
-        self.species.create(self.path, debug=debug)
-        self.stagnation.create(self.path, debug=debug)
-        self.reproduction.create(self.path, debug=debug)
-        self.rl.create(self.path, debug=debug)
+        self.general.create(self.path, verbose=verbose)
+        self.genome.create(self.path, verbose=verbose)
+        self.species.create(self.path, verbose=verbose)
+        self.stagnation.create(self.path, verbose=verbose)
+        self.reproduction.create(self.path, verbose=verbose)
+        self.rl.create(self.path, verbose=verbose)
 
-    def load(self, verbose: int = None):
+    def load(self, verbose: bool | int = False):
         self.general.load(self.path, verbose=verbose)
         self.genome.load(self.path, verbose=verbose)
         self.species.load(self.path, verbose=verbose)
@@ -144,7 +144,7 @@ class Config:
         self.reproduction.load(self.path, verbose=verbose)
         self.rl.load(self.path, verbose=verbose)
 
-    def update(self, verbose: int = None):
+    def update(self, verbose: bool | int = False):
         self.general.update(self.path, verbose=verbose)
         self.genome.update(self.path, verbose=verbose)
         self.species.update(self.path, verbose=verbose)

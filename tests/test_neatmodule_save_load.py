@@ -236,7 +236,7 @@ def test_save_load_to_file():
             directory=tmpdir,
             file_no=0,
             replace=True,
-            debug=True
+            verbose=True
         )
         assert success, "Save failed"
         # Note: file_no might be 0 or 1 depending on existing files
@@ -247,7 +247,7 @@ def test_save_load_to_file():
             directory=tmpdir,
             file_no=0,
             strict=True,
-            debug=True
+            verbose=True
         )
         
         module2 = SimpleNeatModule(10, 5)

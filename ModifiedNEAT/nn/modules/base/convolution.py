@@ -88,8 +88,8 @@ class Convolution(NeatModule):
         self.device = device
         self.dtype = dtype
 
-    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
-        verbose = verbose is not None and verbose >= 3
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: bool | int = False):
+        verbose = verbose >= 3
         if verbose:
             print(f"Inputs = {tensor.shape}")
         # Expected shape = (genomes, batch_size, channels_in, seq_len)

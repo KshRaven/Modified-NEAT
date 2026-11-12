@@ -54,7 +54,7 @@ class CpuBackend(Backend):
     def mutate(self, updates, children, *args, kernel_shape):
         self._check(_mutate_kernel(updates, children, *args), updates.ndim)
 
-    def compute_distances(self, config, module, dtype, tpb, verbose=None):
+    def compute_distances(self, config, module, dtype, tpb, verbose: bool | int = False):
         return _compute_distances(config, module, dtype, tpb, verbose)
 
 

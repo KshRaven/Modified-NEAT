@@ -378,7 +378,7 @@ class NEAT(Algorithm):
         return best_genome_key, global_fitness_stats
 
     def learn(self, evaluation_function: callable, steps: int, epochs: int = None, batch_size: int = None,
-              accuracy_error=0.10, accuracy_type='continuous', verbose: int = None):
+              accuracy_error=0.10, accuracy_type='continuous', verbose: bool | int = False):
         """
         Runs the full evolution loop: collect rollout data, score genomes, log progress and step schedulers,
         until ``epochs`` generations have been trained (or forever, if ``epochs`` is ``None``).
@@ -389,7 +389,7 @@ class NEAT(Algorithm):
         :param batch_size: Batch size used when iterating over collected records.
         :param accuracy_error: Relative error tolerance used when computing policy accuracy.
         :param accuracy_type: Accuracy comparison mode; one of ``'continuous'``, ``'binary'``, ``'discrete'``.
-        :param verbose: Verbosity level; ``0``/``None`` is silent, ``1`` prints the summary each epoch, ``2`` also prints timings.
+        :param verbose: Verbosity level; ``False``/``0`` is silent, ``True``/``1`` prints the summary each epoch, ``2`` also prints timings.
         """
         print(f"Logging to {CM(self.log_path, Fore.MAGENTA)}")
         if epochs is None:

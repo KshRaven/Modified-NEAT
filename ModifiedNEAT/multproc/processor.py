@@ -21,7 +21,7 @@ def _worker_loop(model: Module, in_q: mp.Queue, out_q: mp.Queue):
             out_q.put(model(x))
 
 
-def _safe_compile(model: Module, *, verbose: bool) -> Module:
+def _safe_compile(model: Module, *, verbose: bool | int) -> Module:
     """
     Try compile(model) with inductor (needs Triton); if Triton missing, try aot_eager; else fall back to eager.
     """
@@ -53,7 +53,7 @@ class Processor:
     CPU: persistent worker processes.
     """
     def __init__(self, models: list[Module], device: Union[str, torch.device] = "cpu",
-                 use_compile: bool = True, verbose: bool = False):
+                 use_compile: bool = True, verbose: bool | int = False):
         if isinstance(device, str):
             device = torch.device(device)
         self.device = device

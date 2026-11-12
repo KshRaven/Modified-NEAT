@@ -127,7 +127,7 @@ def get_next_index(filename: str, directory: str, extension: str = '.pkl',
 
 def save(items: dict[str, Any], filename: str = '', directory: str = '', file_no: int = None, replace=False,
          subdirectory: str = None, save_location: str = None, extension: str = None,
-         items_name: str = None, time: int = None, debug=True, filepath: str = None):
+         items_name: str = None, time: int = None, verbose: bool | int = True, filepath: str = None):
     if filepath is None:
         if isinstance(file_no, int) and file_no == 0:
             file_no = None
@@ -177,7 +177,7 @@ def save(items: dict[str, Any], filename: str = '', directory: str = '', file_no
                 json.dump(save_data, file)
             else:
                 pickle.dump(save_data, file)
-        if debug:
+        if verbose:
             print(CM(f"Successfully dumped {items_name if items_name is not None else ''} "
                      f"save file to '{filepath}'.", PRINT_COLOUR))
 
@@ -189,7 +189,7 @@ def save(items: dict[str, Any], filename: str = '', directory: str = '', file_no
 
 def load(filename: str = '', directory: str = '', file_no: int = None,
          subdirectory: str = None, save_location: str = None, extension: str = None,
-         items_name: str = None, time: int = None, cooldown: int = None, debug=True,
+         items_name: str = None, time: int = None, cooldown: int = None, verbose: bool | int = True,
          filepath: str = None):
     try:
         if filepath is None:
@@ -250,7 +250,7 @@ def load(filename: str = '', directory: str = '', file_no: int = None,
                 return None
         if items is None:
             raise ValueError(f"No items found in save file {filepath}")
-        if debug:
+        if verbose:
             print(CM(f"Successfully loaded {items_name if items_name is not None else ''} "
                      f"save file from '{filepath}'.", PRINT_COLOUR))
         return items
@@ -261,7 +261,8 @@ def load(filename: str = '', directory: str = '', file_no: int = None,
 
 
 def delete(filename: str, directory: str, file_no: Union[int, None],
-           subdirectory: str = None, save_location: str = None, extension: str = None, disable_warn=False, debug=True):
+           subdirectory: str = None, save_location: str = None, extension: str = None, disable_warn=False,
+           verbose: bool | int = True):
     try:
         if isinstance(file_no, int) and file_no == 0:
             file_no = None
@@ -303,11 +304,11 @@ def delete(filename: str, directory: str, file_no: Union[int, None],
         # Delete file
         if not entire_dir:
             os.remove(filepath)
-            if debug:
+            if verbose:
                 print(CM(f"\nSuccessfully deleted {filename + extension} in {directory}.", PRINT_COLOUR))
         else:
             shutil.rmtree(filepath)
-            if debug:
+            if verbose:
                 print(CM(f"\nSuccessfully deleted {directory}.", PRINT_COLOUR))
     except NotADirectoryError as e:
         if not disable_warn:

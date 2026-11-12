@@ -186,7 +186,7 @@ def set_tpb_env(value: int):
     os.environ[TPB_ENV_NAME] = str(value)
 
 def initialize(
-        config: Config, module: NeatModule, tpb: int | None = None, verbose: int | bool | None = None
+        config: Config, module: NeatModule, tpb: int | None = None, verbose: bool | int = False
     ):
     tpb = _tpb if tpb is None else tpb
     return DEVICE.initialize(
@@ -196,7 +196,7 @@ def initialize(
 def speciate(
         config: Config, genera: list[int], modules: dict[int, NeatModule],
         species_set: SpeciesSet, population: dict[int, Genome],
-        generation: int, tpb: int | None = None, verbose: int = None
+        generation: int, tpb: int | None = None, verbose: bool | int = False
     ):
    tpb = _tpb if tpb is None else tpb
    return DEVICE.speciate(
@@ -207,7 +207,7 @@ def reproduce(
         config: Config, genera: list[int], modules: dict[int, NeatModule], population: dict[int, Genome],
         ancestors: dict[int, tuple[Genome, Genome]], generation: int, to_delete: list[int], genome_indexer: int,
         stagnation: Stagnation, species_set: SpeciesSet, reporters: ReporterSet,
-        tpb: int | None = None, verbose: int | bool | None = None
+        tpb: int | None = None, verbose: bool | int = False
     ):
     tpb = _tpb if tpb is None else tpb
     return DEVICE.reproduce(

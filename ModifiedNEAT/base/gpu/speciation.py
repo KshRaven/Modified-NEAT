@@ -71,7 +71,7 @@ def get_distance(parameter: GPUArray, total_distance: GPUArray, match_counter: G
         # cuda.syncthreads()
 
 
-def compute_distances(config: Config, module: NeatModule, dtype, tpb: int = 10, verbose: int = None) -> np.ndarray:
+def compute_distances(config: Config, module: NeatModule, dtype, tpb: int = 10, verbose: bool | int = False) -> np.ndarray:
     """
     Genetic distance matrix of the module's genomes (symmetric, zero diagonal) as a host array. The kernel fills the
     upper triangle only; it is mirrored here. Also verifies that no two genomes fully match each other.

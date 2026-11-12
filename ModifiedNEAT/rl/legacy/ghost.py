@@ -311,7 +311,7 @@ class Ghost(Algorithm):
         return best_genome_key, global_fitness_stats
 
     def learn(self, evaluation_function: callable, steps: int, epochs: int = None, batch_size: int = None,
-              accuracy_error=0.10, accuracy_type='continuous', verbose: int = None):
+              accuracy_error=0.10, accuracy_type='continuous', verbose: bool | int = False):
         print(f"Logging to {CM(self.log_path, Fore.MAGENTA)}")
         if epochs is None:
             epochs = np.inf

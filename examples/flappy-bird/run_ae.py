@@ -312,7 +312,7 @@ CONFIG_DIR = f"{os.path.curdir}/configs"
 CONFIG_NAME = "flappy_bird-ae"
 CONFIG = neat.Config(CONFIG_NAME, CONFIG_DIR)
 CONFIG.load(verbose=2)
-CONFIG.save(debug=2)
+CONFIG.save(verbose=2)
 
 ENV: Game | None = None
 

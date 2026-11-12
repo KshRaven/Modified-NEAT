@@ -87,18 +87,18 @@ def test_population_state_dict_filepath_and_extra_files():
         success, _ = population.save(
             filepath=str(filepath),
             extra_files={'configs/run.json': '{"seed": 4}', 'logs/run.log': b'complete'},
-            debug=False,
+            verbose=False,
         )
         assert success and filepath.is_file()
         assert (Path(tmpdir) / 'checkpoint' / 'configs' / 'run.json').read_text(encoding='utf-8') == '{"seed": 4}'
         assert (Path(tmpdir) / 'checkpoint' / 'logs' / 'run.log').read_bytes() == b'complete'
 
         restored = create_test_population(2)[0]
-        restored.load(filepath=str(filepath), strict=False, debug=False)
+        restored.load(filepath=str(filepath), strict=False, verbose=False)
         assert len(restored.genomes) == len(population.genomes)
         assert restored.config.general.pop_size == 17
 
-        restored.load(state_dict=state, strict=False, debug=False)
+        restored.load(state_dict=state, strict=False, verbose=False)
         assert len(restored.genomes) == len(population.genomes)
 
 
@@ -119,7 +119,7 @@ def test_population_save_load_to_file():
             directory=tmpdir,
             file_no=0,
             replace=True,
-            debug=True
+            verbose=True
         )
         assert success, "Population save failed"
         
@@ -130,7 +130,7 @@ def test_population_save_load_to_file():
             directory=tmpdir,
             file_no=0,
             strict=False,  # Use non-strict mode for test modules not globally importable
-            debug=True
+            verbose=True
         )
         
         # Verify population structure
@@ -157,7 +157,7 @@ def test_population_strict_vs_non_strict():
         pop1.save(
             filename="test_strict",
             directory=tmpdir,
-            debug=False
+            verbose=False
         )
         
         # Load with strict=True
@@ -165,7 +165,7 @@ def test_population_strict_vs_non_strict():
             filename="test_strict",
             directory=tmpdir,
             strict=True,
-            debug=False
+            verbose=False
         )
         assert len(pop_strict.genomes) > 0, "Strict load failed"
         
@@ -174,7 +174,7 @@ def test_population_strict_vs_non_strict():
             filename="test_strict",
             directory=tmpdir,
             strict=False,
-            debug=False
+            verbose=False
         )
         assert len(pop_non_strict.genomes) > 0, "Non-strict load failed"
         
@@ -193,8 +193,8 @@ def test_module_architecture_preservation():
         original_count = len(original_params)
         
         # Save and load
-        pop1.save(filename="test_arch", directory=tmpdir, debug=False)
-        pop2 = Population.load(filename="test_arch", directory=tmpdir, debug=False)
+        pop1.save(filename="test_arch", directory=tmpdir, verbose=False)
+        pop2 = Population.load(filename="test_arch", directory=tmpdir, verbose=False)
         
         # Verify architecture
         loaded_module = list(pop2.modules.values())[0]
@@ -217,18 +217,18 @@ def test_multiple_generations_save():
         pop1.generation = 10
         
         # Save
-        success, file_no1 = pop1.save(filename="test_gen", directory=tmpdir, debug=False)
+        success, file_no1 = pop1.save(filename="test_gen", directory=tmpdir, verbose=False)
         
         # Save another version (should increment file number)
         pop1.generation = 20
-        success, file_no2 = pop1.save(filename="test_gen", directory=tmpdir, debug=False)
+        success, file_no2 = pop1.save(filename="test_gen", directory=tmpdir, verbose=False)
         
         # Load first version
-        pop_v1 = Population.load(filename="test_gen", directory=tmpdir, file_no=file_no1, debug=False)
+        pop_v1 = Population.load(filename="test_gen", directory=tmpdir, file_no=file_no1, verbose=False)
         assert pop_v1.generation == 10, "Wrong generation loaded (v1)"
         
         # Load second version
-        pop_v2 = Population.load(filename="test_gen", directory=tmpdir, file_no=file_no2, debug=False)
+        pop_v2 = Population.load(filename="test_gen", directory=tmpdir, file_no=file_no2, verbose=False)
         assert pop_v2.generation == 20, "Wrong generation loaded (v2)"
         
         print("✓ Multiple generations save test passed")
@@ -245,8 +245,8 @@ def test_genomes_preserved():
         original_keys = set(pop1.genomes.keys())
         
         # Save and load
-        pop1.save(filename="test_genomes", directory=tmpdir, debug=False)
-        pop2 = Population.load(filename="test_genomes", directory=tmpdir, debug=False)
+        pop1.save(filename="test_genomes", directory=tmpdir, verbose=False)
+        pop2 = Population.load(filename="test_genomes", directory=tmpdir, verbose=False)
         
         # Verify genomes
         loaded_keys = set(pop2.genomes.keys())

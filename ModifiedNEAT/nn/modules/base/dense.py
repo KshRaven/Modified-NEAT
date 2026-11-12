@@ -15,7 +15,7 @@ class Linear(NeatModule):
         self.weights = NeatParameter((inputs, outputs), False, device, dtype)
         self.biases  = NeatParameter(outputs, False, device, dtype) if bias else None
 
-    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: bool | int = False):
         try:
             # print(f"lin_mod={self.weights.data.shape, tensor.shape}")
             w = self.expand(self.weights[keys], tensor, keys=keys)
@@ -60,7 +60,7 @@ class Polynomial(NeatModule):
         self.weights = NeatParameter((coefficients, inputs, outputs), False, device, dtype)
         self.biases  = NeatParameter(outputs, False, device, dtype) if bias else None
 
-    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: bool | int = False):
         # (G, ..., in) -> (G, ..., C, 1, in), holding x^e for each exponent e
         tensor = (tensor.unsqueeze(-2) ** self.exponents.unsqueeze(-1)).unsqueeze(-2)
 

@@ -21,7 +21,7 @@ from ModifiedNEAT.util.fancy_text import CM, Fore
 
 
 def update_distances_cache(backend: Backend, config: Config, module: NeatModule, genome_cache: GenomeDistanceCache,
-                           tpb=10, verbose: int = None):
+                           tpb=10, verbose: bool | int = False):
     ts = clock.perf_counter()
     total_distance = backend.compute_distances(config, module, genome_cache.total_distance.dtype, tpb, verbose)
     if verbose and verbose >= 2:
@@ -156,7 +156,7 @@ def _update_collection(genus: int, population: dict[int, Genome], species: dict[
 
 def speciate(backend: Backend, config: Config, genera: list[int], modules: dict[int, NeatModule],
              species_set: SpeciesSet, population: dict[int, Genome],
-             generation: int, tpb=10, verbose: int = None):
+             generation: int, tpb=10, verbose: bool | int = False):
     """
     Place genomes into species by genetic similarity.
 

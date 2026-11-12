@@ -65,7 +65,7 @@ class Transformer(NeatModule):
     #     return self.decode.genome_num
     #
     # def forward(self, tensor: Tensor, pos_idx: int = None, keys: Union[int, Iterable[int]] = None,
-    #             verbose: int = None, get=False, single=False):
+    #             verbose: bool | int = False, get=False, single=False):
     #     if pos_idx is not None:
     #         tensor = tensor[:, :pos_idx+1]
     #     if verbose:
@@ -92,7 +92,7 @@ class Transformer(NeatModule):
     #         v.append(vi)
     #     return a, v
     #
-    # def infer(self, tensor: Tensor, pos_idx: int = None, keys: Union[int, Iterable[int]] = None, verbose=False):
+    # def infer(self, tensor: Tensor, pos_idx: int = None, keys: Union[int, Iterable[int]] = None, verbose: bool | int = False):
     #     pos_idx = self.max_seq_len + pos_idx if pos_idx is not None and pos_idx < 0 else pos_idx
     #     if pos_idx is None:
     #         pos_idx = self.max_seq_len-1
@@ -207,7 +207,7 @@ class Conver(NeatModule):
         return tensor
 
     def forward(self, tensor: Tensor, keys: Union[int, list[int]] = None, pos_idx: int = None,
-                verbose: int = None, get=False, single=False, context: Tensor = None, noise: Tensor = None, logits=False):
+                verbose: bool | int = False, get=False, single=False, context: Tensor = None, noise: Tensor = None, logits=False):
         if verbose:
             print(get_tensor_info(tensor, f'{self.__class__.__name__} Input', verbose))
         squeeze = tensor.ndim == 3
@@ -250,7 +250,7 @@ class Conver(NeatModule):
             v.append(vi)
         return a, v
 
-    def infer(self, inputs: Tensor, keys: Union[int, list[int]] = None, pos_idx: int = None, get=False, single=True, verbose=False):
+    def infer(self, inputs: Tensor, keys: Union[int, list[int]] = None, pos_idx: int = None, get=False, single=True, verbose: bool | int = False):
         with torch.no_grad():
             if single:
                 pos_idx = -1
@@ -334,7 +334,7 @@ class Reformer(Model):
         #     tensor = tensor.argmax(-1, False)
         return tensor
 
-    def get_latent(self, module: Conver, state: Tensor, keys: Union[int, list[int]], pos_idx: int = None, verbose=False, get=False, single=False):
+    def get_latent(self, module: Conver, state: Tensor, keys: Union[int, list[int]], pos_idx: int = None, verbose: bool | int = False, get=False, single=False):
         latent = module.forward(state, keys, pos_idx, verbose, get, single, logits=self.logits_pass)
         if self.pri_actv is not None:
             latent = self.pri_actv(latent)
@@ -366,26 +366,26 @@ class Reformer(Model):
         source      = self.mean_log_std(latent, keys=keys)
         mean        = self.get_mean(source, keys)
         std         = self.get_std(source, keys)
-        dist        = self.dist(mean, std, None, None)
+        dist        = self.dist(mean, std, None, False)
         action      = dist.sample() if self.probabilistic else mean
         if self.sec_actv is not None:
             action = self.sec_actv(action)
         log_prob    = dist.log_prob(action)
         return action, log_prob
 
-    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, Iterable[int]] = None) -> [Tensor, Union[Tensor, None]]:
+    def evaluate_action(self, state: Tensor, action: Tensor, keys: Union[int, Iterable[int]] = None) -> tuple[Tensor, Union[Tensor, None]]:
         latent      = self.get_latent(self.pol_proj, state, keys, self.idx, single=self.single_pass)
         source      = self.mean_log_std(latent, keys=keys)
         mean        = self.get_mean(source, keys)
         std         = self.get_std(source, keys)
-        dist        = self.dist(mean, std, None, None)
+        dist        = self.dist(mean, std, None, False)
         log_prob    = dist.log_prob(action)
         entropy     = dist.entropy()
         return log_prob, entropy
 
     def get_policy(self, state: Tensor, keys: Union[int, Iterable[int]] = None, **options) -> Tensor:
         pos_idx = manage_params(options, ['pos_idx', 'idx'], None)
-        verbose = manage_params(options, 'verbose', None)
+        verbose = manage_params(options, 'verbose', False)
         get     = manage_params(options, 'get', False)
         single  = manage_params(options, 'single', self.single_pass)
 
@@ -397,7 +397,7 @@ class Reformer(Model):
             print(get_tensor_info(mean, f"{self.__class__.__name__} Mean", verbose))
             if std is not None:
                 print(get_tensor_info(std, f"{self.__class__.__name__} StdDev", verbose))
-        dist    = self.dist(mean, std, None, None)
+        dist    = self.dist(mean, std, None, False)
         action  = dist.sample() if self.probabilistic else mean
         if self.sec_actv is not None:
             action = self.sec_actv(action)
@@ -408,7 +408,7 @@ class Reformer(Model):
     def get_value(self, state: Tensor, keys: Union[int, Iterable[int]] = None, **options) -> Tensor:
         if self.val_proj is not None:
             pos_idx = manage_params(options, ['pos_idx', 'idx'], None)
-            verbose = manage_params(options, 'verbose', None)
+            verbose = manage_params(options, 'verbose', False)
             get     = manage_params(options, 'get', False)
             single  = manage_params(options, 'single', self.single_pass)
             latent  = self.get_latent(self.val_proj, state, keys, pos_idx, verbose, get, single)
@@ -424,12 +424,12 @@ class Reformer(Model):
         else:
             return tensor * noise
 
-    def learn(self, inputs: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
+    def learn(self, inputs: Tensor, keys: Union[int, Iterable[int]] = None, verbose: bool | int = False):
         return self.forward(inputs, keys, verbose=verbose)
 
     def forward(self, inputs: Tensor, keys: Union[int, Iterable[int]] = None, **options):
         pos_idx = manage_params(options, ['pos_idx', 'idx'], None)
-        verbose = manage_params(options, 'verbose', None)
+        verbose = manage_params(options, 'verbose', False)
         get     = manage_params(options, 'get', False)
         single  = manage_params(options, 'single', False)
         randomize = manage_params(options, 'randomize', False)
@@ -448,7 +448,7 @@ class Reformer(Model):
             outputs = self.sec_actv(outputs)
         return outputs
 
-    def infer(self, inputs: Tensor, keys: Union[int, Iterable[int]] = None, pos_idx: int = None, verbose: int = None, get=False, single=True):
+    def infer(self, inputs: Tensor, keys: Union[int, Iterable[int]] = None, pos_idx: int = None, verbose: bool | int = False, get=False, single=True):
         with torch.no_grad():
             if single:
                 pos_idx = -1

@@ -35,7 +35,7 @@ TensorDict = dict[int, Tensor]
 
 class TerminalReporter:
     """
-    Prints a bordered, column-aligned debug summary to the terminal. Column widths are derived from the
+    Prints a bordered, column-aligned verbose summary to the terminal. Column widths are derived from the
     labels/values actually passed in and from the terminal's own width, so algorithms no longer need to
     hand-pick (and keep in sync) padding widths for every field, which used to break across terminals
     with different tab sizes.
@@ -688,14 +688,14 @@ class Algorithm(object):
     #                                          Epoch helpers                                         #
     # ============================================================================================== #
     @staticmethod
-    def _tick(verbose: int | None, label: str, start: float) -> float:
+    def _tick(verbose: bool | int, label: str, start: float) -> float:
         """Prints the time since ``start`` when verbose >= 2 and returns a new start."""
         now = clock.perf_counter()
         if verbose and verbose >= 2:
             print(f"{label} in {CM(f'{round(now - start, 2)}s', Fore.LIGHTCYAN_EX)}")
         return now
 
-    def _collect_rollout(self, evaluation_function: callable, steps: int, verbose: int | None) -> tuple[list[int], float]:
+    def _collect_rollout(self, evaluation_function: callable, steps: int, verbose: bool | int) -> tuple[list[int], float]:
         """Runs the environment for ``steps`` records and returns the genome keys to train on and the run time."""
         ts = clock.perf_counter()
         self.steps_limit = self.steps_done + steps
@@ -714,7 +714,7 @@ class Algorithm(object):
             print(f"collected data in {CM(f'{round(run_time, 2)}s', Fore.LIGHTCYAN_EX)}")
         return valid_keys, run_time
 
-    def _finish_epoch(self, evaluation_function: callable, epoch_done: int, epochs, verbose: int | None):
+    def _finish_epoch(self, evaluation_function: callable, epoch_done: int, epochs, verbose: bool | int):
         if self._report_hook is not None:
             self._report_hook(self)
 
@@ -727,7 +727,7 @@ class Algorithm(object):
                 evaluation_function, 1, verbose=verbose, skip=True, trainer=self, terminate_skip=True
             )
 
-    def _creep(self, valid_keys: list[int], best_key: int, sizes: dict[int, float], verbose: int | None = None):
+    def _creep(self, valid_keys: list[int], best_key: int, sizes: dict[int, float], verbose: bool | int = False):
         """Share of genomes that were also trained on last epoch (overall, as the best genome and as the largest)."""
         if self.prev_valid_keys is None:
             creep = creep_max = creep_best = np.nan
@@ -800,7 +800,7 @@ class Algorithm(object):
     def normalize_array(self, array: dict[int, Any], index: int = None, segr_size: int = None, 
                         ranking: dict[int, float] = None, genus_separated: bool = False, default: float = 1.):
         # TODO: Might want to convert genus separation to specie separation
-        verbose = False
+        verbose: bool | int = False
         full_norm_array = {key: default for key in array.keys()}
         # Filter by genera
         for genus in (self.population.genera if genus_separated else [-1]):

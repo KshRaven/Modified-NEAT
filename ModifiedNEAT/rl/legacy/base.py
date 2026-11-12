@@ -32,7 +32,7 @@ TensorDict = dict[int, Tensor]
 
 class TerminalReporter:
     """
-    Prints a bordered, column-aligned debug summary to the terminal. Column widths are derived from the
+    Prints a bordered, column-aligned verbose summary to the terminal. Column widths are derived from the
     labels/values actually passed in and from the terminal's own width, so algorithms no longer need to
     hand-pick (and keep in sync) padding widths for every field, which used to break across terminals
     with different tab sizes.
@@ -688,8 +688,8 @@ class Algorithm(object):
                     try:
                         input = [d[batch].unsqueeze(0).to(self.device) for d in inputs]
                     except IndexError as e:
-                        print(f"Debug shapes = {[t.shape for t in inputs]}")
-                        print(f"Debug batches = {[len(b) for b in batches]}")
+                        print(f"Diagnostic shapes = {[t.shape for t in inputs]}")
+                        print(f"Diagnostic batches = {[len(b) for b in batches]}")
                         raise e
                     try:
                         value = func(*input, keys=key).squeeze(0)
@@ -747,7 +747,7 @@ class Algorithm(object):
 
     def get_accuracy(
         self, batches: dict[int, list[list[int]]], observations: TensorDict, actions: TensorDict,
-        rewards: TensorDict = None, error: float = 0.10, type: str = 'continuous', verbose: int = None,
+        rewards: TensorDict = None, error: float = 0.10, type: str = 'continuous', verbose: bool | int = False,
         keys: Union[int, list[int]] = None, strict: bool = False
     ) -> tuple[dict[int, float], dict[int, float]]:
         if isinstance(keys, (int, float)):
@@ -827,7 +827,7 @@ class Algorithm(object):
     def normalize_array(self, array: dict[int, Any], index: int = None, segr_size: int = None, 
                         ranking: dict[int, float] = None, genus_separated: bool = False, default: float = 1.):
         # TODO: Might want to convert genus separation to specie separation
-        verbose = False
+        verbose: bool | int = False
         full_norm_array = {key: default for key in array.keys()}
         # Filter by genera
         for genus in (self.population.genera if genus_separated else [-1]):

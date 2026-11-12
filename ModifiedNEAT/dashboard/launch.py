@@ -40,7 +40,7 @@ def main():
         nargs='?',
         const=1,
         default=1,
-        help='Enable verbose logging (0=none, 1=basic, 2=debug). Use without argument for level 1.'
+        help='Enable verbose logging (0=none, 1=basic, 2=detailed). Use without argument for level 1.'
     )
     args, _ = parser.parse_known_args()
 

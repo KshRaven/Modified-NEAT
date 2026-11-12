@@ -133,7 +133,7 @@ def test_population_can_reproduce_multiple_genera_on_one_module():
     assert all(parameter.shape[0] == len(population.genomes) for parameter in module.neat_parameters())
 
     restored = Population(20, ReproductionModule(), config, genera=2, verbose=False)
-    restored.load(state_dict=population.state_dict(), strict=False, debug=False)
+    restored.load(state_dict=population.state_dict(), strict=False, verbose=False)
     assert restored.genera == population.genera
     assert restored.genus == population.genus
     assert all(len(mapping) == 10 for mapping in restored.get_mapping())

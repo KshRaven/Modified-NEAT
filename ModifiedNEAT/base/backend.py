@@ -61,7 +61,7 @@ class Backend(object):
         """args = (*mutation_arguments(...), probabilities, normals)"""
         raise NotImplementedError
 
-    def compute_distances(self, config, module, dtype, tpb: int, verbose: int = None) -> np.ndarray:
+    def compute_distances(self, config, module, dtype, tpb: int, verbose: bool | int = False) -> np.ndarray:
         """
         Genetic distance matrix (genomes x genomes) of the module's genomes as a host float array. Symmetric, with a
         zero diagonal.

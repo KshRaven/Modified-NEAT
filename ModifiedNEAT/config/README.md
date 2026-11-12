@@ -24,7 +24,7 @@ config = neat.Config(file_name="demo", directory="demo")
 config.general.pop_size = 120
 config.genome.weight_mutate_rate = 0.5
 config.genome.weight_mutate_power = 0.2
-config.save(debug=True)
+config.save(verbose=True)
 ```
 
 This stores the configuration as a JSON file under the storage directory for the selected experiment folder.

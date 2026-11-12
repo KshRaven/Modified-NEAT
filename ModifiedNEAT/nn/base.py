@@ -721,7 +721,7 @@ class NeatModule(nn.Module):
             module_instance: Existing module to populate (required if strict=True)
             strict: If True, require module_instance and validate parameter names/counts.
                    If False, load by position/shape only and auto-instantiate if needed.
-            debug: If True, print debug information
+            verbose: If True, print additional information
         
         Returns:
             Populated NeatModule instance
@@ -894,7 +894,7 @@ class NeatModule(nn.Module):
         return self
 
     def save(self, filename: str = None, directory: str = None, file_no: int = None, 
-             replace: bool = False, debug: bool = True) -> tuple[bool, int]:
+             replace: bool = False, verbose: bool | int = True) -> tuple[bool, int]:
         """Save NeatModule state and architecture to .module.pkl file.
         
         Instead of pickling the full object, saves state_dict, architecture metadata,
@@ -905,7 +905,7 @@ class NeatModule(nn.Module):
             directory: Directory to save to
             file_no: Specific file number (auto-finds latest if None)
             replace: If True, replace existing file instead of creating new numbered version
-            debug: If True, print debug messages
+            verbose: If True, print status messages
         
         Returns:
             Tuple of (success: bool, file_no: int)
@@ -920,15 +920,15 @@ class NeatModule(nn.Module):
                 directory=directory,
                 file_no=file_no,
                 replace=replace,
-                debug=debug
+                verbose=verbose
             )
         except Exception as e:
-            if debug:
+            if verbose:
                 print(f"Error saving NeatModule: {e}\n{traceback.format_exc()}")
             return False, file_no
 
     def load(self, filename: str = None, directory: str = None, file_no: int = None, 
-             strict: bool = True, debug: bool = True) -> 'NeatModule':
+             strict: bool = True, verbose: bool | int = True) -> 'NeatModule':
         """Load a NeatModule from a .module.pkl file.
         
         Loads state_dict and architecture metadata, reconstructing the module with
@@ -939,7 +939,7 @@ class NeatModule(nn.Module):
             directory: Directory to load from
             file_no: Specific file number to load (auto-finds latest if None)
             strict: If True, require exact module instance; if False, reconstruct from architecture
-            debug: If True, print debug messages
+            verbose: If True, print status messages
         
         Returns:
             Loaded NeatModule object with all parameters restored
@@ -956,7 +956,7 @@ class NeatModule(nn.Module):
                 filename=filename,
                 directory=directory,
                 file_no=file_no,
-                debug=debug
+                verbose=verbose
             )
             
             if data is None:
@@ -973,10 +973,10 @@ class NeatModule(nn.Module):
             return self.load_neat_dict(
                 serialized_dict,
                 strict=strict,
-                verbose=debug
+                verbose=verbose
             )
         except Exception as e:
-            if debug:
+            if verbose:
                 print(f"Error loading NeatModule: {e}\n{traceback.format_exc()}")
             raise 
 
@@ -1176,7 +1176,7 @@ class Model(NeatModule):
     def set_ditribution(self, distribution: str):
         self.distribution = distribution
 
-    def dist(self, mean: Tensor, std: Union[Tensor, None], latent: Tensor = None, verbose: int = None):
+    def dist(self, mean: Tensor, std: Union[Tensor, None], latent: Tensor = None, verbose: bool | int = False):
         mean, std = mean.float(), std.float() if std is not None else None
         def fill_std(std_dev: Tensor):
             if std_dev is not None:
@@ -1242,7 +1242,7 @@ class Model(NeatModule):
             try:
                 distribution = torch.distributions.MultivariateNormal(mean, cov_matrix)
             except ValueError as e:
-                if verbose is None or verbose < 2:
+                if verbose < 2:
                     raise e
                 else:
                     distribution = None

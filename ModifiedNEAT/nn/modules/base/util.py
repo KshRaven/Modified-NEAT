@@ -35,7 +35,7 @@ class color_fetch:
 get = color_fetch()
 
 
-def get_tensor_info(tensor: Tensor, label: str = None, verbose: int = None, color: Fore = None):
+def get_tensor_info(tensor: Tensor, label: str = None, verbose: bool | int = False, color: Fore = None):
     tensor = tensor.detach().clone().cpu().type(torch.float32)
     label = f"{CM(label, get() if not color else color)} => {tensor.shape}" if label is not None else ""
     stats = f"\n\tmean={tensor.mean()}, std={tensor.std()}, max={tensor.max()}, min={tensor.min()}\n" if verbose and verbose >= 3 else ""

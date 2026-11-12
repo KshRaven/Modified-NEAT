@@ -21,7 +21,7 @@ __all__ = [
 ]
 
 
-def initialize(config: Config, module: NeatModule, tpb=1, verbose: int = None):
+def initialize(config: Config, module: NeatModule, tpb=1, verbose: bool | int = False):
     return _initialization.initialize(BACKEND, config, module, tpb, verbose)
 
 
@@ -29,7 +29,7 @@ def reproduce(
         config: Config, genera: list[int], modules: dict[int, NeatModule], population: dict[int, Genome],
         ancestors: dict[int, tuple[Genome, Genome]], generation: int, to_delete: list[int], genome_indexer: int,
         stagnation: Stagnation, species_set: SpeciesSet, reporters: ReporterSet,
-        tpb=1, verbose: int = None):
+        tpb=1, verbose: bool | int = False):
     return _reproduction.reproduce(
         BACKEND, config, genera, modules, population, ancestors, generation, to_delete, genome_indexer,
         stagnation, species_set, reporters, tpb, verbose
@@ -38,7 +38,7 @@ def reproduce(
 
 def speciate(config: Config, genera: list[int], modules: dict[int, NeatModule],
              species_set: SpeciesSet, population: dict[int, Genome],
-             generation: int, tpb=10, verbose: int = None):
+             generation: int, tpb=10, verbose: bool | int = False):
     return _speciation.speciate(BACKEND, config, genera, modules, species_set, population, generation, tpb, verbose)
 
 

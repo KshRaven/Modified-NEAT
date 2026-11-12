@@ -17,7 +17,7 @@ class Sequential(NeatModule):
         self.modules_list = nn.ModuleList(modules)
         self.kwargs = kwargs
 
-    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: int = None):
+    def forward(self, tensor: Tensor, keys: Union[int, Iterable[int]] = None, verbose: bool | int = False):
         for m_idx, module in enumerate(self.modules_list):
             try:
                 # print(f"Module {m_idx} '{module.__class__.__name__}': input = {tensor.shape}")

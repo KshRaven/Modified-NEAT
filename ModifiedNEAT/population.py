@@ -75,7 +75,7 @@ class Population(object):
         self.group_up: bool = manage_params(options, 'group_up', True)
         self.threads_per_block = get_tpb()
 
-        # ------------------------------ Debugging ------------------------------ #
+        # ------------------------------ Reporting ------------------------------ #
         self.reporters = ReporterSet()
         if manage_params(options, ['init_reporter', 'init_rep'], True):
             self.add_reporter(StdOutReporter(True))
@@ -163,7 +163,7 @@ class Population(object):
 
         pass
 
-    def consolidate(self, module: NeatModule = None, verbose: int | bool = False) -> 'Population':
+    def consolidate(self, module: NeatModule = None, verbose: bool | int = False) -> 'Population':
         """Return an independent population with compatible genus modules packed into one module."""
         if not self.genomes:
             raise ValueError("Cannot consolidate an empty population")
@@ -309,7 +309,7 @@ class Population(object):
     def add_buffers(self, buffers: list[str]):
         self.buffers.add_buffers(buffers)
 
-    def _init_population_update(self, verbose: int = None):
+    def _init_population_update(self, verbose: bool | int = False):
         # Gather and report statistics.
         @njit
         def get_best_genomes(genomes: list[Genome], criteria: str, best_genome: Union[Genome, None]) -> Genome:
@@ -386,7 +386,7 @@ class Population(object):
             self.reporters.found_solution(self.config, self.generation, self.best_genome)
             return False
 
-    def _adv_population_update(self, verbose: int = None) -> None:
+    def _adv_population_update(self, verbose: bool | int = False) -> None:
         # Check for complete extinction.
         if not self.species_set.species:
             self.reporters.complete_extinction()
@@ -425,7 +425,7 @@ class Population(object):
 
         self.generation += 1
 
-    def run(self, fitness_function, generations: int = None, skip=False, verbose: int = None, **options):
+    def run(self, fitness_function, generations: int = None, skip=False, verbose: bool | int = False, **options):
         """
         Runs NEAT's genetic algorithm for at most n generations.  If n
         is None, run until solution is found or extinction occurs.
@@ -598,7 +598,7 @@ class Population(object):
         replace: bool = False,
         filepath: str | None = None,
         extra_files: Mapping[str, str | bytes | bytearray | PathLike[str]] = None,
-        debug: bool = True,
+        verbose: bool | int = True,
     ) -> tuple[bool, int]:
         if filepath is not None:
             target = Path(filepath)
@@ -647,15 +647,15 @@ class Population(object):
                 target = storage_directory / f'{filename or "population"}{suffix}.neat.pkl'
                 return save(
                     self.state_dict(), extension='.neat.pkl', items_name='NEAT Population',
-                    debug=debug, filepath=str(target)
+                    verbose=verbose, filepath=str(target)
                 )
             return save(
                 self.state_dict(), filename or 'population', directory, file_no, replace,
-                extension='.neat.pkl', items_name='NEAT Population', debug=debug, filepath=filepath
+                extension='.neat.pkl', items_name='NEAT Population', verbose=verbose, filepath=filepath
             )
 
         success, file_no = save(
-            self.state_dict(), extension='.neat.pkl', items_name='NEAT Population', debug=debug,
+            self.state_dict(), extension='.neat.pkl', items_name='NEAT Population', verbose=verbose,
             filepath=str(target)
         )
         if not success or not extra_files:
@@ -678,7 +678,7 @@ class Population(object):
                 else:
                     raise TypeError(f"Unsupported extra file content for {relative_path}: {type(content).__name__}")
         except Exception as error:
-            if debug:
+            if verbose:
                 print(f"Failed to write population extra files: {error}")
             return False, file_no
 
@@ -701,7 +701,7 @@ class Population(object):
         file_no: int = None,
         filepath: str = None,
         strict: bool = True,
-        verbose: int = None,
+        verbose: bool | int = False,
         load_config: bool = False,
     ):
         """
@@ -755,12 +755,12 @@ class Population(object):
                         filepath = str(bundled_file)
             if filepath is not None:
                 state_dict = load(
-                    extension='.neat.pkl', items_name='NEAT Population', debug=bool(verbose), filepath=filepath
+                    extension='.neat.pkl', items_name='NEAT Population', verbose=verbose, filepath=filepath
                 )
             else:
                 state_dict = load(
                     filename, directory, file_no=file_no, extension='.neat.pkl',
-                    items_name='NEAT Population', debug=bool(verbose)
+                    items_name='NEAT Population', verbose=verbose
                 )
             if state_dict is None:
                 return None
@@ -788,10 +788,10 @@ class Population(object):
             genome = load_genome(gs)
             self.genomes[genome.key] = genome
             ud += 1
-            eta(ts, ud, ut, f'loading {len(genomes_data)}')
+            if verbose >= 2: eta(ts, ud, ut, f'loading {len(genomes_data)}')
         self.reproduction.genome_indexer.set(state_dict['genome_indexer'])
         if verbose:
-            print(f"\rloaded genomes in {round(clock.perf_counter() - ts, 2)}s")
+            if verbose >= 2: print(f"\rLoaded Genomes in {round(clock.perf_counter() - ts, 2)}s{' ' * 20}")
         # ------------------------------ Modules' Params and Architecture ------------------------------ #
         module_state_dicts = state_dict['module_state_dicts']
         saved_module_groups = state_dict.get(
@@ -856,10 +856,10 @@ class Population(object):
             specie = load_species(self.genomes, ss)
             self.species_set.species[specie.key] = specie
             ud += 1
-            eta(ts, ud, ut, 'loading species')
+            if verbose >= 2: eta(ts, ud, ut, 'loading species')
         self.species_set.species_indexer.set(state_dict['species_indexer'])
-        if verbose:
-            print(f"\rloaded species in {round(clock.perf_counter() - ts, 2)}s")
+        if verbose >= 2:
+            print(f"\rloaded species in {round(clock.perf_counter() - ts, 2)}s{' ' * 20}")
             print(f"Loaded NEAT Population species in {round(clock.perf_counter() - gts, 2)}s")
 
         speciate(
@@ -869,7 +869,7 @@ class Population(object):
 
     def load_dict(
         self, save_state: dict = None, name: str = None, directory: str = None, file_no: int = None,
-        strict: bool = True, verbose: int = None, load_config: bool = False
+        strict: bool = True, verbose: bool | int = False, load_config: bool = False
     ):
         return self._load_state_dict(
             state_dict=save_state, filename=name, directory=directory, file_no=file_no,
@@ -955,7 +955,7 @@ class Population(object):
         directory: str = None,
         file_no: int = None,
         replace: bool = False,
-        debug: bool = True,
+        verbose: bool | int = True,
         filepath: str | None = None,
         extra_files: Mapping[str, str | bytes | bytearray | PathLike[str]] = None,
     ) -> tuple[bool, int]:
@@ -967,7 +967,7 @@ class Population(object):
         """
         return self._save_state_dict(
             filename=filename, directory=directory, file_no=file_no, replace=replace,
-            filepath=filepath, extra_files=extra_files, debug=debug
+            filepath=filepath, extra_files=extra_files, verbose=verbose
         )
 
     def load(
@@ -976,7 +976,7 @@ class Population(object):
         directory: str = None,
         file_no: int = None,
         strict: bool = True,
-        debug: bool = True,
+        verbose: bool | int = True,
         filepath: str | None = None,
         state_dict: dict[str, Any] = None,
         load_config: bool = False,
@@ -990,9 +990,9 @@ class Population(object):
             filename = None
         self._load_state_dict(
             state_dict=state_dict, filename=filename, directory=directory, file_no=file_no,
-            filepath=filepath, strict=strict, verbose=debug, load_config=load_config
+            filepath=filepath, strict=strict, verbose=verbose, load_config=load_config
         )
-        if debug:
+        if verbose:
             print(f"Successfully loaded Population with {len(self.genomes)} genomes and "
                   f"{len(self.species_set.species)} species")
         return self

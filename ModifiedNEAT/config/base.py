@@ -22,7 +22,7 @@ class Configuration:
         return False
 
     def create(self, path: str, **ex):
-        debug = manage_params(ex, 'debug', True)
+        verbose: bool | int = manage_params(ex, 'verbose', True)
         variables = {attr: val for attr, val in vars(self).items() if attr[0] != '_'}
         
         try:
@@ -42,7 +42,7 @@ class Configuration:
             with open(path, 'w') as file:
                 json.dump(data, file, indent=2)
             
-            if debug:
+            if verbose:
                 name, extension = os.path.splitext(os.path.basename(path))
                 print(f"Created configuration '{CM(self._name.upper(), Fore.LIGHTCYAN_EX)}' "
                       f"in NEAT Configuration {CM(f'{name}{extension}', Fore.LIGHTMAGENTA_EX)}")
@@ -52,7 +52,7 @@ class Configuration:
         return False
 
     def update(self, path: str, **ex):
-        verbose = manage_params(ex, 'verbose', None)
+        verbose: bool | int = manage_params(ex, 'verbose', False)
         variables = {attr: val for attr, val in vars(self).items() if attr[0] != '_'}
         
         try:
@@ -83,7 +83,7 @@ class Configuration:
         :keyword verbose:
         :return:
         """
-        verbose: Union[int, None] = manage_params(ex, 'verbose', None)
+        verbose: bool | int = manage_params(ex, 'verbose', False)
         try:
             with open(path, 'r') as file:
                 data = json.load(file)

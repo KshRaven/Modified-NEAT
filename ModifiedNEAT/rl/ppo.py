@@ -244,7 +244,7 @@ class PPO(Algorithm):
         return best_genome_key, global_fitness_stats
 
     def learn(self, evaluation_function: callable, steps: int, epochs: int = None, batch_size: int = None,
-              accuracy_error=0.10, accuracy_type='continuous', verbose: int = None,
+              accuracy_error=0.10, accuracy_type='continuous', verbose: bool | int = False,
               batching: str | None = None, record_batch_size: int | None = None):
         """
         Runs the full evolution loop: collect rollout data, rank genomes by return and policy loss, log
@@ -257,7 +257,7 @@ class PPO(Algorithm):
         :param batch_size: Records per batch when genomes are processed one by one (``batching='genome'``).
         :param accuracy_error: Relative error tolerance used when computing (logging-only) policy accuracy.
         :param accuracy_type: Accuracy comparison mode; one of ``'continuous'``, ``'binary'``, ``'discrete'``.
-        :param verbose: Verbosity level; ``0``/``None`` is silent, ``1`` prints the summary each epoch, ``2`` also prints timings.
+        :param verbose: Verbosity level; ``False``/``0`` is silent, ``True``/``1`` prints the summary each epoch, ``2`` also prints timings.
         :param batching: ``'genome'``: all genomes one by one with their own batches of ``batch_size`` records.
             ``'record'``: all genomes of a genus at once, ``record_batch_size`` records per batch (smaller values
             use less memory with many genomes). Defaults to the trainer's setting (``'genome'``).

@@ -349,7 +349,7 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
 def update_children(
         backend: Backend, config: Config, genus: int, modules: dict[int, NeatModule],
         old_population: dict[int, Genome], new_population: dict[int, Genome],
-        ancestors: dict[int, tuple[Genome, Genome]], tpb=1, seed: int = None, verbose: int = None
+        ancestors: dict[int, tuple[Genome, Genome]], tpb=1, seed: int = None, verbose: bool | int = False
 ):
     xp = backend.xp
     for m in modules[genus].neat_modules():
@@ -514,7 +514,7 @@ def reproduce(
         config: Config, genera: list[int], modules: dict[int, NeatModule], population: dict[int, Genome],
         ancestors: dict[int, tuple[Genome, Genome]], generation: int, to_delete: list[int], genome_indexer: int,
         stagnation: Stagnation, species_set: SpeciesSet, reporters: ReporterSet,
-        tpb=1, verbose: int = None):
+        tpb=1, verbose: bool | int = False):
     seeding.configure(config.general.seed)
     assert all([module.genus in genera for module in modules.values()])
     # Filter out stagnated species, collect the set of non-stagnated

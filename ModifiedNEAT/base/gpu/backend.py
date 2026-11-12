@@ -60,7 +60,7 @@ class GpuBackend(Backend):
     def mutate(self, updates, children, *args, kernel_shape):
         _mutate_kernel[*kernel_shape](updates, children, *args)
 
-    def compute_distances(self, config, module, dtype, tpb, verbose=None):
+    def compute_distances(self, config, module, dtype, tpb, verbose: bool | int = False):
         return _compute_distances(config, module, dtype, tpb, verbose)
 
 

@@ -91,7 +91,7 @@ def get_distance(parameter: CPUArray, total_distance: CPUArray,
     return ret_code
 
 
-def compute_distances(config: Config, module: NeatModule, dtype, tpb: int = 10, verbose: int = None) -> np.ndarray:
+def compute_distances(config: Config, module: NeatModule, dtype, tpb: int = 10, verbose: bool | int = False) -> np.ndarray:
     """Genetic distance matrix of the module's genomes (symmetric, zero diagonal), summed over all parameters."""
     total_distance = np.zeros((module.genome_num, module.genome_num), dtype)
 
