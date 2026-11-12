@@ -19,7 +19,7 @@ def _crossover(value1: float, value2: float, states: GPUArray, index: int):
         return value2
 
 
-@cuda.jit() # debug=True, opt=False)
+@cuda.jit(cache=True) # debug=True, opt=False)
 def crossover(genus: int, source: GPUArray, updates: GPUArray, parents: GPUArray, genera: GPUArray, filled: GPUArray,
               probabilities: GPUArray, equal_sources: bool):
     genome_idx, x, y = cuda.grid(3)

@@ -17,6 +17,8 @@ PROJ_DIR = os.path.dirname(os.path.dirname(EXMP_DIR))
 print(f"Example path = {EXMP_DIR}")
 if EXMP_DIR not in sys.path: sys.path.insert(0, EXMP_DIR)
 if PROJ_DIR not in sys.path: sys.path.insert(0, PROJ_DIR)
+EXMP_ROOT = os.path.dirname(EXMP_DIR)   # examples/ (holds the shared 'misc' extensions)
+if EXMP_ROOT not in sys.path: sys.path.insert(0, EXMP_ROOT)
 
 import ModifiedNEAT as neat
 import ModifiedNEAT.nn as mn
@@ -28,6 +30,7 @@ from ModifiedNEAT.util.qol import manage_params
 from ModifiedNEAT.nn.modules.reporting import differential_attention_logger
 
 from game import Game
+from misc import NoiseRegPPO
 
 warnings.filterwarnings("ignore", category=NumbaPerformanceWarning)
 torch.set_printoptions(threshold=10)
@@ -302,24 +305,24 @@ PIPE_Y_VELOCITY     = 3
 FULL_STATES         = True
 DELAY               = 0
 DISCRETE            = False
-LIVES               = 15 
+LIVES               = 10
 # NOTE: For more difficult.complex models like configurations higher than (dim_size=64,
 #       max_seq_len=4, layers=2, differential=1, coefficients=1, norm=False) then you'd
 #       need lives >= 5 so that the genomes have enough time to collect rollout that
 #       would allow you get genomes that don't just learn to constantly end themselves
 
 # Model properties
-GENOMES             = 100
+GENOMES             = 50
 MAX_SEQ_LEN         = 32
 SEQ_LEN             = MAX_SEQ_LEN // 1
 SEQ_LEN_TRAIN       = min(max(1, 1), SEQ_LEN)
 SEQ_LEN_EVAL        = min(max(SEQ_LEN, 1), SEQ_LEN)
 INPUTS              = None   # set in run() from ENV.observation_space
 OUTPUTS             = None   # set in run() from ENV.action_space
-EMBED_SIZE          = 32
+EMBED_SIZE          = 64
 COEFFICIENTS        = 1
 LAYERS              = 1
-HEADS               = 1
+HEADS               = 2
 KV_HEADS            = None
 FWD_EXP             = 1
 DIFFERENTIAL        = 2
@@ -335,8 +338,8 @@ SWIGLU              = False
 CLIP_MIN            = -13
 CLIP_MAX            = +0
 DISTRIBUTION        = 'normal' if not DISCRETE else 'discrete'
-MODEL_NUM           = 2
-GENERA              = 1   # >1: ONE model shared by this many genera (Population(genera=N), GENOMES per genus); 1: MODEL_NUM separate models
+MODEL_NUM           = 1
+GENERA              = 4   # >1: ONE model shared by this many genera (Population(genera=N), GENOMES per genus); 1: MODEL_NUM separate models
 if GENERA > 1: MODEL_NUM = 1
 SHARED              = GENERA > 1
 CACHE               = True
@@ -345,17 +348,17 @@ CACHE               = True
 MEMORY_SIZE         = 5
 GAMMA               = fix(np.exp(np.log(0.01) / 256), 0.0)
 KAPPA               = 0.0 # fix(np.exp(np.log(0.01) / 128), 0.0)
-ALPHA               = fix(np.exp(np.log(1.25) / (MEMORY_SIZE - 1)), 1.0)
+ALPHA               = fix(np.exp(np.log(1.15) / (MEMORY_SIZE - 1)), 1.0)
 ALPHA_ORDER         = 0
-REW_NORM            = 4
+REW_NORM            = 3
 REW_REG             = 1.00
 LOSS_REG            = 0.00
 VAL_REG             = 0.00
 POL_REG             = 0.98 if (PROBABILISTIC or (CACHE and not SHARE_KV)) else 0.0   # SHARE_KV: parity is exact, no regularizer
 ENT_REG             = 0.00
 DIV_REG             = 0.00
-NOISE_REG           = 0.25   # fitness weight of low measured attention noise (0 = no pressure)
-NOISE_SIGMA         = 0.10   # probe: relative input perturbation
+NOISE_REG           = 0.0 # 0.90   # fitness weight of low measured attention noise (0 = no pressure)
+NOISE_SIGMA         = 0.0 # 0.15   # probe: relative input perturbation
 NOISE_LOG           = True   # measure + log noise even when NOISE_REG == 0 (baseline comparison)
 CPY_REG             = 0.00
 
@@ -431,7 +434,7 @@ CONFIG.genome.weight_init_mean              = 0.0
 CONFIG.genome.weight_init_std               = 1.0 * MULTIPLIER
 CONFIG.genome.weight_min_value              = -np.inf
 CONFIG.genome.weight_max_value              = +np.inf
-CONFIG.genome.weight_mutate_power           = 0.25 * MULTIPLIER
+CONFIG.genome.weight_mutate_power           = 0.50 * MULTIPLIER
 CONFIG.genome.weight_mutate_rate            = 0.60
 CONFIG.genome.weight_replace_rate           = 0.00
 CONFIG.genome.weight_add_prob               = 0.00
@@ -442,13 +445,13 @@ CONFIG.reproduction.min_species_size        = GENOMES
 CONFIG.reproduction.purge                   = 1
 CONFIG.reproduction.elitism                 = 0.33
 CONFIG.reproduction.clone_threshold         = 0.50
-CONFIG.reproduction.survival_threshold      = 0.20
+CONFIG.reproduction.survival_threshold      = 0.10
 CONFIG.reproduction.cross_threshold         = 0.00
 CONFIG.species.compatibility_threshold      = np.inf
 CONFIG.stagnation.max_stagnation            = 1
 CONFIG.stagnation.species_elitism           = 2
-CONFIG.reproduction.darwin_multiplier       = 0.15 # 0.33
-CONFIG.reproduction.cross_multiplier        = 0.75
+CONFIG.reproduction.darwin_multiplier       = 0.20 # 0.33
+CONFIG.reproduction.cross_multiplier        = 0.80
 CONFIG.reproduction.preserve_elite          = False
 CONFIG.save()
 CONFIG.load(verbose=2)
@@ -727,12 +730,12 @@ def run(argv: list[str] | None = None, test: bool = True):
 
     if str_to_bool(args.train):
         print(f"Calculated hyperparameters: gamma={GAMMA:.4f}, kappa={KAPPA:.4f}, alpha={ALPHA:.4f}")
-        trainer = neat.rl.PPO(
+        trainer = NoiseRegPPO(
             POPULATION,
             schedulers=[
-                scheduler.CosineAnnealing(CONFIG, 20, 0.10, ['weight_mutate_power', 'weight_init_std'], True, True),
-                # scheduler.BinaryAnnealing(CONFIG, 20, 0.10, 'cross_threshold'),
-                *([scheduler.BinaryAnnealing(CONFIG, 5, 0.99, 'pol_reg')] if POL_REG > 0 else []),   # a scheduler would re-enable pol_reg
+                scheduler.CosineAnnealing(CONFIG, 20, 0.25, ['weight_mutate_power', 'weight_init_std'], True, True),
+                scheduler.BinaryAnnealing(CONFIG, 20, 0.10, 'cross_threshold'),
+                # *([scheduler.BinaryAnnealing(CONFIG, 5, 0.99, 'pol_reg')] if POL_REG > 0 else []),   # a scheduler would re-enable pol_reg
                 # scheduler.CosineAnnealing(CONFIG, 15, 0.67, 'loss_reg', True, True, phase=0),
                 # scheduler.CosineAnnealing(CONFIG, 15, 0.50, 'pol_reg', True, True, phase=0),
                 # scheduler.CosineAnnealing(CONFIG, 15, 0.75, 'ent_reg', True, True, phase=0),
@@ -748,7 +751,8 @@ def run(argv: list[str] | None = None, test: bool = True):
                      f"mem{MEMORY_SIZE}-delay{DELAY}-type{int(DISCRETE)}-gt{GAME_TYPE}",
             gamma=GAMMA, alpha=ALPHA, kappa=KAPPA, order=ALPHA_ORDER, normalize=REW_NORM,
             rew_reg=REW_REG, loss_reg=LOSS_REG, val_reg=VAL_REG, pol_reg=POL_REG, ent_reg=ENT_REG,
-            div_reg=DIV_REG, cpy_reg=CPY_REG, noise_reg=NOISE_REG, noise_sigma=NOISE_SIGMA, noise_log=NOISE_LOG,
+            div_reg=DIV_REG, cpy_reg=CPY_REG,
+            noise_reg=NOISE_REG, noise_sigma=NOISE_SIGMA, noise_log=NOISE_LOG,   # examples/misc/noise_reg.py
             validate=True, segr_size=None, use_entropy=True, use_critic=False,
             max_episodes=MEMORY_SIZE, max_steps=None,
         )
@@ -756,6 +760,7 @@ def run(argv: list[str] | None = None, test: bool = True):
         for name, value in vars(trainer).items():
             if "_reg" in name and isinstance(value, (int, float)):
                 print(f"\t{name} => {value:.4f}")
+        print(f"\tnoise_reg => {trainer.noise_reg:.4f}")
         trainer.set_report_hook(genome_debug)
         if (DIFFERENTIAL or NOISE_REG > 0 or NOISE_LOG) and differential_attention_logger is not None:
             # Compact stats (leak, beta, fitness correlation); charts are grouped in Tensorboard > Custom Scalars
@@ -764,10 +769,10 @@ def run(argv: list[str] | None = None, test: bool = True):
         print(f"starting evaluation: population={len(POPULATION.genomes)}")
         try:
             trainer.learn(
-                evaluate, STEPS, EPOCHS,
+                evaluate, 1024, EPOCHS,
                 accuracy_error=0.1,
                 accuracy_type='binary' if not DISCRETE else 'discrete',
-                verbose=3,
+                verbose=True,
                 batching='genome', record_batch_size=64, batch_size=2048, # NOTE: Reduce/Change if GPU/CPU memory cannot hold
             )
         except KeyboardInterrupt:

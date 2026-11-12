@@ -35,7 +35,7 @@ def update_distances_cache(backend: Backend, config: Config, module: NeatModule,
     backend.release()
 
 
-@njit(nogil=True)
+@njit(nogil=True, cache=True)
 # NOTE: _get_representatives/_get_species/_update_collection below are left as
 #       nogil rather than parallel=True: unlike crossover()/mutate()/_execute()/
 #       get_distance(), these mutate shared dicts (representatives, members,
@@ -80,7 +80,7 @@ def _get_representatives(species_dict: dict[int, Species], population: dict[int,
         unspeciated.remove(new_rid)
 
 
-@njit(nogil=True)
+@njit(nogil=True, cache=True)
 def _get_species(available_key: int, population: dict[int, Genome], unspeciated: list[int],
                  representatives: dict[int, int], members: dict[int, list[int]],
                  distance_cache: GenomeDistanceCache, ct: float):
@@ -132,7 +132,7 @@ def _get_species(available_key: int, population: dict[int, Genome], unspeciated:
     return key
 
 
-@njit(nogil=True)
+@njit(nogil=True, cache=True)
 def _update_collection(genus: int, population: dict[int, Genome], species: dict[int, Species],
                        genome_to_species: dict[int, int], representatives: dict[int, int],
                        members: dict[int, list[int]], generation: int):

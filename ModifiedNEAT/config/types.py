@@ -67,6 +67,7 @@ class ReproductionConfig(Configuration):
         self.cross_threshold    = 0.00
         self.cross_multiplier   = 0.80
         self.darwin_multiplier  = 0.20
+        self.enforce_species    = True   # first parent must come from the species being filled; only the 2nd may be foreign
         self.min_species_size   = 100
         self.purge              = 0
         self.preserve_elite     = False

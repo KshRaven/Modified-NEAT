@@ -1,12 +1,26 @@
 # TODO
 
-- Run the flappy-bird example with `NOISE_LOG=True, NOISE_REG=0` for the baseline noise level, then `NOISE_REG=0.25`; compare `diff_attn/m*/noise_*`.
-- Attention noise probe measures sensitivity of the maps to input noise; consider a task-grounded variant (mass on tokens that do not change the action).
-- `share_kv` gives exact cache/full-sequence parity but older tokens are never contextualised by later layers; evaluate whether a banded (streaming) variant with full-history evaluation is worth it.
-- ConvSelfAttention / ConvCrossAttention do not have diff_mode / branch_mode / noise probe yet.
-- Examples other than flappy-bird/sequential.py are not wired to the new options.
-- With `SHARE_KV=True` the policy-accuracy pass is skipped (`POL_REG=0`); run it once with `pol_reg>0` as a parity audit (policy_accuracy should stay at 1.0 up to float error).
-- Attention folds extra dims into one batch axis, so a KV cache needs the same extra dims on every call (a change re-initialises it). ConvSelfAttention / ConvCrossAttention still expect their original layout.
-- Notebook: the rendered `test_best_network` is skipped (needs a window); add a headless replay (frames to a GIF) if wanted.
-- Public GitHub copy is behind the working tree (runlytics logger, `GENERA` support); push the tree or use `modified-neat-sync.zip` via `PATCH_ZIP`.
-- `GENERA > 1` in `main.py` calls the shared model once per genus with explicit keys; `sequential.py` makes one call for all genera (needed by the KV cache).
+## Population and Reproduction
+
+- Support reproduction when genera have unequal numbers of `NeatModule` instances or incompatible `NeatParameters` shapes (`ModifiedNEAT/base/reproduction.py`).
+- Implement `Population.reset_keys()` and define how genome, species, and genus identifiers are remapped (`ModifiedNEAT/population.py`).
+- Make cross-genus parent-selection weighting configurable instead of relying on the current fixed multiplier (`ModifiedNEAT/base/reproduction.py`).
+
+## Reinforcement Learning
+
+- Add save/load support for current RL algorithms, including the state needed to resume training (`ModifiedNEAT/rl/base.py`, `ModifiedNEAT/rl/neat.py`, `ModifiedNEAT/rl/ppo.py`).
+- Implement the CUDA RL backend or document and test the supported CPU fallback behavior (`ModifiedNEAT/rl/functional.py`).
+- Review whether RL score normalization should separate genomes by species rather than genus (`ModifiedNEAT/rl/base.py`).
+
+## Neural Modules
+
+- Bring `ConvSelfAttention` and `ConvCrossAttention` up to feature parity for differential/branch modes and attention-probe hooks (`ModifiedNEAT/nn/modules/sub.py`).
+- Complete `ConvCrossAttention` and add tests for its supported input layouts (`ModifiedNEAT/nn/modules/sub.py`).
+- Support dimensional stride and dilation in convolution and pooling modules (`ModifiedNEAT/nn/modules/base/convolution.py`, `ModifiedNEAT/nn/modules/base/pooling.py`).
+- Add running-statistics variants of batch normalization and adaptive average pooling (`ModifiedNEAT/nn/modules/base/normalization.py`, `ModifiedNEAT/nn/modules/base/pooling.py`).
+
+## Installation and Tests
+
+- Extend `install_cuda.py` with platform- and device-aware GPU setup/preflight checks for Windows and Linux, including NVIDIA/CUDA compatibility and graceful handling of AMD, Intel, and systems without a supported GPU.
+- Organize and mark the test suite by package area and execution requirements so CPU, GPU, integration, and optional-dependency tests can be run selectively.
+- Synchronize the published repository copy with the current package API and dependencies.

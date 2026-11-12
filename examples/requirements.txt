@@ -6,13 +6,14 @@ numpy
 numba
 torch
 matplotlib
+ModifiedNEAT
 runlytics
 
 # # Optional GPU/CUDA dependencies
 # cuda-python
 # cuda-toolkit
 # numba-cuda[cu13]
-# cupy-cuda13x
+# cupy-cuda13x # cupy
 
 # Environment dependencies
 gymnasium

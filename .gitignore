@@ -49,4 +49,5 @@ node_modules/
 
 # Archives and local command output
 *.zip
-commit.txt
+*commit.txt
+*.diff

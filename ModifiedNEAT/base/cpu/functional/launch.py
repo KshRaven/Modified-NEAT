@@ -3,7 +3,7 @@ from numba import njit
 from numpy import ndarray as CPUArray
 
 
-@njit
+@njit(cache=True)
 def get_enumeration(array: CPUArray):
     positions: list[tuple[int, ...]] = [index for index, value in np.ndenumerate(array)]
     count = len(positions)

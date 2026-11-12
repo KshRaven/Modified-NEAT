@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import warnings
-from contextlib import nullcontext
 from typing import Iterable, Union
 
 import numpy as np
@@ -102,14 +101,6 @@ class NEAT(Algorithm):
         self.rew_reg: float     = manage_params(options, 'rew_reg', 1.0)
         self.pol_reg: float     = manage_params(options, 'pol_reg', 0.0)
         self.std_reg: float     = manage_params(options, 'std_reg', 0.2)
-        # Attention-noise pressure (works for plain and differential attention alike, no backprop needed):
-        #   noise_reg   weight of (1 - normalized attention noise) in the fitness; 0 = off (default)
-        #   noise_sigma relative input perturbation of the probe (see Attention.set_noise_probe)
-        #   noise_log   measure + keep ``attention_noise`` for logging even when noise_reg == 0 (baseline comparisons)
-        self.noise_reg: float   = manage_params(options, 'noise_reg', 0.0)
-        self.noise_sigma: float = manage_params(options, 'noise_sigma', 0.1)
-        self.noise_log: bool    = manage_params(options, 'noise_log', False)
-        self.attention_noise: dict[int, float] = {}
         self.div_reg: float     = manage_params(options, 'div_reg', 0.1)
         self.validate: bool     = manage_params(options, 'validate', False)
         self.segr_size: Union[float, None] = manage_params(options, 'segr_size', None)
@@ -224,7 +215,7 @@ class NEAT(Algorithm):
         return dict(sorted(scores.items(), key=lambda item: (item[1], -item[0]), reverse=True))
 
     def set_scores(self, scores: dict[int, float], policy: dict[int, float] | None, stdev: dict[int, float] | None,
-                   reduction: dict[int, float] | None = None, noise: dict[int, float] | None = None):
+                   reduction: dict[int, float] | None = None):
         """
         Normalizes and combines the score components into a final fitness per genome, then assigns it.
 
@@ -232,7 +223,6 @@ class NEAT(Algorithm):
         :param policy: Per-genome policy accuracy; required when ``pol_reg > 0``.
         :param stdev: Per-genome normalized policy stddev; required when ``pol_reg > 0``.
         :param reduction: (Ghost only) Per-genome normalized ghost reduction; required when Ghost is active.
-        :param noise: Per-genome attention noise (lower is better); used when ``noise_reg > 0``.
         :return: Tuple of (best genome's key, global (min, max, mean, std) fitness stats).
         """
         def sort_key(item: tuple[int, float]):
@@ -246,11 +236,9 @@ class NEAT(Algorithm):
 
         # Only run the weighted aggregation when there is more than the plain reward score to combine; this
         # keeps the un-regularized default behaviour (rew_reg is otherwise applied as a no-op multiplier).
-        use_noise = self.noise_reg > 0. and bool(noise)
-        if use_noise:   # genomes the probe did not reach get the mean noise (neutral)
-            fill = float(np.mean(list(noise.values())))
-            noise = {k: noise.get(k, fill) for k in keys}
-        if self.pol_reg > 0. or self.ghosts is not None or use_noise:
+        # Custom terms registered with add_score_term (e.g. from examples/misc) are folded in like the built-in ones
+        extra_local, extra_global, extra_weight = self.custom_scores(keys)
+        if self.pol_reg > 0. or self.ghosts is not None or bool(extra_local):
             local_components  = [(scores, self.rew_reg)]
             global_components = [(global_scores, self.rew_reg)]
 
@@ -270,11 +258,8 @@ class NEAT(Algorithm):
                 local_components  += [(policy, self.pol_reg), (stdev, self.std_reg)]
                 global_components += [(global_policy, self.pol_reg), (global_stdev, self.std_reg)]
 
-            if use_noise:
-                local_components.append(
-                    ({k: 1 - v for k, v in self.normalize_array(noise, genus_separated=True).items()}, self.noise_reg))
-                global_components.append(
-                    ({k: 1 - v for k, v in self.normalize_array(noise).items()}, self.noise_reg))
+            local_components  += extra_local
+            global_components += extra_global
 
             scores = self._aggr_scores(keys, *zip(*local_components))
             global_scores = self._aggr_scores(keys, *zip(*global_components))
@@ -288,7 +273,7 @@ class NEAT(Algorithm):
         score_max += abs(score_max)
         if score_min == 0.: score_min = -score_max
         if score_max == 0.: score_max = -score_min
-        reg_sum = self.rew_reg + self.pol_reg + (self.std_reg if self.pol_reg != 0 else 0) + (self.cpy_reg if self.ghosts is not None else 0) + (self.noise_reg if use_noise else 0)
+        reg_sum = self.rew_reg + self.pol_reg + (self.std_reg if self.pol_reg != 0 else 0) + (self.cpy_reg if self.ghosts is not None else 0) + extra_weight
         for genome in self.population.genomes.values():
             if genome.key in available_keys:
                 genome.fitness = scores[genome.key]
@@ -363,14 +348,10 @@ class NEAT(Algorithm):
 
             # Model passes (one pass per method over every record, reduced per episode afterwards)
             ep_accuracy = np.ones_like(ep_returns)
-            measure_noise = self.noise_reg > 0 or self.noise_log
-            if self.pol_reg != 0 or measure_noise:
-                # one full-sequence pass serves both the policy accuracy and the attention-noise probe
-                with (self.noise_probe(valid_keys) if measure_noise else nullcontext()):
-                    policy = self.forward_pass('get_policy', ['state'], valid_keys, strict=True)[0]
-                if self.pol_reg != 0:
-                    accuracy = self.ops.accuracy(policy, prim.data['action'], lengths, rows, accuracy_error, accuracy_type)
-                    ep_accuracy = self.ops.segment_mean(accuracy, runs, rows)
+            if self.pol_reg != 0:
+                policy = self.forward_pass('get_policy', ['state'], valid_keys, strict=True)[0]
+                accuracy = self.ops.accuracy(policy, prim.data['action'], lengths, rows, accuracy_error, accuracy_type)
+                ep_accuracy = self.ops.segment_mean(accuracy, runs, rows)
             std_out = self.forward_pass('get_std', ['state'], valid_keys)
             ep_stdev = (
                 self.episode_means(std_out[0], lengths, rows, runs) if std_out is not None else np.zeros_like(ep_returns)
@@ -437,7 +418,7 @@ class NEAT(Algorithm):
             std_dev = self.as_dict(sm + self.div_reg * s_s, valid_keys, srows)
             std_dev_norm = {k: 1 - v for k, v in self.normalize_array(std_dev, genus_separated=True, **std_default).items()}
             assert all(0 <= v <= 1 for v in std_dev_norm.values())
-            best_genome_key, fitness_stats = self.set_scores(scores, policy_accuracy, std_dev_norm, red_dev_norm, self.attention_noise if self.noise_reg > 0 else None)
+            best_genome_key, fitness_stats = self.set_scores(scores, policy_accuracy, std_dev_norm, red_dev_norm)
             ts = self._tick(verbose, "set scores", ts)
 
             # Post Calculations

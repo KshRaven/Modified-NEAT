@@ -332,7 +332,13 @@ def _accuracy_kernel(pred, target, lengths, rows, err, mode, width):
 
 @njit(**_JIT)
 def _ppo_terms(new_lp, old_lp, adv, ent, lengths, rows, width):
-    """Per record: mean(ratio * mean(adv)), mean((p_new - p_old)^2), mean(entropy)."""
+    """Per record: mean(ratio * mean(adv)), mean((logp_new - logp_old)^2), mean(entropy).
+
+    The policy-consistency term uses the LOG-probability difference, not the difference of the probabilities: with a
+    tiny std the density is ~e^(-log std) per action dimension (and the log-probs of several bits are summed), so
+    (p_new - p_old)^2 reaches e^(2 * that) and overflows to inf. The log difference is scale free, 0 = identical
+    policy, and is clamped to +-1e3 (NaN -> 1e3) so one broken genome is penalised instead of crashing the run.
+    """
     G, cap, A = new_lp.shape
     Fa = adv.shape[2]
     Fe = ent.shape[2]
@@ -354,7 +360,14 @@ def _ppo_terms(new_lp, old_lp, adv, ent, lengths, rows, width):
             n = float(new_lp[g, t, a])
             o = float(old_lp[g, t, a])
             s1 += np.exp(n - o) * am
-            s2 += (np.exp(n) - np.exp(o)) ** 2
+            d = n - o
+            if d != d:
+                d = 1.0e3
+            elif d > 1.0e3:
+                d = 1.0e3
+            elif d < -1.0e3:
+                d = -1.0e3
+            s2 += d * d
         o_ppo[g, t] = s1 / A
         o_sq[g, t] = s2 / A
         e = 0.0

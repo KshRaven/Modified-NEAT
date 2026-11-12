@@ -19,7 +19,7 @@ def get_rng_states(kernel_shape: tuple, seed: int = None, get_normal=True, dtype
     return rng_states, total
 
 
-@njit
+@njit(cache=True)
 def gauss(states: CPUArray, index: int) -> float:
     """
     Get the value at a given index for a Normal Distribution CPU Array
@@ -30,7 +30,7 @@ def gauss(states: CPUArray, index: int) -> float:
     return states[index]
 
 
-@njit
+@njit(cache=True)
 def prob(states: CPUArray, index: int) -> float:
     """
     Get the value at a given index for a Probability (Uniform[0, 1]) CPU Array
@@ -41,12 +41,12 @@ def prob(states: CPUArray, index: int) -> float:
     return states[index]
 
 
-@njit
+@njit(cache=True)
 def normal(states: CPUArray, index: int, mean: float, std: float) -> float:
     return mean + gauss(states, index) * std
 
 
-@njit
+@njit(cache=True)
 def uniform(states: CPUArray, index: int, minimum: float, maximum: float) -> float:
     difference = maximum - minimum
     return minimum + prob(states, index) * difference

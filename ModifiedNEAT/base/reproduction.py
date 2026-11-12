@@ -42,7 +42,7 @@ GENOME   = Genome.class_type.instance_type
 GENOME_LIST = types.ListType(GENOME)
 
 
-@njit(parallel=True) # , cache=True)
+@njit(parallel=True, cache=True)
 def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_size: int, min_species_size: int,
                   purge: int, generation: int):
     """Compute the proper number of offspring per species (proportional to fitness)."""
@@ -90,9 +90,9 @@ def compute_spawn(adjusted_fitness: list[float], previous_sizes: list[int], pop_
     return spawn_amounts
 
 
-@njit
+@njit(cache=True)
 def select_parents(pool_fitness, pool_foreign, pool_keys, spawn, clone_cutoff, coeff_cross, coeff_fitness,
-                   first_parents, second_parents):
+                   enforce_species, first_parents, second_parents):
     """
     NOTE: runs serially on purpose. Numba has its own per-thread RNG state (not the numpy one), so a ``prange`` would
     make the draws depend on thread scheduling. ``create_children`` seeds the numba RNG once per call from the
@@ -123,7 +123,11 @@ def select_parents(pool_fitness, pool_foreign, pool_keys, spawn, clone_cutoff, c
 
     for s in range(spawn):
         probabilities = np.random.rand(size)
-        best = np.argmax(probabilities + base)
+        if enforce_species:
+            # Foreign genomes can never be the first parent: the child's weights always derive from the current species
+            best = np.argmax(probabilities + base - pool_foreign * 1e18)
+        else:
+            best = np.argmax(probabilities + base)
         first_parents[s] = best
         if s < clone_cutoff:
             second_parents[s] = best
@@ -140,11 +144,11 @@ def select_parents(pool_fitness, pool_foreign, pool_keys, spawn, clone_cutoff, c
             second_parents[s] = np.argmax(full)
 
 
-@njit(nogil=True)
+@njit(nogil=True, cache=True)
 def create_children(genus: int, genus_population: dict[int, Genome], population: dict[int, Genome], species: dict[int, Species],
                     available_gid: int, spawn_amounts: list[int], remaining_species: list[Species], to_delete: list[int],
                     elitism: float, survival_threshold: float, clone_threshold: float, cross_threshold: float,
-                    cross_multiplier: float, darwin_multiplier: float,
+                    cross_multiplier: float, darwin_multiplier: float, enforce_species: bool,
                     criteria: str, ancestors: dict[int, tuple[Genome, Genome]], equal_params: bool, preserve: bool,
                     rng_seed: int):
     np.random.seed(rng_seed)  # Numba's own RNG state; does not touch the Python-level numpy global state
@@ -320,11 +324,12 @@ def create_children(genus: int, genus_population: dict[int, Genome], population:
             pool_keys[pi]    = pg.key
         first_parents  = np.zeros(spawn, np.int64)
         second_parents = np.zeros(spawn, np.int64)
+        # NOTE: enforce_species=True restricts parent 1 to the current species; parent 2 may still be foreign (if cross_threshold > 0).
         # NOTE: Previously, at least one genome has to be from the same genus in order to preserve genus integrity.
         # Now you can fill current genus with foreign ones with hopes that they get filtered out by fitness if they do not perform
         select_parents(
             pool_fitness, pool_foreign, pool_keys, spawn, clone_cutoff, cross_multiplier, darwin_multiplier,
-            first_parents, second_parents
+            enforce_species, first_parents, second_parents
         )
         for spawn_index in range(spawn):
             # Cloning when parent2 == parent1, interbreeding or crossbreeding otherwise
@@ -582,6 +587,7 @@ def reproduce(
             to_delete, config.reproduction.elitism,
             config.reproduction.survival_threshold, config.reproduction.clone_threshold, config.reproduction.cross_threshold,
             config.reproduction.cross_multiplier, config.reproduction.darwin_multiplier,
+            config.reproduction.enforce_species,
             config.general.fitness_criterion, ancestors, False, config.reproduction.preserve_elite,
             seeding.numba_seed()
         )

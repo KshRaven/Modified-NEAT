@@ -57,7 +57,7 @@ def calc_distance(parameter: GPUArray, total_distance: GPUArray, match_counter: 
         cuda.atomic.add(match_counter, (genome0, genome1), 1)
 
 
-@cuda.jit
+@cuda.jit(cache=True)
 def get_distance(parameter: GPUArray, total_distance: GPUArray, match_counter: GPUArray,
                  compatibility_weight_coefficient: float, compatibility_disjoint_coefficient: float):
     # select one genome

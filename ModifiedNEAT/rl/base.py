@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections import defaultdict
-from contextlib import contextmanager
+from contextlib import ExitStack
 from itertools import count
 from typing import Any, Callable, Iterable, Union
 
@@ -158,6 +157,8 @@ class Algorithm(object):
         self._report_hook: Callable = None
         self._log_sources: dict[str, tuple[Callable | dict, bool]] = {}
         self._pending_logs: dict[str, dict[str, Any]] = {}
+        self._pass_hooks: list[Callable] = []
+        self._score_terms: dict[str, dict[str, Any]] = {}
         self.prev_valid_keys: list[int] = None
         # ------------------------------ Scheduling ------------------------------ #
         # Last step on purpose: subclasses define their tunable attributes BEFORE calling super().__init__,
@@ -234,6 +235,71 @@ class Algorithm(object):
         within one epoch overwrite earlier ones.
         """
         self._pending_logs.setdefault(section, {}).update(scalars)
+
+    # ============================================================================================== #
+    #                                   Extension hooks (custom scores)                              #
+    # ============================================================================================== #
+    def add_pass_hook(self, hook: Callable[['Algorithm', str, list[int]], Any]):
+        """
+        Registers ``hook(trainer, method, keys)`` that is called at the start of every ``forward_pass``. It may return a
+        context manager (entered for the duration of that pass) or None. Use it to measure extra quantities (e.g.
+        attention noise) during the algorithm's own passes instead of editing the algorithm.
+        """
+        self._pass_hooks.append(hook)
+
+    def remove_pass_hook(self, hook: Callable):
+        if hook in self._pass_hooks:
+            self._pass_hooks.remove(hook)
+
+    def add_score_term(self, name: str, source: Callable[['Algorithm', list[int]], dict[int, float]] | dict[int, float],
+                       weight: float = 1.0, higher_is_better: bool = True):
+        """
+        Adds a custom regularization to the fitness, normalized like the built-in terms (per genus for the fitness, over
+        everything for the reported best genome). Works with every algorithm that calls ``custom_scores``.
+
+        :param name: Unique name of the term.
+        :param source: ``fn(trainer, keys) -> {genome key: value}`` evaluated once per update, or a dict read each update.
+            Genomes missing from the result get the mean value (neutral).
+        :param weight: Fitness weight of the normalized term; 0 disables it. Change later with ``set_score_weight``.
+        :param higher_is_better: False for penalties (the normalized value is inverted).
+        """
+        self._score_terms[name] = dict(source=source, weight=float(weight), higher=higher_is_better)
+
+    def set_score_weight(self, name: str, weight: float):
+        self._score_terms[name]['weight'] = float(weight)
+
+    def remove_score_term(self, name: str):
+        self._score_terms.pop(name, None)
+
+    def custom_scores(self, keys: Iterable[int]) -> tuple[list[tuple[dict, float]], list[tuple[dict, float]], float]:
+        """
+        Evaluates every active custom score term for ``keys``.
+
+        :return: ``(local_components, global_components, weight_sum)`` where each component is ``(normalized dict, weight)``;
+            local ones are normalized per genus (used for genome fitness), global ones over all genomes.
+        """
+        keys = list(keys)
+        local, glob, total = [], [], 0.0
+        for name, term in self._score_terms.items():
+            weight = term['weight']
+            if weight == 0.:
+                continue
+            src = term['source']
+            try:
+                values = dict(src(self, keys) if callable(src) else src)
+            except Exception as e:
+                warnings.warn(category=NEATAlgoWarning, message=f"Score term '{name}' failed: {e!r}")
+                continue
+            values = {k: float(v) for k, v in values.items() if k in set(keys) and np.isfinite(v)}
+            if not values:
+                continue
+            fill = float(np.mean(list(values.values())))
+            values = {k: values.get(k, fill) for k in keys}
+            sign = (lambda d: d) if term['higher'] else (lambda d: {k: 1 - v for k, v in d.items()})
+            local.append((sign(self.normalize_array(values, genus_separated=True)), weight))
+            glob.append((sign(self.normalize_array(values)), weight))
+            total += weight
+        return local, glob, total
 
     def log_now(self, step: int | None = None, **sections: dict[str, Any]):
         """Writes sections to the dashboard immediately (``step`` defaults to the number of updates done)."""
@@ -455,36 +521,21 @@ class Algorithm(object):
             result = (result,)
         return [self._to_numpy(r) for r in result]
 
-    @contextmanager
-    def noise_probe(self, keys: Iterable[int]):
+    def forward_pass(self, method: str, inputs: list[str | np.ndarray], keys: Iterable[int], *args, **kwargs):
         """
-        Context manager: every full-sequence Attention pass inside it also measures how much its attention maps move under
-        a small input perturbation (``noise_sigma``). On exit ``self.attention_noise`` = {genome key: mean noise over layers
-        and records}. Cheap: the extra work is one attention forward per probed layer and only inside the block.
+        Runs a Model method over every stored record of the given genomes (see ``_forward_pass`` for the arguments).
+        Every hook added with ``add_pass_hook`` wraps the whole pass, so extensions can measure things during the
+        algorithm's own forward passes without touching the algorithm.
         """
-        from ModifiedNEAT.nn.modules.sub import Attention   # lazy: rl does not otherwise depend on the modules
-        acc: dict[int, list[float]] = defaultdict(list)
-        attns: list = []
-        for module, _ in self._module_groups(keys):
-            order = sorted(module.mapping, key=module.mapping.get)
+        keys = list(keys)
+        with ExitStack() as stack:
+            for hook in self._pass_hooks:
+                ctx = hook(self, method, keys)
+                if ctx is not None:
+                    stack.enter_context(ctx)
+            return self._forward_pass(method, inputs, keys, *args, **kwargs)
 
-            def sink(k, v, n, _order=order):
-                ks = _order if k is None else ([int(k)] if isinstance(k, (int, np.integer)) else [int(x) for x in k])
-                for key, val in zip(ks, v.cpu().numpy().tolist()):
-                    acc[key].append(val)
-
-            for attn in module.modules():
-                if isinstance(attn, Attention):
-                    attn.set_noise_probe(self.noise_sigma, sink)
-                    attns.append(attn)
-        try:
-            yield acc
-        finally:
-            for attn in attns:
-                attn.set_noise_probe(0.0)
-            self.attention_noise = {k: float(np.mean(v)) for k, v in acc.items() if v}
-
-    def forward_pass(
+    def _forward_pass(
             self, method: str, inputs: list[str | np.ndarray], keys: Iterable[int], lengths: np.ndarray = None,
             batching: str | None = None, batch_size: int | None = None, record_batch_size: int | None = None,
             strict: bool = False,

@@ -35,7 +35,7 @@ def initialize_genome(parameter: GPUArray, g: int, x: int, y: int, init_type: in
         raise NotImplementedError('Yet to be implemented for params with more than 3 dims')
 
 
-@cuda.jit
+@cuda.jit(cache=True)
 def _execute(parameter: GPUArray, init_type: int, mean: float, std: float, minimum: float, maximum: float, rng_states):
     genome_idx, x, y = cuda.grid(3)
     # Parameter shape (genomes, *spatial_dims)

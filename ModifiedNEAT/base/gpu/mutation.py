@@ -70,7 +70,7 @@ def mutate_genome(parameter: GPUArray, g: int, x: int, y: int, mutate_rate: floa
         )
 
 
-@cuda.jit
+@cuda.jit(cache=True)
 def mutate(
         updates: GPUArray, children: GPUArray,
         mutate_rate: float, mutate_power: float,

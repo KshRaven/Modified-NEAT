@@ -990,7 +990,7 @@ class Population(object):
             filename = None
         self._load_state_dict(
             state_dict=state_dict, filename=filename, directory=directory, file_no=file_no,
-            filepath=filepath, strict=strict, verbose=2 if debug else 0, load_config=load_config
+            filepath=filepath, strict=strict, verbose=debug, load_config=load_config
         )
         if debug:
             print(f"Successfully loaded Population with {len(self.genomes)} genomes and "

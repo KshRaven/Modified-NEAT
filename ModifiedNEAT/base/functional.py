@@ -53,6 +53,6 @@ def threads_total(kernel_shape: tuple) -> int:
     return int(np.prod([np.prod(v) for v in kernel_shape]))
 
 
-@njit
+@njit(cache=True)
 def clamp(value: float, minimum: float, maximum: float):
     return min(max(value, minimum), maximum)
